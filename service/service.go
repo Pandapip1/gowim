@@ -13,20 +13,29 @@
 // wim) the sibling driver package needs purely to parse driver packages, not
 // to define what a Windows service registration looks like in the registry.
 //
-// The values Install writes (Type/Start/ErrorControl/ImagePath/Group/
-// DependOnGroup/DependOnService) and the Type/Start/ErrorControl constants
-// below are cross-checked against the official Win32 CreateService function
-// documentation on Microsoft Learn - see Install's and the constants' doc
-// comments for the precise citations - as of 2026-07-10.
+// The values Install/Modify write (Type/Start/ErrorControl/ImagePath/Group/
+// DisplayName/Description/ObjectName/DependOnGroup/DependOnService) and the
+// Type/Start/ErrorControl constants below are cross-checked against the
+// official Win32 CreateServiceW/ChangeServiceConfigW/ChangeServiceConfig2W
+// function documentation on Microsoft Learn - see Install's, Service's, and
+// the constants' doc comments for the precise citations - as of 2026-07-10.
+//
+// Beyond Install, this package can also read an existing Services\<name>
+// registration back into a Service (Read), update one that must already
+// exist (Modify), remove one entirely (Delete), and change just its start
+// type (SetStartType/Enable/Disable) - all of these, like Install, only
+// read/write a caller-supplied *regf.Key tree; none of them talk to a live
+// service control manager (see the non-goals below).
 //
 // It deliberately does NOT implement:
 //
 //   - Any live SCM API semantics: starting, stopping, querying, or otherwise
 //     controlling a running service (what CreateService/OpenService/
 //     StartService/ControlService/QueryServiceStatus etc. do against a live
-//     service control manager). This package only reads/writes the on-disk
-//     registry shape those APIs are documented to persist; it never talks to
-//     a running SCM.
+//     service control manager). This package - including Read/Modify/
+//     Delete/SetStartType/Enable/Disable, not just Install - only reads/
+//     writes the on-disk registry shape those APIs are documented to
+//     persist; it never talks to a running SCM.
 //   - The SYSTEM hive's DriverDatabase key tree, the Enum device-instance
 //     tree, or INFCACHE.1 - none of these are a "service" concept at all;
 //     see the sibling driver package's README
@@ -37,18 +46,52 @@
 //     generic "service" concept, and stays entirely in the sibling driver
 //     package (see driver/criticaldevicedatabase.go).
 //   - Registry-hive file I/O (deciding which hive file to open, backing it
-//     up, replacing it): Install only produces/merges regf.Key/regf.Value
-//     structures given an already-loaded (or freshly-built) *regf.Key tree;
-//     the caller handles file I/O, exactly as regf itself does not read/
-//     write files directly.
+//     up, replacing it): this package only produces/merges/reads
+//     regf.Key/regf.Value structures given an already-loaded (or
+//     freshly-built) *regf.Key tree; the caller handles file I/O, exactly as
+//     regf itself does not read/write files directly.
 //   - Resolving *where a service's binary comes from*: an INF's
 //     "%dirid%\path" token (see the driver package's DirID/ServiceInstall),
 //     a plain absolute path, or anything else. That resolution is entirely
 //     the caller's job - this package only writes an already-resolved
 //     Service.ImagePath string into the registry.
+//   - Recovery/failure-action configuration: ChangeServiceConfig2's
+//     SERVICE_CONFIG_FAILURE_ACTIONS info level and the registry's
+//     FailureActions (REG_BINARY) value, plus the related
+//     FailureActionsOnNonCrashFailures/RebootMessage values. This was
+//     actually checked, not assumed: the SERVICE_FAILURE_ACTIONSW structure
+//     docs
+//     (https://learn.microsoft.com/windows/win32/api/winsvc/ns-winsvc-service_failure_actionsw)
+//     document the in-memory C struct that ChangeServiceConfig2/
+//     QueryServiceConfig2 marshal to/from, but no authoritative Microsoft
+//     source documents the actual on-disk byte layout of the FailureActions
+//     REG_BINARY registry value itself (as distinct from that API-facing
+//     struct shape); third-party notes such as the winreg-kb project's
+//     "Services and drivers" page
+//     (https://winreg-kb.readthedocs.io/en/latest/sources/system-keys/Services-and-drivers.html)
+//     list FailureActions among the value names present under a service key
+//     but document no format for it, confirming the gap rather than filling
+//     it. This package therefore does not implement encoding/decoding
+//     FailureActions, mirroring the sibling driver package's
+//     DriverStore-hash and DriverDatabase non-goals: an undocumented
+//     on-disk format is not something this package will guess at.
+//   - The service account's *password*: LSA secrets in the SECURITY hive -
+//     a separate, far more sensitive encrypted-blob mechanism, not a plain
+//     Services\<name> registry value - are entirely out of scope; see
+//     Service.ObjectName's doc comment.
 package service
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrNotFound is returned (wrapped, so callers should use errors.Is) by
+// Read, Modify, Delete, SetStartType, Enable, and Disable when the named
+// service does not have an existing Services\<name> subkey to operate on -
+// deliberately a hard failure rather than a silent no-op, since a
+// typo'd/missing service name should surface immediately.
+var ErrNotFound = errors.New("service not found")
 
 // Service is a fully-resolved Windows service registration: every field a
 // caller would pass to CreateService's dwServiceType/dwStartType/
@@ -83,6 +126,41 @@ type Service struct {
 	// Group is the load ordering group this service belongs to (
 	// CreateService's lpLoadOrderGroup parameter), or "" for none.
 	Group string
+	// DisplayName is the friendly name applications and the Services
+	// snap-in show for this service (CreateService's/ChangeServiceConfig's
+	// lpDisplayName parameter, and hence the DisplayName registry value) -
+	// see "ChangeServiceConfigW function (winsvc.h)",
+	// https://learn.microsoft.com/windows/win32/api/winsvc/nf-winsvc-changeserviceconfigw,
+	// the "[in, optional] lpDisplayName" section: "The display name to be
+	// used by applications to identify the service for its users." "" means
+	// not written / cleared on update, exactly like Group.
+	DisplayName string
+	// Description is the service's descriptive comment shown by the
+	// Services snap-in (ChangeServiceConfig2's SERVICE_CONFIG_DESCRIPTION
+	// info level / the SERVICE_DESCRIPTIONW structure's lpDescription
+	// member, and hence the Description registry value) - written as
+	// REG_SZ, per that structure's own documented size limit: "The service
+	// description must not exceed the size of a registry value of type
+	// REG_SZ." See "SERVICE_DESCRIPTIONW (winsvc.h)",
+	// https://learn.microsoft.com/windows/win32/api/winsvc/ns-winsvc-service_descriptionw.
+	// "" means not written / cleared on update.
+	Description string
+	// ObjectName is the "Log On As" account name under which the service
+	// runs (CreateService's/ChangeServiceConfig's lpServiceStartName
+	// parameter, and hence the ObjectName registry value) - e.g.
+	// "LocalSystem", `NT AUTHORITY\LocalService`, or `.\someuser`. See
+	// "ChangeServiceConfigW function (winsvc.h)",
+	// https://learn.microsoft.com/windows/win32/api/winsvc/nf-winsvc-changeserviceconfigw,
+	// the "[in, optional] lpServiceStartName" section. "" means not written
+	// / cleared on update, exactly like Group/DisplayName/Description.
+	//
+	// ObjectName is JUST the account name string. The account's *password*
+	// (what ChangeServiceConfig's lpPassword parameter sets) is stored via
+	// LSA secrets in the SECURITY hive - a completely separate, far more
+	// sensitive on-disk mechanism (per-secret encrypted blobs, not a plain
+	// registry value under Services\<name>) that this package does NOT
+	// implement; see the package doc's non-goals.
+	ObjectName string
 	// DependOnGroup lists the load-order-group names this service depends on
 	// (the group-name entries of CreateService's lpDependencies parameter,
 	// conventionally prefixed with SC_GROUP_IDENTIFIER on the wire - see

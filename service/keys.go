@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/binary"
+	"fmt"
 	"strings"
 
 	"github.com/Pandapip1/gowim/regf"
@@ -16,6 +17,20 @@ func FindSubkey(key *regf.Key, name string) *regf.Key {
 		}
 	}
 	return nil
+}
+
+// RemoveSubkey deletes key's direct child subkey named name (matching
+// Windows' case-insensitive registry namespace), reporting whether a subkey
+// was actually removed - the subkey-side counterpart of RemoveValue, and
+// what Delete uses to remove a Services\<name> subkey wholesale.
+func RemoveSubkey(key *regf.Key, name string) bool {
+	for i, k := range key.Subkeys {
+		if strings.EqualFold(k.NameUTF8(), name) {
+			key.Subkeys = append(key.Subkeys[:i], key.Subkeys[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // FindOrCreateSubkey returns the direct child of key named name, creating it
@@ -88,4 +103,53 @@ func multiSZBytes(strs []string) []byte {
 	}
 	out = append(out, 0, 0)
 	return out
+}
+
+// setOrRemoveSZ sets key's REG_SZ value named name to value if value is
+// non-empty, or removes it if value is "" - the shared "optional string
+// field" pattern Install originally used only for Group, now reused for
+// Group/DisplayName/Description/ObjectName by both Install and Modify (see
+// writeServiceValues in install.go).
+func setOrRemoveSZ(key *regf.Key, name, value string) {
+	if value != "" {
+		SetValue(key, name, regf.RegSZ, stringToUTF16LE(value))
+	} else {
+		RemoveValue(key, name)
+	}
+}
+
+// readDWORD decodes key's REG_DWORD value named name, erroring if the value
+// is absent or is not exactly 4 bytes - the reverse of uint32LEBytes, used
+// by Read to decode Type/Start/ErrorControl.
+func readDWORD(key *regf.Key, name string) (uint32, error) {
+	v := FindValue(key, name)
+	if v == nil {
+		return 0, fmt.Errorf("no %s value", name)
+	}
+	if len(v.Data) != 4 {
+		return 0, fmt.Errorf("%s value has %d bytes, want 4 (REG_DWORD)", name, len(v.Data))
+	}
+	return binary.LittleEndian.Uint32(v.Data), nil
+}
+
+// readSZ decodes key's (REG_SZ or REG_EXPAND_SZ) value named name as a
+// UTF-16LE string, returning "" if the value is absent - the reverse of
+// setOrRemoveSZ/stringToUTF16LE.
+func readSZ(key *regf.Key, name string) string {
+	v := FindValue(key, name)
+	if v == nil {
+		return ""
+	}
+	return utf16LEToString(v.Data)
+}
+
+// readMultiSZ decodes key's REG_MULTI_SZ value named name into its component
+// strings, returning nil if the value is absent - the reverse of
+// multiSZBytes.
+func readMultiSZ(key *regf.Key, name string) []string {
+	v := FindValue(key, name)
+	if v == nil {
+		return nil
+	}
+	return multiSZToStrings(v.Data)
 }
