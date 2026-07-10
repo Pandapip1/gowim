@@ -71,11 +71,76 @@ supplies one blob-table entry with `RefCount` reflecting all the images that
 reference it; the writer places its content once).
 
 Out of scope, matching the rest of this package: solid resources (the writer
-never emits `ResFlagSolid`), an integrity table (`Header.IntegrityTable` is
-always left zero/absent), and multi-part/split WIMs (`PartNumber`/
+never emits `ResFlagSolid`) and multi-part/split WIMs (`PartNumber`/
 `TotalParts` are always written as 1/1). Filesystem capture/apply remains out
 of scope too. See `writer.go`'s doc comments and `writer_test.go` for the
 full verification story.
+
+**An integrity table can be computed and appended**, mirroring DISM's
+`/CheckIntegrity`: set `WriteOptions.ComputeIntegrityTable` and `WriteTo`/
+`Assemble` compute one in the same single pass as everything else (not a
+separate post-process re-read of the output file) and set
+`Header.IntegrityTable` accordingly. The exact byte range and chunking this
+covers were confirmed empirically (2026-07-10) against two real WIMs with
+integrity tables (a Windows 11 23H2 `boot.wim` and `install.esd`, both
+showing "Integrity info" in `wimlib-imagex info`'s Attributes): by reading
+each file's real `IntegrityTable` with this package's own `Reader` and
+independently recomputing SHA-1 hashes over several candidate byte-range
+hypotheses, only one matched exactly -- `[HeaderSize, offset of the blob
+table + size of the blob table)`, i.e. from byte 208 through the end of the
+blob table resource, **excluding** the XML data and the integrity table
+itself, even though the integrity table is physically appended to the file
+*after* the XML data. This is corroborated by wimlib's own source
+(`src/integrity.c`'s `calculate_integrity_table`/`write_integrity_table` and
+`src/write.c`'s `finish_write`), which computes the table over exactly
+`[WIM_HEADER_DISK_SIZE, new_blob_table_end)`. See `integrity_write.go`'s doc
+comment for the full evidence and `IntegrityTable`'s (in `integrity.go`)
+updated doc comment for `ParseIntegrityTable`'s `numCheckedBytes`. A
+convenience read-side check, `Reader.VerifyIntegrity`, recomputes and
+compares against a WIM's stored table using this same convention; it returns
+`ErrNoIntegrityTable` if the WIM has none.
+
+**Exporting a subset of a WIM's images into a new, standalone file is
+directly supported** via `ExportImage`/`ExportImageAssemble`, mirroring
+DISM's `/Export-Image`. Given a source `*Reader` plus its already-parsed
+`*BlobTable`/`*XMLData` and a list of 1-based source image indices (in the
+order they should appear in the output; more than one is supported, not just
+the single-image case DISM is usually invoked for), `ExportImage`:
+
+- Reads each selected image's metadata resource via
+  `srcBlobTable.MetadataResources()[index-1]` (source image index *i*'s
+  metadata resource is entry *i-1* of that slice -- the same
+  order-correspondence convention `WriteTo` itself establishes when writing
+  images, confirmed self-consistently by this package's own writer/reader
+  round-trip tests; real multi-image WIMs to cross-check against externally
+  were not available in this environment, since the local sample
+  `boot.wim`/`install.esd` each contain only one image).
+- Walks each selected image's entire directory-entry tree (all descendants,
+  all streams, unnamed and named/alternate alike) and counts blob references
+  *across only the images being exported* -- not the source file's original,
+  possibly wider-scope `RefCount`s -- building a fresh `*BlobTable` containing
+  only the hashes actually used, with correct `RefCount`s and `PartNumber: 1`.
+- Builds new `XMLData` containing only the selected images' `<IMAGE>`
+  elements, renumbered sequentially from `INDEX="1"`, preserving each
+  element's full original inner content verbatim via the
+  `encoding/xml` `innerxml`-struct-tag technique (so real detail like
+  `<WINDOWS><EDITIONID>` survives, not just the fields `XMLImage` models).
+  Any `<WIM>`-level-only content beyond the `<IMAGE>` elements themselves is
+  dropped (not preserved or recomputed) -- in practice, real WIM XML data has
+  none, but the format doesn't forbid it.
+- Streams every referenced blob's content lazily straight out of the source
+  WIM via `NewReaderBlobSource` (a small, general-purpose `BlobSource`
+  adapter over a `Reader`+`BlobTable`, independently useful beyond
+  `ExportImage`), then calls `WriteTo`/`Assemble` with the caller's
+  `WriteOptions` -- which may specify a different `CompressionType`/
+  `ChunkSize` than the source used, transparently supporting recompression,
+  since `WriteTo` always re-encodes every blob's raw bytes regardless of how
+  the source stored them.
+
+`Reader.ReadResource` is the small exported wrapper (over the previously
+unexported decoding logic `Reader` already used internally) that
+`NewReaderBlobSource` is built on, for callers that want to decompress an
+arbitrary resource given its header directly.
 
 The path-based tree operations have their own explicit scope boundaries:
 `DirEntry.Add` takes a `Hash`, not raw content bytes - getting those bytes into
@@ -106,7 +171,9 @@ Everything lives in a single package, `wim`, one file per format concern:
 | `decompress.go` | `DecodeResourceData`, codec dispatch for decoding |
 | `compress.go` | `EncodeResourceData`, codec dispatch for encoding |
 | `writer.go` | `WriteTo`/`Assemble`: full multi-image WIM assembly, `BlobSource`/`MapBlobSource`, `WriteOptions` |
-| `reader.go` | `Reader` over `io.ReaderAt` |
+| `integrity_write.go` | integrity-table computation for `WriteTo` (`integrityAccumulator`), `Reader.VerifyIntegrity` |
+| `reader.go` | `Reader` over `io.ReaderAt`, incl. `Reader.ReadResource` |
+| `export.go` | `NewReaderBlobSource`, `ExportImage`/`ExportImageAssemble` |
 | `path.go` | `ErrNotFound`, `DirEntry.Child`, `DirEntry.Lookup` |
 | `read.go` | `Reader.ReadFile` |
 | `tree.go` | `DirEntry.Add` |
@@ -119,6 +186,8 @@ Everything lives in a single package, `wim`, one file per format concern:
 | `testdata_test.go`, `testdata/*.bin` | real, multi-chunk compressed resource fixtures (LZX from a real Windows 11 boot.wim, XPRESS/LZMS from fresh `wimlib-imagex capture` output) for hermetic ground-truth decode tests |
 | `write_test.go` | hand-assembles a full minimal, single-image WIM using `EncodeResourceData` plus this package's own serialization primitives directly (the from-scratch reference `writer.go`'s `WriteTo` generalizes), then reads it back with `Reader` |
 | `writer_test.go` | multi-image, deduplicated-blob, all-compression-type (plus uncompressed) tests of `WriteTo`/`Assemble`, read back with `Reader` |
+| `integrity_write_test.go` | builds a WIM with `ComputeIntegrityTable` set, independently recomputes every stored hash directly over the raw output bytes, confirms `Reader.VerifyIntegrity` agrees and correctly rejects corruption inside (but not outside) the checked range, and confirms no integrity table is written by default |
+| `export_test.go` | `ExportImage`/`ExportImageAssemble`: single-image and multi-image-with-reordering exports off a hand-built 3-image WIM with a blob shared between two of the images, confirming only the exported images/blobs survive, `RefCount`s reflect only the exported images' usage, XML per-image content (including a `<WINDOWS><EDITIONID>` beyond `XMLImage`'s modeled fields) survives renumbering, and recompression to a different `CompressionType` during export |
 
 ## Usage
 
@@ -214,6 +283,54 @@ directly to an `*os.File` (or any `io.WriteSeeker`) over `Assemble`, and
 implement `BlobSource` to stream each blob's bytes from wherever they
 actually live, rather than holding every blob's content in memory at once.
 
+Adding an integrity table (DISM's `/CheckIntegrity`) to any of the above is
+just one more `WriteOptions` field:
+
+```go
+out, err := wim.Assemble(images, bt, xml, blobs, wim.WriteOptions{
+    CompressionType:       wim.HdrFlagCompressLZX,
+    ChunkSize:             32768,
+    ComputeIntegrityTable: true, // computed in the same pass, no extra re-read
+})
+```
+
+Exporting a subset of an existing WIM's images into a new file (DISM's
+`/Export-Image`), optionally recompressing:
+
+```go
+f, _ := os.Open("install.wim")
+defer f.Close()
+fi, _ := f.Stat()
+r, err := wim.NewReader(f, fi.Size())
+if err != nil {
+    log.Fatal(err)
+}
+bt, err := r.BlobTable()
+if err != nil {
+    log.Fatal(err)
+}
+xmlData, err := r.XMLData()
+if err != nil {
+    log.Fatal(err)
+}
+
+out, err := os.Create("exported.wim")
+if err != nil {
+    log.Fatal(err)
+}
+defer out.Close()
+
+// Export source image 3 alone, recompressing from the source's compression
+// to XPRESS.
+_, err = wim.ExportImage(r, bt, xmlData, []int{3}, out, wim.WriteOptions{
+    CompressionType: wim.HdrFlagCompressXPRESS,
+    ChunkSize:       32768,
+})
+if err != nil {
+    log.Fatal(err)
+}
+```
+
 ## Tests
 
 ```
@@ -292,6 +409,36 @@ cover:
   conventions exactly. As with the single-image verification above, this
   external-tool check is not re-run at `go test` time; it is recorded here as
   a one-time result.
+
+- **`ExportImage` verified against real file content and `wimlib-imagex`**
+  (2026-07-10): a small (well under 1 MB total), hand-built 2-image WIM was
+  assembled (LZX, mirroring `boot.wim`'s real compression) from a handful of
+  real files pulled out of a mounted Windows 11 23H2 install image
+  (`appcompat.xsl`, ~11 KB; `arunimg.dll`, ~150 KB, spanning multiple 32 KiB
+  chunks; `bcd.dll`, ~150 KB, shared between both images; `acres.dll`,
+  ~345 KB), with a distinctive `<DESCRIPTION>`/`<NAME>` per image. Image 1 was
+  then exported via `ExportImage` with `ComputeIntegrityTable` set and
+  recompressed from LZX to XPRESS. The result:
+  - `wimlib-imagex info` reported `Image Count: 1`, `Compression: XPRESS`,
+    `Attributes: Integrity info`, and the correct `Name`/`Description` for
+    the exported image under `Boot Index: 1`.
+  - `wimlib-imagex extract --to-stdout` for each of `appcompat.xsl`,
+    `arunimg.dll`, and `bcd.dll` was byte-for-byte identical to the original
+    files on disk.
+  - `wimlib-imagex verify` reported the file "successfully verified" (an
+    independent, external confirmation that the computed integrity table is
+    correct, on top of this package's own `Reader.VerifyIntegrity`).
+  - This package's own `Reader` confirmed `bcd.dll` (shared by both source
+    images, but only one of them exported) has `RefCount == 1` in the
+    exported blob table, not the source's 2.
+
+  A full-scale run against the entire real `boot.wim` (multi-gigabyte,
+  ~21,000 files) was deliberately not attempted for this verification: this
+  package's LZX/XPRESS/LZMS codecs are simple, unoptimized pure-Go
+  implementations not tuned for multi-GB throughput, and a small real-file
+  sample proves the same recompression/export correctness far faster. As
+  with the other external-tool checks above, this is recorded as a one-time
+  result, not re-run at `go test` time.
 
 ## License
 

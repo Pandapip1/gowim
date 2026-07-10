@@ -58,6 +58,17 @@ type WriteOptions struct {
 	// GUID is stored in the header. If it is the zero GUID, a random one is
 	// generated.
 	GUID GUID
+	// ComputeIntegrityTable, if true, makes WriteTo compute and append an
+	// integrity table (SHA-1 digests of fixed-size chunks of the file) and
+	// set Header.IntegrityTable accordingly, mirroring DISM/wimlib's
+	// /CheckIntegrity. See IntegrityChunkSize below and the doc comment on
+	// integrityAccumulator (integrity_write.go) for the exact, empirically
+	// confirmed byte range this covers.
+	ComputeIntegrityTable bool
+	// IntegrityChunkSize is the chunk size used when ComputeIntegrityTable is
+	// set. Zero uses the package constant IntegrityChunkSize (10 MiB),
+	// matching wimlib's default. Ignored when ComputeIntegrityTable is false.
+	IntegrityChunkSize uint32
 }
 
 // WriteTo assembles a complete, valid, standalone (single-part, non-solid, no
@@ -107,10 +118,24 @@ type WriteOptions struct {
 // VersionDefault otherwise (including for CompressionNone and both XPRESS
 // variants).
 //
-// Solid resources and an integrity table are out of scope: WriteTo never
-// emits ResFlagSolid, and Header.IntegrityTable is always left zero (absent,
-// which is valid). Multi-part (split) WIMs are also out of scope:
-// Header.PartNumber/TotalParts are always written as 1/1.
+// Solid resources are out of scope: WriteTo never emits ResFlagSolid.
+// Multi-part (split) WIMs are also out of scope: Header.PartNumber/TotalParts
+// are always written as 1/1.
+//
+// An integrity table is computed and appended when opts.ComputeIntegrityTable
+// is set (Header.IntegrityTable is left zero/absent otherwise, as before).
+// This is done in the same single pass as everything else, not as a separate
+// post-process re-read of the file: WriteTo already has every relevant byte
+// (each blob's encoded payload, each image's encoded metadata payload, and
+// the blob table's serialized bytes) in hand as it writes them in file order,
+// so it feeds them to an integrityAccumulator as it goes and finalizes the
+// table right after the blob table is written -- before writing XML data --
+// matching the real, confirmed convention that the integrity table covers
+// [HeaderSize, end of blob table) and excludes the XML data and the
+// integrity table itself, even though the table is physically appended to
+// the file last (after XML data). See integrity_write.go's doc comment for
+// the empirical evidence (against a real boot.wim/install.esd) and wimlib
+// source corroboration.
 func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *XMLData, blobs BlobSource, opts WriteOptions) (int64, error) {
 	if len(images) == 0 {
 		return 0, fmt.Errorf("wim: WriteTo: no images")
@@ -159,6 +184,11 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 		chunkSize = 0
 	}
 
+	var integ *integrityAccumulator
+	if opts.ComputeIntegrityTable {
+		integ = newIntegrityAccumulator(opts.IntegrityChunkSize)
+	}
+
 	// Blob content, one resource per already-deduplicated blob-table entry.
 	for i := range bt.Entries {
 		hash := bt.Entries[i].Hash
@@ -175,6 +205,9 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 			Flags:            flags,
 			OffsetInWIM:      offset,
 			UncompressedSize: uint64(len(data)),
+		}
+		if integ != nil {
+			integ.write(payload)
 		}
 		if err := writeBytes(payload); err != nil {
 			return 0, wrapErr(fmt.Sprintf("write blob %s", hash), err)
@@ -201,6 +234,9 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 			Flags:            flags | ResFlagMetadata,
 			OffsetInWIM:      offset,
 			UncompressedSize: uint64(len(metaBytes)),
+		}
+		if integ != nil {
+			integ.write(payload)
 		}
 		if err := writeBytes(payload); err != nil {
 			return 0, wrapErr(fmt.Sprintf("write image %d metadata", i+1), err)
@@ -229,8 +265,25 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 		OffsetInWIM:      offset,
 		UncompressedSize: uint64(len(btBytes)),
 	}
+	if integ != nil {
+		integ.write(btBytes)
+	}
 	if err := writeBytes(btBytes); err != nil {
 		return 0, wrapErr("write blob table", err)
+	}
+
+	// The integrity table's coverage ends here, at the end of the blob table
+	// -- it does not cover the XML data below (see integrity_write.go's doc
+	// comment for the confirmed convention and evidence). It is written to
+	// disk further below, after XML data, matching real WIMs' physical
+	// layout, but its *content* is finalized now.
+	var integHashes []Hash
+	integChunkSize := opts.IntegrityChunkSize
+	if integChunkSize == 0 {
+		integChunkSize = IntegrityChunkSize
+	}
+	if integ != nil {
+		integHashes = integ.finish()
 	}
 
 	xmlBytes := xmlData.AppendTo(nil)
@@ -242,6 +295,23 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 	}
 	if err := writeBytes(xmlBytes); err != nil {
 		return 0, wrapErr("write xml data", err)
+	}
+
+	// Integrity table, written last (after XML data), matching real WIMs'
+	// physical layout, even though its coverage range excludes the XML data
+	// it's written after.
+	var integRes ResourceHeader
+	if integ != nil {
+		it := &IntegrityTable{ChunkSize: integChunkSize, Hashes: integHashes}
+		itBytes := it.AppendTo(nil)
+		integRes = ResourceHeader{
+			SizeInWIM:        uint64(len(itBytes)),
+			OffsetInWIM:      offset,
+			UncompressedSize: uint64(len(itBytes)),
+		}
+		if err := writeBytes(itBytes); err != nil {
+			return 0, wrapErr("write integrity table", err)
+		}
 	}
 
 	guid := opts.GUID
@@ -274,7 +344,7 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 		XMLData:        xmlRes,
 		BootMetadata:   bootMetaRes,
 		BootIndex:      uint32(opts.BootIndex),
-		IntegrityTable: ResourceHeader{},
+		IntegrityTable: integRes,
 	}
 	hdrBytes, err := hdr.AppendTo(nil)
 	if err != nil {

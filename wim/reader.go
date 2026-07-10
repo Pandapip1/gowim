@@ -164,3 +164,14 @@ func (r *Reader) ImageMetadata(rh ResourceHeader) (*ImageMetadata, error) {
 func (r *Reader) ResourceReader(rh ResourceHeader) *io.SectionReader {
 	return io.NewSectionReader(r.ra, int64(rh.OffsetInWIM), int64(rh.SizeInWIM))
 }
+
+// ReadResource returns the uncompressed contents of an arbitrary resource
+// given its header (e.g. a BlobDescriptor.Resource obtained via
+// BlobTable.ByHash). It is a thin exported wrapper around the same decoding
+// resourceData already uses internally for BlobTable, XMLData, and
+// ImageMetadata: non-solid compressed resources (XPRESS, LZX, LZMS) are
+// transparently decompressed, uncompressed resources are returned as-is, and
+// solid resources return ErrCompressedResource (see that error's doc comment).
+func (r *Reader) ReadResource(rh ResourceHeader) ([]byte, error) {
+	return r.resourceData(rh)
+}

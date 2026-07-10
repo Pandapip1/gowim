@@ -28,9 +28,25 @@ type IntegrityTable struct {
 // resource bytes.
 //
 // numCheckedBytes, if nonzero, is the number of file bytes the table is
-// expected to cover (normally the file size minus HeaderSize minus the sizes of
-// the integrity table and XML data); it is used to validate num_entries the way
-// wimlib does. Pass 0 to skip that cross-check.
+// expected to cover; it is used to validate num_entries the way wimlib does.
+// Pass 0 to skip that cross-check.
+//
+// The real convention, confirmed empirically (2026-07-10) against two real
+// WIMs with integrity tables (a Windows 11 23H2 boot.wim and install.esd, both
+// showing "Integrity info" in `wimlib-imagex info`'s Attributes) and
+// corroborated by wimlib's source (src/integrity.c's
+// calculate_integrity_table/write_integrity_table and src/write.c's
+// finish_write): the table covers exactly
+// [HeaderSize, offset of the blob table + size of the blob table) -- i.e.
+// HeaderSize bytes in, through the end of the blob table resource, and
+// *excludes* the XML data and the integrity table itself, even though the
+// integrity table is physically written to the file *after* the XML data.
+// numCheckedBytes should therefore be computed as
+// (Header.BlobTable.OffsetInWIM + Header.BlobTable.SizeInWIM) - HeaderSize,
+// not derived from the overall file size. See integrity_write.go's doc
+// comment on integrityAccumulator for the full evidence (the specific byte
+// ranges tried and their match/mismatch results) and Reader.VerifyIntegrity
+// for the read-side counterpart that applies this same convention.
 //
 // Layout, from struct integrity_table:
 //

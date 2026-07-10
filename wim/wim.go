@@ -44,6 +44,27 @@
 // container structure around them (BlobTable.SolidResources) is still fully
 // supported, just not unpacking the packed stream itself.
 //
+// An integrity table (mirroring DISM's /CheckIntegrity) can be computed and
+// appended by WriteTo/Assemble when WriteOptions.ComputeIntegrityTable is
+// set, and verified read-side via Reader.VerifyIntegrity. The byte range and
+// chunking this covers were confirmed empirically (2026-07-10) against two
+// real WIMs with integrity tables and corroborated by wimlib's own source
+// (src/integrity.c, src/write.c): exactly [HeaderSize, end of the blob
+// table), excluding the XML data and the integrity table itself even though
+// the table is physically appended to the file after the XML data. See
+// integrity_write.go's doc comment for the full evidence.
+//
+// Exporting a subset of a WIM's images -- plus only the blobs they actually
+// reference -- into a new, standalone WIM (mirroring DISM's /Export-Image),
+// optionally recompressing, is directly supported via
+// ExportImage/ExportImageAssemble; see export.go's doc comments for exactly
+// what is and is not preserved (in particular, per-image XML content is
+// preserved verbatim via an innerxml-preserving technique, but any
+// <WIM>-level-only XML content beyond the <IMAGE> elements is dropped).
+// NewReaderBlobSource, the general-purpose Reader-backed BlobSource adapter
+// ExportImage is built on, is independently useful for streaming blob
+// content lazily out of any already-open WIM.
+//
 // Assembling an entire multi-resource, multi-image WIM file (header + blob
 // table + XML data + one metadata resource per image, with correct offsets
 // throughout) is directly supported: WriteTo (and its in-memory convenience
@@ -55,14 +76,15 @@
 // and patches the header in once every resource's final offset is known --
 // see write_test.go's buildMinimalWIM for the original, single-image,
 // test-only version of this same technique, which WriteTo generalizes into
-// real package API. Solid resources, an integrity table, and multi-part
-// (split) WIMs remain out of scope for the writer, same as for the rest of
-// this package: WriteTo never emits ResFlagSolid, always leaves
-// Header.IntegrityTable zero (absent, which is valid), and always writes
-// PartNumber/TotalParts as 1/1. Building each image's directory-entry
-// tree/security data, computing blob reference counts, and producing the
-// XML document's content remain the caller's job, exactly as they already
-// are for driver.Install.
+// real package API. Solid resources and multi-part (split) WIMs remain out
+// of scope for the writer, same as for the rest of this package: WriteTo
+// never emits ResFlagSolid and always writes PartNumber/TotalParts as 1/1
+// (an integrity table is no longer out of scope -- see above). Building each
+// image's directory-entry tree/security data, computing blob reference
+// counts (for images the caller is assembling from scratch; ExportImage
+// computes them itself for the images it exports), and producing the XML
+// document's content remain the caller's job, exactly as they already are
+// for driver.Install.
 //
 // Filesystem capture/apply remain out of scope too.
 //
