@@ -7,11 +7,11 @@ import "fmt"
 // map the file's unnamed stream's hash to its blob-table entry and thus its
 // resource location.
 //
-// If the resolved blob is stored compressed, ReadFile returns
-// ErrCompressedResource unmodified (not wrapped), exactly as
-// Reader.resourceData does for any other resource read via this package: this
-// package handles WIM container structure, not the LZX/XPRESS/LZMS codecs (see
-// the wim package doc and ErrCompressedResource).
+// Non-solid compressed blobs (XPRESS, LZX, LZMS) are transparently
+// decompressed; see DecodeResourceData. If the resolved blob is a solid
+// resource, ReadFile returns ErrCompressedResource unmodified (not wrapped),
+// exactly as Reader.resourceData does for any other solid resource read via
+// this package (see the wim package doc and ErrCompressedResource).
 //
 // ReadFile returns an error wrapping ErrNotFound if path does not resolve, and
 // a plain error if path resolves to a directory or its hash has no matching

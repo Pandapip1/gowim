@@ -94,7 +94,25 @@ func buildLengths(freqs []uint32, maxLen int) []byte {
 		return lens // no symbols used at all; all lengths stay 0
 	}
 	if numUsed == 1 {
-		lens[nodes[heapIdx[0]].sym] = 1
+		// A single used symbol only needs one codeword, but a valid
+		// (complete) Huffman code needs two codewords at the smallest
+		// length. wimlib's make_canonical_huffman_code (src/compress_common.c)
+		// handles this by assigning the unused unused codeword to symbol 0
+		// (or symbol 1, if the used symbol is 0), so that the lower-valued
+		// symbol still gets codeword 0 -- keeping the code canonical. This
+		// matters for real-decoder compatibility: wimlib's decode-table
+		// builder (src/decompress_common.c, make_huffman_decode_table)
+		// rejects any incomplete code that isn't completely empty, so a
+		// single-symbol code with only one codeword assigned is invalid and
+		// was observed to be rejected by wimlib-imagex (confirmed via
+		// direct libwim wimlib_decompress calls during development).
+		sym := nodes[heapIdx[0]].sym
+		other := 0
+		if sym == 0 {
+			other = 1
+		}
+		lens[sym] = 1
+		lens[other] = 1
 		return lens
 	}
 

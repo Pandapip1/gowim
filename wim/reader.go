@@ -7,10 +7,12 @@ import (
 )
 
 // ErrCompressedResource is returned when a caller asks for the contents of a
-// compressed resource. This package handles the WIM container structure but not
-// the LZX/XPRESS/LZMS codecs, so only uncompressed resources can be read back
-// as data.
-var ErrCompressedResource = errors.New("wim: resource is compressed; this package does not implement decompression")
+// solid resource. Solid resources pack multiple blobs into one shared
+// compressed stream (see BlobTable.SolidResourceRun) and are out of scope for
+// this package; non-solid compressed resources (XPRESS, LZX, and LZMS alike)
+// are fully supported and never return this error -- see DecodeResourceData
+// and EncodeResourceData.
+var ErrCompressedResource = errors.New("wim: resource is solid-compressed; this package does not implement solid-resource decompression")
 
 // Reader provides read access to the structural components of a WIM file
 // backed by an io.ReaderAt.
@@ -72,21 +74,37 @@ func (r *Reader) readResourceRaw(rh ResourceHeader) ([]byte, error) {
 	return buf, nil
 }
 
-// resourceData returns the uncompressed contents of a resource. If the resource
-// is compressed it returns ErrCompressedResource, since decompression is out of
-// scope. Uncompressed resources are returned as-is.
+// resourceData returns the uncompressed contents of a resource. Solid
+// resources return ErrCompressedResource, since unpacking them is out of
+// scope (see BlobTable.SolidResourceRun). Non-solid compressed resources
+// (XPRESS, LZX, LZMS) are transparently decompressed via DecodeResourceData.
+// Uncompressed resources are returned as-is.
 func (r *Reader) resourceData(rh ResourceHeader) ([]byte, error) {
 	if rh.IsZero() {
 		return nil, nil
 	}
-	if rh.IsCompressed() {
+	if rh.IsSolid() {
 		return nil, ErrCompressedResource
 	}
-	if rh.SizeInWIM != rh.UncompressedSize {
-		return nil, fmt.Errorf("wim: uncompressed resource has mismatched sizes (in-wim %d, uncompressed %d)",
-			rh.SizeInWIM, rh.UncompressedSize)
+	raw, err := r.readResourceRaw(rh)
+	if err != nil {
+		return nil, err
 	}
-	return r.readResourceRaw(rh)
+	if rh.Flags&ResFlagCompressed == 0 {
+		if rh.SizeInWIM != rh.UncompressedSize {
+			return nil, fmt.Errorf("wim: uncompressed resource has mismatched sizes (in-wim %d, uncompressed %d)",
+				rh.SizeInWIM, rh.UncompressedSize)
+		}
+		return raw, nil
+	}
+	ctype, err := r.hdr.CompressionType()
+	if err != nil {
+		return nil, wrapErr("resource compression type", err)
+	}
+	if ctype == CompressionNone {
+		return nil, fmt.Errorf("wim: resource is marked compressed but WIM header has no compression type set")
+	}
+	return DecodeResourceData(raw, ctype, r.hdr.ChunkSize, rh.UncompressedSize)
 }
 
 // BlobTable reads and parses the WIM's blob (lookup) table.

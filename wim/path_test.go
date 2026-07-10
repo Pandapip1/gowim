@@ -298,11 +298,16 @@ func TestReadFileUncompressed(t *testing.T) {
 	}
 }
 
+// TestReadFileCompressedReturnsErrCompressedResourceUnmodified covers solid
+// resources specifically: this package now transparently decompresses
+// non-solid compressed resources (see DecodeResourceData), so
+// ErrCompressedResource is reserved for the one remaining unsupported case,
+// ResFlagSolid (see BlobTable.SolidResourceRun).
 func TestReadFileCompressedReturnsErrCompressedResourceUnmodified(t *testing.T) {
 	hash := Hash{0x99}
 	rh := ResourceHeader{
 		SizeInWIM:        10,
-		Flags:            ResFlagCompressed,
+		Flags:            ResFlagCompressed | ResFlagSolid,
 		OffsetInWIM:      0,
 		UncompressedSize: 100,
 	}

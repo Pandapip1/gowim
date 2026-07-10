@@ -6,6 +6,62 @@ import (
 	"testing"
 )
 
+// TestBuildLengthsSingleUsedSymbolIsComplete guards against a real bug found
+// and fixed during gowim/wim's write-side integration testing (2026-07-10):
+// when exactly one symbol in an alphabet had nonzero frequency, buildLengths
+// used to assign it codeword length 1 and leave every other symbol at length
+// 0. That is a valid *prefix* code but an *incomplete* one (Kraft sum 1/2,
+// not 1), and real WIM data produced this way was rejected outright by
+// wimlib's decoder: wimlib's make_huffman_decode_table
+// (src/decompress_common.c) explicitly rejects any incomplete code unless it
+// is completely empty (no symbols used at all) -- confirmed by direct calls
+// into libwim's wimlib_decompress during development, and reproduced
+// end-to-end via wimlib-imagex extract on a hand-assembled WIM.
+//
+// wimlib's own encoder (src/compress_common.c,
+// make_canonical_huffman_code) handles the single-used-symbol case by
+// assigning a second, otherwise-unused codeword (symbol 0, or symbol 1 if
+// the real symbol is 0) so the code has exactly two length-1 codewords,
+// making it complete while staying canonical (the lower-valued symbol still
+// gets codeword 0). buildLengths now does the same.
+func TestBuildLengthsSingleUsedSymbolIsComplete(t *testing.T) {
+	tests := []struct {
+		name       string
+		usedSymbol int
+		n          int
+	}{
+		{"used symbol nonzero", 5, 16},
+		{"used symbol is zero", 0, 16},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			freqs := make([]uint32, tc.n)
+			freqs[tc.usedSymbol] = 100
+			lens := buildLengths(freqs, 16)
+
+			numLen1 := 0
+			for _, l := range lens {
+				if l == 1 {
+					numLen1++
+				}
+			}
+			if numLen1 != 2 {
+				t.Fatalf("expected exactly 2 length-1 codewords (complete code), got %d; lens=%v", numLen1, lens)
+			}
+			if lens[tc.usedSymbol] != 1 {
+				t.Fatalf("used symbol %d has length %d, want 1", tc.usedSymbol, lens[tc.usedSymbol])
+			}
+			other := 0
+			if tc.usedSymbol == 0 {
+				other = 1
+			}
+			if lens[other] != 1 {
+				t.Fatalf("expected dummy symbol %d to get length 1, got %d", other, lens[other])
+			}
+		})
+	}
+}
+
 func roundTrip(t *testing.T, name string, data []byte) {
 	t.Helper()
 	compressed := Compress(data)

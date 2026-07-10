@@ -194,6 +194,26 @@ mounted at `/media/gavin-john/tiny11 23H2 x64`:
    self-consistent with this package's own `Decompress`, but is valid input
    to a real, independent LZX decoder.
 
+### A bug found and fixed by this verification
+
+This same verification (performed again during `wim`'s write-side
+integration, 2026-07-10) caught a real encoder bug: when exactly one symbol
+in an alphabet (main, length, or precode) had nonzero frequency,
+`buildLengths` assigned it codeword length 1 and left every other symbol at
+length 0. That is a valid prefix code but an *incomplete* one (Kraft sum
+1/2, not 1), and wimlib's decode-table builder
+(`src/decompress_common.c`, `make_huffman_decode_table`) explicitly rejects
+any incomplete code unless it is completely empty — so real WIM data
+produced this way was rejected outright by `wimlib-imagex extract` ("The
+WIM contains invalid compressed data"), even though this package's own
+`Decompress` accepted it without complaint. wimlib's own encoder
+(`src/compress_common.c`, `make_canonical_huffman_code`) handles this
+degenerate case by assigning a second, otherwise-unused codeword (symbol 0,
+or symbol 1 if the real symbol is 0) so the code has two length-1
+codewords and is complete, while keeping the code canonical (the
+lower-valued symbol still gets codeword 0); `buildLengths` now does the
+same (see `TestBuildLengthsSingleUsedSymbolIsComplete` in `lzx_test.go`).
+
 ## Tests
 
 ```

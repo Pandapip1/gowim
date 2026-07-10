@@ -7,11 +7,50 @@
 // the blob (lookup) table, resource descriptors, image metadata resources
 // (security data + directory-entry tree), and the XML data.
 //
-// Scope: this package handles the *structure* of a WIM. It deliberately does
-// not implement the LZX / XPRESS / LZMS compression codecs, nor filesystem
-// capture/apply. Compressed resource payloads are exposed as raw byte ranges;
-// serialization writes resources uncompressed. See ResourceHeader.Flags and
-// the WIM_RESHDR_FLAG_* constants for how compression is signalled on disk.
+// Scope: this package handles the *structure* of a WIM, but it is no longer a
+// leaf module -- it now depends on the sibling gowim/xpress, gowim/lzx, and
+// gowim/lzms modules to actually read and write compressed resources. That is
+// a deliberate architectural change (see go.mod's require/replace entries,
+// matching the pattern already used by e.g. driver/go.mod for its sibling
+// dependencies), not an accident: compression support genuinely needs those
+// codecs, and pulling them in here is the correct place to wire them up.
+//
+// Compressed, *non-solid* resources (ResourceHeader.Flags with
+// ResFlagCompressed set but not ResFlagSolid: XPRESS, LZX, and LZMS alike)
+// are fully supported for both reading and writing:
+//
+//   - DecodeResourceData parses the chunk-table framing a compressed
+//     resource uses on disk (see its doc comment for the exact layout) and
+//     dispatches each chunk to xpress.Decompress, lzx.Decompress, or
+//     lzms.Decompress as appropriate; Reader.resourceData calls it
+//     transparently, so Reader.XMLData, Reader.BlobTable,
+//     Reader.ImageMetadata, and the path-based Reader.ReadFile all just work
+//     on compressed WIMs and ESD-adjacent files without their callers
+//     needing to know or care that decompression happened.
+//   - EncodeResourceData is the write-side counterpart: given a resource's
+//     full uncompressed bytes, a compression type, and a chunk size, it
+//     produces the correctly chunk-table-framed on-disk payload (compressing
+//     each chunk with xpress.Compress/lzx.Compress/lzms.Compress and falling
+//     back to storing a chunk, or the whole resource, raw when compression
+//     does not shrink it -- mirroring wimlib's own writer behavior; see its
+//     doc comment for the exact rules) plus the ResFlag* bits that belong on
+//     that resource's ResourceHeader.
+//
+// Solid resources (ResourceHeader.IsSolid, ResFlagSolid) remain explicitly
+// out of scope: they pack multiple blobs into one shared compressed stream
+// (see BlobTable.SolidResourceRun), which is a separate, larger piece of
+// container-level complexity than per-resource chunk framing. Reading or
+// writing a solid resource as data returns ErrCompressedResource; the parsed
+// container structure around them (BlobTable.SolidResources) is still fully
+// supported, just not unpacking the packed stream itself.
+//
+// Also out of scope, as before: filesystem capture/apply, and assembling an
+// entire multi-resource WIM file (header + blob table + XML data + metadata
+// resources + integrity table with correct offsets) -- EncodeResourceData
+// produces one resource's payload bytes; laying out a whole file around
+// several such resources is a caller concern (see write_test.go for a worked
+// example using this package's own Header/BlobTable/ImageMetadata/DirEntry/
+// XMLData serialization primitives).
 //
 // It also provides path-based operations over a DirEntry tree, generalizing
 // the path-walking/case-insensitive-child-lookup logic that callers like
