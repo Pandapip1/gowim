@@ -36,7 +36,7 @@ func buildMinimalHiveBytes(t *testing.T) []byte {
 	le.PutUint32(child[40:44], NoCellOffset) // values offset
 	le.PutUint32(child[44:48], NoCellOffset) // security offset
 	le.PutUint32(child[48:52], NoCellOffset) // class name offset
-	le.PutUint16(child[74:76], uint16(len(childName)))
+	le.PutUint16(child[72:74], uint16(len(childName)))
 	copy(child[nkHeaderSize:], childName)
 	childOffset := arena.alloc(child)
 
