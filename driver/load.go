@@ -355,6 +355,48 @@ func resolveDestinationDir(destDirs []inf.Entry, listSection string) (DirID, str
 	return normalizeDirID(id), subdir, nil
 }
 
+// modelSection is one [Manufacturer] -> Models entry: the install-section-name
+// it points to, plus the hardware/compatible IDs listed after it
+// ("device-description=install-section-name,hw-id[,compatible-id,...]"; see
+// "INF Models Section",
+// https://learn.microsoft.com/windows-hardware/drivers/install/inf-models-section).
+type modelSection struct {
+	// InstallSection is the undecorated install-section-name field.
+	InstallSection string
+	// HardwareIDs holds the hw-id and any compatible-id fields, in order.
+	HardwareIDs []string
+}
+
+// enumerateModelSections walks [Manufacturer] -> Models exactly like
+// enumeratePayloadFiles does, but returns each entry's install-section-name
+// paired with its hardware/compatible ID list rather than resolving
+// CopyFiles. This lets service.go's Services and
+// criticaldevicedatabase.go's CriticalDeviceDatabaseEntries reuse the same
+// Manufacturer/Models traversal enumeratePayloadFiles already performs,
+// without disturbing its existing CopyFiles-resolution behavior (or the
+// tests exercising it).
+func enumerateModelSections(f *inf.File, platform string) []modelSection {
+	var out []modelSection
+	for _, mfgEntry := range f.MergedEntries("Manufacturer") {
+		if len(mfgEntry.Fields) == 0 {
+			continue
+		}
+		modelsSection := mfgEntry.Fields[0]
+
+		modelEntries := mergedEntriesUnion(f, candidateSectionNames(modelsSection, platform))
+		for _, modelEntry := range modelEntries {
+			if !modelEntry.HasKey || len(modelEntry.Fields) == 0 {
+				continue
+			}
+			out = append(out, modelSection{
+				InstallSection: modelEntry.Fields[0],
+				HardwareIDs:    append([]string(nil), modelEntry.Fields[1:]...),
+			})
+		}
+	}
+	return out
+}
+
 // equalFold is the same ASCII case-fold comparison the inf package uses for
 // section/key names; duplicated here since it is unexported in inf.
 func equalFold(a, b string) bool {

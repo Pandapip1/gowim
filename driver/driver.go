@@ -15,26 +15,61 @@
 //   - The [Manufacturer] section (one or more "manufacturer-name" or
 //     "%strkey%=models-section-name[,TargetOSVersion...]" entries), see
 //     https://learn.microsoft.com/windows-hardware/drivers/install/inf-manufacturer-section.
+//
 //   - The per-manufacturer Models section(s) it points to
 //     ("device-description=install-section-name,hw-id[,compatible-id...]"),
 //     see https://learn.microsoft.com/windows-hardware/drivers/install/inf-models-section.
+//
 //   - The install-section-name.CopyFiles directive (an install section may be
 //     decorated ".NT"/".NT<arch>" for a target platform), whose value is
 //     either "@filename" (a direct copy using DefaultDestDir) or a list of
 //     file-list-section names, see
 //     https://learn.microsoft.com/windows-hardware/drivers/install/inf-copyfiles-directive.
+//
 //   - The [SourceDisksFiles] (and platform-decorated
 //     [SourceDisksFiles.<arch>]) section, mapping a source file name to a
 //     disk ID and optional subdirectory, see
 //     https://learn.microsoft.com/windows-hardware/drivers/install/inf-sourcedisksfiles-section.
+//
 //   - The [DestinationDirs] section (a file-list-section name, or
 //     DefaultDestDir, mapped to a numeric dirid and optional subdir), and the
 //     standard DIRID directory-ID values (DirID* constants in dirid.go), see
 //     https://learn.microsoft.com/windows-hardware/drivers/install/inf-destinationdirs-section
 //     and https://learn.microsoft.com/windows-hardware/drivers/install/using-dirids.
+//
 //   - The [Version] section's CatalogFile / CatalogFile.<platform> entry
 //     (resolved by inf.File.CatalogFileForPlatform), naming the .cat file
 //     that normally sits alongside the .inf.
+//
+//   - The AddService directive chain: an install section's (platform-
+//     decorated) "<install-section-name>.Services" section
+//     (see "INF DDInstall.Services Section",
+//     https://learn.microsoft.com/windows-hardware/drivers/install/inf-ddinstall-services-section)
+//     containing one or more AddService directives (see "INF AddService
+//     Directive",
+//     https://learn.microsoft.com/windows-hardware/drivers/install/inf-addservice-directive),
+//     each naming a service-install-section with ServiceType, StartType,
+//     ErrorControl, ServiceBinary ("%dirid%\path", resolved via the same
+//     DirID model as dirid.go/PayloadFile), and optional LoadOrderGroup and
+//     Dependencies entries (service.go's ServiceInstall,
+//     (*Package).Services).
+//
+//   - The documented well-known Services registry key schema
+//     (HKLM\SYSTEM\CurrentControlSet\Services\<name>'s Type/Start/
+//     ErrorControl/ImagePath/Group/DependOnGroup/DependOnService values; see
+//     "HKLM\SYSTEM\CurrentControlSet\Services Registry Tree",
+//     https://learn.microsoft.com/windows-hardware/drivers/install/hklm-system-currentcontrolset-services-registry-tree),
+//     and the CriticalDeviceDatabase mechanism for registering a device's
+//     hardware ID against a service before PnP ever sees the device (see
+//     criticaldevicedatabase.go's citations) - both written into a
+//     caller-supplied *regf.Key tree (registryinstall.go's InstallRegistry),
+//     using the sibling regf package
+//     (github.com/gavin-john/gowim/regf) for the on-disk hive shape.
+//
+//   - The Select\Default -> ControlSetNNN resolution that a SYSTEM hive's
+//     "current control set" conventionally requires (controlset.go's
+//     CurrentControlSet), since CurrentControlSet is a runtime symbolic
+//     link rather than a real subtree an offline tool can just open.
 //
 // Deliberate simplifications of the above, since this package's job is only
 // to enumerate a package's payload *files* faithfully enough to hash and
@@ -70,15 +105,37 @@
 //     state of) setupapi.dll/drvstore.dll, which is out of scope here.
 //     Instead, Install takes the destination directory path(s) for each
 //     DIRID used by the package as an explicit parameter.
-//   - Editing or constructing Windows registry hives (the SYSTEM hive's
-//     DriverDatabase keys, INFCACHE.1, etc). No registry-hive parser exists
-//     anywhere in this repo; building one is a separate, large piece of
-//     work.
-//   - PnP class-installer semantics, driver ranking/selection among multiple
-//     matching drivers, or AddService/AddReg directive interpretation beyond
-//     what is needed to enumerate a package's payload files (CopyFiles,
-//     SourceDisksFiles, and DestinationDirs are interpreted; AddService,
-//     AddReg, and the rest of the install graph are not).
+//   - The SYSTEM hive's DriverDatabase key tree
+//     (SYSTEM\DriverDatabase\DriverPackages, DeviceIds, etc), the internal
+//     driver-ranking database PnP uses to choose among multiple matching
+//     drivers for a device. Checked, not just assumed: a documentation
+//     search turned up no authoritative Microsoft Learn (or equivalent)
+//     page describing this schema - unlike CriticalDeviceDatabase and the
+//     Services key schema, both of which are documented (see
+//     registryinstall.go's package-level doc comment for the full citation
+//     trail and reasoning, mirroring the empirical-verification rigor of
+//     the DriverStore path-hash non-goal above).
+//   - The Enum device-instance tree
+//     (SYSTEM\CurrentControlSet\Enum\<enumerator>\<device-id>\<instance-id>).
+//     Registering an actual device instance requires a real, live hardware
+//     instance ID discovered by PnP enumeration at boot/setup time, which an
+//     offline image-prep tool does not have.
+//   - INFCACHE.1 (the binary cache of parsed INF metadata SetupAPI
+//     maintains under %SystemRoot%\INF): a distinct, undocumented binary
+//     format in its own right.
+//   - AddReg/DelReg directives in general, beyond the specific Services and
+//     CriticalDeviceDatabase registry values enumerated above: a generic,
+//     much broader directive mechanism this package does not take on.
+//   - PnP class-installer semantics and driver ranking/selection among
+//     multiple matching drivers for the same device (that is exactly what
+//     the undocumented DriverDatabase non-goal above exists to select
+//     among).
+//   - Registry-hive writing back to disk (deciding which hive file to open,
+//     backing it up, replacing it) - this package only produces/merges
+//     regf.Key/regf.Value structures given an already-loaded *regf.Hive/
+//     *regf.Key; the caller handles file I/O, exactly as Install only
+//     returns in-memory nodes and blob bytes rather than writing a WIM file
+//     itself.
 //   - Authenticode signature verification or X.509 certificate validation,
 //     relying entirely on the cat package's own non-goals here: Verify only
 //     performs structural hash comparison against the catalog's recorded

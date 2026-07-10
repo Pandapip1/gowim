@@ -22,13 +22,16 @@ module's own README for its precise scope and non-goals.
 
 These support installing `.inf`/`.cat`/`.sys` driver packages into WIM images
 — `inf`, `cat`, and `pe` handle the three file formats that make up a driver
-package, `wim` handles the container they get installed into, `driver` ties
-them together, and `regf` handles the registry hives (SYSTEM, SOFTWARE, ...)
-that a real driver install also needs to update (e.g. the DriverDatabase /
-CriticalDeviceDatabase keys) — that registry-editing orchestration is not
-implemented yet; `regf` only provides the generic hive file-format structure
-so far. `driver` deliberately does not compute Windows' DriverStore
-FileRepository path-hashing scheme (see its README) — callers supply
+package, `wim` handles the container they get installed into, `regf` handles
+the registry hives (SYSTEM, SOFTWARE, ...), and `driver` ties them together:
+`LoadPackage`/`Verify`/`Install` enumerate and verify a package's files and
+build the WIM-side tree/blob additions, and `Services`/
+`CriticalDeviceDatabaseEntries`/`InstallRegistry` do the same for the
+documented pieces of registry registration (the `Services\<name>` key from
+the INF's `AddService` directive, and `CriticalDeviceDatabase` entries).
+`driver` deliberately does not compute Windows' DriverStore FileRepository
+path-hashing scheme or the undocumented `DriverDatabase` ranking store (see
+its README for the citations/empirical checks behind both) — callers supply
 destination paths, and a final WIM-file writer (assembling a complete output
 file with real resource offsets) is still a future addition to `wim`.
 

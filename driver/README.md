@@ -35,6 +35,28 @@ the files a real installation would copy onto the target machine:
   [Using Dirids](https://learn.microsoft.com/windows-hardware/drivers/install/using-dirids))
 - the `[Version]` section's `CatalogFile`/`CatalogFile.<platform>` entry
   (via `inf.File.CatalogFileForPlatform`), naming the accompanying `.cat` file
+- the `AddService` directive chain: an install section's (platform-decorated)
+  `<install-section-name>.Services` section
+  ([INF DDInstall.Services Section](https://learn.microsoft.com/windows-hardware/drivers/install/inf-ddinstall-services-section))
+  containing one or more `AddService` directives
+  ([INF AddService Directive](https://learn.microsoft.com/windows-hardware/drivers/install/inf-addservice-directive)),
+  each naming a service-install-section with `ServiceType`, `StartType`,
+  `ErrorControl`, `ServiceBinary` (`%dirid%\path`, resolved via the same
+  `DirID` model as `dirid.go`/`PayloadFile`), and optional `LoadOrderGroup`
+  and `Dependencies` (`service.go`'s `ServiceInstall`, `(*Package).Services`)
+- the documented `HKLM\SYSTEM\CurrentControlSet\Services\<name>` registry
+  schema (`Type`/`Start`/`ErrorControl`/`ImagePath`/`Group`/`DependOnGroup`/
+  `DependOnService`;
+  [HKLM\SYSTEM\CurrentControlSet\Services Registry Tree](https://learn.microsoft.com/windows-hardware/drivers/install/hklm-system-currentcontrolset-services-registry-tree)),
+  and the `CriticalDeviceDatabase` mechanism for registering a device's
+  hardware ID against a service before PnP ever sees the device (see
+  `criticaldevicedatabase.go`'s citations) - both merged into a
+  caller-supplied `*regf.Key` tree via the sibling
+  [`regf`](../regf) package (`registryinstall.go`'s `InstallRegistry`)
+- the `Select\Default` -> `ControlSetNNN` resolution a SYSTEM hive's "current
+  control set" conventionally requires (`controlset.go`'s
+  `CurrentControlSet`), since `CurrentControlSet` is a runtime symbolic link
+  rather than a real subtree an offline tool can just open
 
 It deliberately simplifies platform/OS-version selection: rather than
 evaluating `TargetOSVersion` decorations (OS major/minor version, product
@@ -63,12 +85,32 @@ It **deliberately does not** implement:
   `setupapi.dll`/`drvstore.dll`, which is out of scope here. `Install`
   instead takes the destination directory path for each DIRID used by the
   package as an explicit parameter.
-- Editing or constructing Windows registry hives (the `SYSTEM` hive's
-  `DriverDatabase` keys, `INFCACHE.1`, etc). No registry-hive parser exists
-  anywhere in this repo.
-- PnP class-installer semantics, driver ranking/selection among multiple
-  matching drivers, or `AddService`/`AddReg` directive interpretation beyond
-  what is needed to enumerate a package's payload files.
+- The `SYSTEM` hive's `DriverDatabase` key tree
+  (`SYSTEM\DriverDatabase\DriverPackages`, `DeviceIds`, etc), the internal
+  driver-ranking database PnP uses to choose among multiple matching drivers
+  for a device. Checked, not just assumed: a documentation search turned up
+  no authoritative Microsoft Learn (or equivalent) page describing this
+  schema - unlike `CriticalDeviceDatabase` and the `Services` key schema,
+  both of which are documented (see `registryinstall.go`'s package-level doc
+  comment for the full citation trail).
+- The `Enum` device-instance tree
+  (`SYSTEM\CurrentControlSet\Enum\<enumerator>\<device-id>\<instance-id>`).
+  Registering an actual device instance requires a real, live hardware
+  instance ID discovered by PnP enumeration at boot/setup time, which an
+  offline image-prep tool does not have.
+- `INFCACHE.1` (the binary cache of parsed INF metadata SetupAPI maintains
+  under `%SystemRoot%\INF`): a distinct, undocumented binary format in its
+  own right.
+- `AddReg`/`DelReg` directives in general, beyond the specific `Services` and
+  `CriticalDeviceDatabase` registry values enumerated above: a generic, much
+  broader directive mechanism this package does not take on.
+- PnP class-installer semantics and driver ranking/selection among multiple
+  matching drivers for the same device (exactly what the undocumented
+  `DriverDatabase` non-goal above exists to select among).
+- Registry-hive writing back to disk (deciding which hive file to open,
+  backing it up, replacing it) - this package only produces/merges
+  `regf.Key`/`regf.Value` structures given an already-loaded `*regf.Hive`/
+  `*regf.Key`; the caller handles file I/O.
 - Authenticode signature verification or X.509 certificate validation - relies
   entirely on `cat`'s own non-goals; `Verify` performs only structural hash
   comparison.
@@ -87,7 +129,12 @@ It **deliberately does not** implement:
 | `load.go` | `Package`, `PayloadFile`, `LoadPackage` (INF parse + catalog resolution + CopyFiles/SourceDisksFiles/DestinationDirs enumeration) |
 | `verify.go` | `VerifyStatus`, `FileVerification`, `(*Package).Verify` |
 | `install.go` | `NewBlob`, `Install` (merge payload files into a `*wim.ImageMetadata` + `*wim.BlobTable`) |
-| `driver_test.go` | synthetic INF/catalog/PE fixtures and tests |
+| `service.go` | `ServiceInstall`, `(*Package).Services` (AddService directive chain resolution) |
+| `criticaldevicedatabase.go` | `CriticalDeviceDatabaseEntry`, `(*Package).CriticalDeviceDatabaseEntries`, `CriticalDeviceDatabaseSubkeyName` |
+| `controlset.go` | `CurrentControlSet` (`Select\Default` -> `ControlSetNNN` resolution) |
+| `registryinstall.go` | local `regf.Key`/`regf.Value` find-or-create helpers, `InstallRegistry` (merge Services/CriticalDeviceDatabase into a `*regf.Key` tree) |
+| `driver_test.go` | synthetic INF/catalog/PE fixtures and tests (payload files, verify, WIM install) |
+| `driver_registry_test.go` | synthetic INF/registry fixtures and tests (services, CDDB, control-set resolution, registry install) |
 
 ## Usage
 
@@ -121,6 +168,19 @@ if err != nil {
 // Place newBlobs' raw bytes in the eventual output WIM file (not implemented
 // by this package - see wim's stated scope), then serialize root/imageMetadata
 // and blobTable as usual.
+
+// Merge the package's Services and CriticalDeviceDatabase registry
+// registration into a SYSTEM hive's current control set. destDirs is the
+// same map used above for Install.
+currentControlSet, err := driver.CurrentControlSet(systemHive.Root)
+if err != nil {
+    log.Fatal(err)
+}
+if err := driver.InstallRegistry(currentControlSet, pkg, destDirs, "amd64"); err != nil {
+    log.Fatal(err)
+}
+// Serialize systemHive (regf.Hive.AppendTo) as usual; this package does not
+// write the hive file back to disk itself.
 ```
 
 ## Tests
@@ -144,6 +204,21 @@ right stream hash, rejects a corrupt `.sys` payload, requires a destination
 directory for every DIRID used, and dedupes blob-table entries by hash
 (bumping `RefCount`) rather than duplicating them when installing the same
 package twice.
+
+`driver_registry_test.go` extends the synthetic INF with a hardware ID +
+compatible ID on the `Models` entry and an `.Services`/`AddService`/
+service-install-section chain, and hand-builds a minimal SYSTEM-hive-shaped
+`*regf.Key` tree (`Select`, `ControlSet001`, `ControlSet001\Services`,
+`ControlSet001\Control\CriticalDeviceDatabase`), using the same struct-literal
+construction style as `regf/regf_test.go`. Tests assert: `Services` enumerates
+the expected `ServiceInstall` (including the `AssocService` bit and parsed
+`Dependencies`/`LoadOrderGroup`); `CriticalDeviceDatabaseEntries` enumerates
+one entry per hardware/compatible ID with the right `ClassGuid`/`Service`;
+`CurrentControlSet` resolves the right `ControlSetNNN` via `Select\Default`;
+`InstallRegistry` produces the expected `Services\<name>` and
+`CriticalDeviceDatabase\<hwid>` subkeys/values, is idempotent (a second call
+does not duplicate subkeys or values), and the merged tree round-trips
+through `regf.Hive.AppendTo`/`regf.Parse`.
 
 ## License
 
