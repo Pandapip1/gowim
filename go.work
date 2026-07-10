@@ -6,4 +6,5 @@ use (
 	./cat
 	./pe
 	./driver
+	./regf
 )
