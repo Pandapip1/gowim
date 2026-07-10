@@ -14,24 +14,27 @@ module's own README for its precise scope and non-goals.
 | Module | Format | Status |
 |--------|--------|--------|
 | [`wim/`](wim/README.md) | WIM (Windows Imaging Format) container | done |
-| [`inf/`](inf/README.md) | INF (driver installation information) files | in progress |
-| [`cat/`](cat/README.md) | CAT (Windows Catalog / PKCS#7 signed catalog) files | in progress |
-| [`pe/`](pe/README.md) | PE/COFF container (used for `.sys` driver binaries) | in progress |
+| [`inf/`](inf/README.md) | INF (driver installation information) files | done |
+| [`cat/`](cat/README.md) | CAT (Windows Catalog / PKCS#7 signed catalog) files | done |
+| [`pe/`](pe/README.md) | PE/COFF container (used for `.sys` driver binaries) | done |
+| [`driver/`](driver/README.md) | ties `inf`+`cat`+`pe`+`wim` together: load a driver package, verify its files against its catalog, and build the WIM-side tree/blob additions to install it | done |
 
-These are being built toward a feature that installs `.inf`/`.cat`/`.sys`
-driver packages into WIM images — `inf`, `cat`, and `pe` handle the three
-file formats that make up a driver package, and `wim` handles the container
-they get installed into. A higher-level package tying these together (adding
-a driver's files into a WIM image and updating its driver store) will land
-once the format modules are stable.
+These support installing `.inf`/`.cat`/`.sys` driver packages into WIM images
+— `inf`, `cat`, and `pe` handle the three file formats that make up a driver
+package, `wim` handles the container they get installed into, and `driver`
+ties them together. `driver` deliberately does not compute Windows'
+DriverStore FileRepository path-hashing scheme or edit registry hives (see
+its README) — callers supply destination paths, and a final WIM-file writer
+(assembling a complete output file with real resource offsets) is still a
+future addition to `wim`.
 
 ## Working in this repo
 
 This is a multi-module workspace. From the repo root:
 
 ```
-go build ./wim/... ./inf/... ./cat/... ./pe/...
-go test  ./wim/... ./inf/... ./cat/... ./pe/...
+go build ./wim/... ./inf/... ./cat/... ./pe/... ./driver/...
+go test  ./wim/... ./inf/... ./cat/... ./pe/... ./driver/...
 ```
 
 (Plain `./...` doesn't resolve from the workspace root since it isn't itself

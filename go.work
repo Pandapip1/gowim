@@ -1,8 +1,9 @@
 go 1.22
 
 use (
-	./cat
-	./inf
-	./pe
 	./wim
+	./inf
+	./cat
+	./pe
+	./driver
 )
