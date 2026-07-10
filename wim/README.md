@@ -19,12 +19,27 @@ container skeleton:
 - the XML data (`XMLData`, UTF-16LE with a byte-order mark)
 - the integrity table (`IntegrityTable`)
 - a top-level reader over an `io.ReaderAt` (`Reader`)
+- path-based operations over a `DirEntry` tree: case-insensitive lookup
+  (`DirEntry.Child`, `DirEntry.Lookup`), reading a file's resolved contents
+  (`Reader.ReadFile`, `BlobTable.ByHash`), adding/replacing a file
+  (`DirEntry.Add`), deleting a file or subtree (`DirEntry.Remove`),
+  moving/renaming (`DirEntry.Rename`), listing a directory (`DirEntry.ReadDir`),
+  and DOS-style name globbing (`MatchName`)
 
 It **deliberately does not** implement the LZX / XPRESS / LZMS compression
 codecs, nor filesystem capture/apply. Compressed resource payloads are exposed
 as raw byte ranges (`Reader.ResourceReader`); reading a compressed resource as
-data returns `ErrCompressedResource`. Serialization writes resources
-uncompressed.
+data returns `ErrCompressedResource`, including via `Reader.ReadFile`, which
+returns it unmodified rather than attempting decompression. Serialization
+writes resources uncompressed.
+
+The path-based tree operations have their own explicit scope boundaries:
+`DirEntry.Add` takes a `Hash`, not raw content bytes - getting those bytes into
+a `BlobTable`/output file is the caller's job, exactly as `driver.Install`
+already does by returning `[]NewBlob` for the caller to place - and
+`DirEntry.Remove` does not adjust any `BlobTable`'s reference counts for
+streams a removed subtree stops referencing; a caller that cares can walk the
+removed subtree's `Streams` itself.
 
 ## Layout
 
@@ -40,11 +55,18 @@ Everything lives in a single package, `wim`, one file per format concern:
 | `dentry.go` | `DirEntry` tree parsing |
 | `dentry_write.go` | `DirEntry` tree serialization + subdir-offset layout |
 | `metadata.go` | `ImageMetadata` (security data + dentry tree) |
-| `xml.go` | `XMLData` (UTF-16LE + BOM, light `IMAGE` parsing) |
+| `xml.go` | `XMLData` (UTF-16LE + BOM, light `IMAGE`/`WINDOWS` parsing) |
 | `integrity.go` | `IntegrityTable` |
 | `encoding.go` | UTF-16LE helpers |
 | `reader.go` | `Reader` over `io.ReaderAt` |
+| `path.go` | `ErrNotFound`, `DirEntry.Child`, `DirEntry.Lookup` |
+| `read.go` | `Reader.ReadFile` |
+| `tree.go` | `DirEntry.Add` |
+| `remove.go` | `DirEntry.Remove` |
+| `rename.go` | `DirEntry.Rename`, `DirEntry.ReadDir` |
+| `glob.go` | `MatchName` (DOS-style name globbing) |
 | `wim_test.go` | round-trip tests for every component |
+| `path_test.go` | tests for the path-based tree operations and `MatchName` |
 
 ## Usage
 
@@ -68,6 +90,15 @@ if err != nil {
 }
 for _, im := range x.Images {
     fmt.Printf("image %d: %s\n", im.Index, im.Name)
+    if im.Windows != nil {
+        // Windows-family images (e.g. install.wim/install.esd) additionally
+        // carry a <WINDOWS> sub-element with the fields DISM's
+        // `/Get-WimInfo` surfaces (Architecture, Edition, Installation,
+        // Language, Version). Confirmed against a real Windows 11 23H2
+        // install.esd's XML data, 2026-07-10.
+        fmt.Printf("  arch=%s edition=%s languages=%v\n",
+            im.Windows.ArchitectureName(), im.Windows.EditionID, im.Windows.Languages)
+    }
 }
 
 // The blob table is uncompressed in typical WIMs.

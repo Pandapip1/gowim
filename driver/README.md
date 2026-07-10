@@ -67,6 +67,31 @@ the files a real installation would copy onto the target machine:
   reusing `service`'s exported `FindOrCreateSubkey`/`SetValue` navigation
   helpers (`registryinstall.go`'s `mergeCriticalDeviceDatabase`)
 
+`listinstalled.go`'s `ListInstalled` enumerates the driver package folders
+already present in an image's DriverStore - the immediate subdirectories of
+an already-navigated FileRepository `*wim.DirEntry`, mirroring
+nano11builder.ps1's `Get-ChildItem -Path $driverRepo -Directory` - returning
+each folder's name paired with its own `*wim.DirEntry` (`InstalledPackage`),
+so a caller does not need a second lookup to inspect a package's contents.
+
+`uninstall.go`'s `Uninstall` reverses what `Install` and `InstallRegistry`
+set up for a driver package already present in an image: it detaches the
+package's DriverStore folder from the directory-entry tree (decrementing,
+but never deleting outright, any blob-table entry whose hash matches a
+removed stream - see `Uninstall`'s and `decrementBlobRefs`'s doc comments for
+why only that much refcount bookkeeping is safe without whole-WIM
+visibility), deletes its `Services\<name>` registry key, and removes just
+its own `CriticalDeviceDatabase` entries (matched by their own `Service`
+value), leaving other drivers' registrations untouched. Unlike
+`Install`/`InstallRegistry`, `Uninstall` takes no `*Package` - a driver
+already installed on a target image is not necessarily one the caller still
+has the original source files for - so its parameters are the
+already-resolved registry/tree locations and service name directly, and it
+deliberately treats "already (partially) removed" as success rather than an
+error (including swallowing `service.ErrNotFound` from the Services-key
+deletion step), since Uninstall's whole purpose is reaching a "not present"
+end state.
+
 It deliberately simplifies platform/OS-version selection: rather than
 evaluating `TargetOSVersion` decorations (OS major/minor version, product
 type, suite mask, build number), it unions the entries of every `<name>`,
@@ -141,8 +166,11 @@ It **deliberately does not** implement:
 | `service.go` | `ServiceInstall`, `(*Package).Services` (AddService directive chain resolution) |
 | `criticaldevicedatabase.go` | `CriticalDeviceDatabaseEntry`, `(*Package).CriticalDeviceDatabaseEntries`, `CriticalDeviceDatabaseSubkeyName` |
 | `registryinstall.go` | `InstallRegistry` (resolve each `ServiceInstall`'s `ImagePath` and delegate to `service.Install`; merge CriticalDeviceDatabase into a `*regf.Key` tree via `service`'s exported navigation helpers) |
+| `listinstalled.go` | `InstalledPackage`, `ListInstalled` (enumerate DriverStore package folders already present in an image) |
+| `uninstall.go` | `Uninstall` (reverse of `Install`+`InstallRegistry`: detach a package's DriverStore folder, adjust blob RefCounts, delete its Services key, remove just its own CriticalDeviceDatabase entries) |
 | `driver_test.go` | synthetic INF/catalog/PE fixtures and tests (payload files, verify, WIM install) |
 | `driver_registry_test.go` | synthetic INF/registry fixtures and tests (services, CDDB, control-set resolution, registry install) |
+| `uninstall_test.go` | synthetic FileRepository/blob-table/SYSTEM-hive-shaped fixtures and tests (`ListInstalled`, `Uninstall`'s file/service/CDDB removal and idempotency) |
 
 ## Usage
 
@@ -235,6 +263,24 @@ resolution logic is now tested by the sibling
 [`service`](../service) package; `driver_registry_test.go` still calls
 `service.CurrentControlSet` to build a realistic tree for `InstallRegistry`'s
 tests.
+
+`uninstall_test.go` hand-builds a `FileRepository` `*wim.DirEntry` with two
+package folders (each a single `driver.sys` child) and a `*wim.BlobTable`
+with the corresponding entries, plus a SYSTEM-hive-shaped `*regf.Key` tree
+with a `Services\ContosoDrv` key and two `CriticalDeviceDatabase` entries -
+one belonging to `ContosoDrv`, one to an unrelated `OtherDrv`. Tests assert:
+`ListInstalled` returns the expected `InstalledPackage` names (in `Children`
+order, pointing back at the same `*wim.DirEntry`) and skips a non-directory
+child; `Uninstall` removes the target package's `DirEntry` subtree,
+decrements (but does not delete) its blob-table entry's `RefCount` while
+leaving the unrelated package's `RefCount` untouched, deletes its
+`Services\<name>` key, and removes only its own `CriticalDeviceDatabase`
+entry, leaving `OtherDrv`'s alone; and that `Uninstall` is a no-op success
+(not an error) when called against a package/service that is already
+partially or fully absent, or with a nil `currentControlSet`, or twice in a
+row. A separate test asserts `Uninstall` still validates its required
+(non-registry) arguments (nil `driverStoreParent`, empty
+`driverStoreDirName`/`serviceName`).
 
 ## License
 

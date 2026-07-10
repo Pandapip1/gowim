@@ -151,6 +151,27 @@
 //     addition to the wim package, not here: Install only returns in-memory
 //     *wim.DirEntry nodes and a slice of new blob content to add, given an
 //     existing *wim.ImageMetadata / *wim.BlobTable to extend.
+//
+// # Removing a driver already present in an image
+//
+// listinstalled.go's ListInstalled enumerates the driver package folders
+// already present in an image's DriverStore (the immediate subdirectories
+// of an already-navigated FileRepository *wim.DirEntry - mirroring
+// nano11builder.ps1's `Get-ChildItem -Path $driverRepo -Directory`), and
+// uninstall.go's Uninstall reverses what Install and InstallRegistry set up
+// for one such package: detaching its DriverStore folder from the
+// directory-entry tree (decrementing, but never deleting, matching
+// blob-table entries' RefCount - see decrementBlobRefs's doc comment for why
+// only that much is safe to do without whole-WIM visibility), deleting its
+// Services\<name> registry key, and removing just its own
+// CriticalDeviceDatabase entries. Unlike Install/InstallRegistry, Uninstall
+// takes no *Package - a driver already installed on a target image is not
+// necessarily one the caller still has the original source files for - so
+// its parameters are the already-resolved registry/tree locations and
+// service name directly. See Uninstall's own doc comment for the
+// idempotency policy it deliberately adopts (treating "already gone" as
+// success, including swallowing service.ErrNotFound) and the exact
+// CriticalDeviceDatabase-entry matching rule.
 package driver
 
 import "fmt"

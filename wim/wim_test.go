@@ -245,6 +245,100 @@ func TestXMLDataRoundTrip(t *testing.T) {
 	}
 }
 
+// TestXMLDataWindowsFields verifies parsing of the <WINDOWS> sub-element and
+// its siblings (<DISPLAYNAME>, <DISPLAYDESCRIPTION>, <FLAGS>) using a
+// trimmed, verbatim excerpt of the real <IMAGE> element observed in a real
+// Windows 11 23H2 install.esd's XML data resource (confirmed 2026-07-10;
+// full-image element was ~1.3KB, elided here to just the fields under test).
+func TestXMLDataWindowsFields(t *testing.T) {
+	doc := `<WIM><IMAGE INDEX="1"><DIRCOUNT>24909</DIRCOUNT><FILECOUNT>99241</FILECOUNT><TOTALBYTES>16383717491</TOTALBYTES><WINDOWS><ARCH>9</ARCH><PRODUCTNAME>Microsoft® Windows® Operating System</PRODUCTNAME><EDITIONID>Professional</EDITIONID><INSTALLATIONTYPE>Client</INSTALLATIONTYPE><PRODUCTTYPE>WinNT</PRODUCTTYPE><PRODUCTSUITE>Terminal Server</PRODUCTSUITE><LANGUAGES><LANGUAGE>en-US</LANGUAGE><DEFAULT>en-US</DEFAULT></LANGUAGES><VERSION><MAJOR>10</MAJOR><MINOR>0</MINOR><BUILD>22621</BUILD><SPBUILD>2283</SPBUILD><SPLEVEL>0</SPLEVEL><BRANCH>ni_release_svc_prod3</BRANCH></VERSION><SYSTEMROOT>WINDOWS</SYSTEMROOT></WINDOWS><NAME>Windows 11 Pro</NAME><DESCRIPTION>Windows 11 Pro</DESCRIPTION><DISPLAYNAME>Windows 11 Pro</DISPLAYNAME><DISPLAYDESCRIPTION>Windows 11 Pro</DISPLAYDESCRIPTION><FLAGS>Professional</FLAGS></IMAGE><TOTALBYTES>3502723354</TOTALBYTES></WIM>`
+	orig := &XMLData{Document: doc}
+	b := orig.AppendTo(nil)
+
+	got, err := ParseXMLData(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Round-trip: Document must be preserved byte-identically; Images is a
+	// read-only convenience view that must not affect AppendTo's output.
+	if got.Document != doc {
+		t.Fatalf("document mismatch:\n got %q\nwant %q", got.Document, doc)
+	}
+	b2 := got.AppendTo(nil)
+	if !bytes.Equal(b, b2) {
+		t.Fatalf("round-trip AppendTo mismatch:\n got %v\nwant %v", b2, b)
+	}
+
+	if len(got.Images) != 1 {
+		t.Fatalf("parsed %d images, want 1", len(got.Images))
+	}
+	im := got.Images[0]
+
+	if im.DisplayName != "Windows 11 Pro" || im.DisplayDescription != "Windows 11 Pro" || im.Flags != "Professional" {
+		t.Fatalf("sibling fields mismatch: %+v", im)
+	}
+
+	if im.Windows == nil {
+		t.Fatal("Windows is nil, want populated")
+	}
+	w := im.Windows
+	if w.Architecture != 9 {
+		t.Fatalf("Architecture = %d, want 9 (PROCESSOR_ARCHITECTURE_AMD64)", w.Architecture)
+	}
+	if got, want := w.ArchitectureName(), "x64"; got != want {
+		t.Fatalf("ArchitectureName() = %q, want %q", got, want)
+	}
+	if w.ProductName != "Microsoft® Windows® Operating System" {
+		t.Fatalf("ProductName = %q", w.ProductName)
+	}
+	if w.EditionID != "Professional" {
+		t.Fatalf("EditionID = %q", w.EditionID)
+	}
+	if w.InstallationType != "Client" {
+		t.Fatalf("InstallationType = %q", w.InstallationType)
+	}
+	if w.ProductType != "WinNT" {
+		t.Fatalf("ProductType = %q", w.ProductType)
+	}
+	if w.ProductSuite != "Terminal Server" {
+		t.Fatalf("ProductSuite = %q", w.ProductSuite)
+	}
+	if w.SystemRoot != "WINDOWS" {
+		t.Fatalf("SystemRoot = %q", w.SystemRoot)
+	}
+	if len(w.Languages) != 1 || w.Languages[0] != "en-US" {
+		t.Fatalf("Languages = %v, want [en-US]", w.Languages)
+	}
+	if w.DefaultLanguage != "en-US" {
+		t.Fatalf("DefaultLanguage = %q, want en-US", w.DefaultLanguage)
+	}
+	if w.Version == nil {
+		t.Fatal("Version is nil, want populated")
+	}
+	v := w.Version
+	if v.Major != 10 || v.Minor != 0 || v.Build != 22621 || v.SPBuild != 2283 || v.SPLevel != 0 || v.Branch != "ni_release_svc_prod3" {
+		t.Fatalf("Version mismatch: %+v", v)
+	}
+}
+
+// TestXMLDataNoWindows confirms XMLImage.Windows is nil (not a zero-valued
+// struct pointer) when the <IMAGE> element has no <WINDOWS> child, so callers
+// can tell "no Windows metadata" apart from "all-zero Windows metadata".
+func TestXMLDataNoWindows(t *testing.T) {
+	doc := `<WIM><IMAGE INDEX="1"><NAME>Data</NAME></IMAGE></WIM>`
+	got, err := ParseXMLData((&XMLData{Document: doc}).AppendTo(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Images) != 1 {
+		t.Fatalf("parsed %d images, want 1", len(got.Images))
+	}
+	if got.Images[0].Windows != nil {
+		t.Fatalf("Windows = %+v, want nil", got.Images[0].Windows)
+	}
+}
+
 func TestDirEntryTreeRoundTrip(t *testing.T) {
 	// Build a small tree: root dir with a file and a subdir; the subdir holds
 	// a file with a named alternate data stream.

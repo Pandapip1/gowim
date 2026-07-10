@@ -107,6 +107,19 @@ func (t *BlobTable) AppendTo(dst []byte) ([]byte, error) {
 // EncodedLen returns the number of bytes AppendTo will write.
 func (t *BlobTable) EncodedLen() int { return len(t.Entries) * BlobDescriptorSize }
 
+// ByHash looks up the blob-table entry whose Hash matches h. It returns
+// (BlobDescriptor{}, false) if no entry matches. If multiple entries share a
+// hash (which the format permits but wimlib avoids by deduplicating on
+// write), the first matching entry in table order is returned.
+func (t *BlobTable) ByHash(h Hash) (BlobDescriptor, bool) {
+	for _, e := range t.Entries {
+		if e.Hash == h {
+			return e, true
+		}
+	}
+	return BlobDescriptor{}, false
+}
+
 // MetadataResources returns the resource headers of all entries flagged as
 // metadata (i.e. WIM image metadata resources), in table order.
 func (t *BlobTable) MetadataResources() []ResourceHeader {

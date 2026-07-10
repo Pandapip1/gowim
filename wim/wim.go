@@ -12,6 +12,22 @@
 // capture/apply. Compressed resource payloads are exposed as raw byte ranges;
 // serialization writes resources uncompressed. See ResourceHeader.Flags and
 // the WIM_RESHDR_FLAG_* constants for how compression is signalled on disk.
+//
+// It also provides path-based operations over a DirEntry tree, generalizing
+// the path-walking/case-insensitive-child-lookup logic that callers like
+// driver/install.go would otherwise hand-roll themselves: DirEntry.Lookup and
+// DirEntry.Child resolve '/'- or '\'-separated paths case-insensitively (see
+// ErrNotFound); DirEntry.Add and DirEntry.Remove create or delete a path's
+// entry (and, for Remove, its subtree), creating intervening directories as
+// Add needs them; DirEntry.Rename moves an entry; DirEntry.ReadDir lists a
+// directory's children; and MatchName does DOS-style '*'/'?' glob matching
+// over a single name component. As with the rest of this package, these stay
+// within the structural layer: Reader.ReadFile resolves a path down to bytes
+// but still returns ErrCompressedResource unmodified for a compressed blob
+// rather than decompressing it, Add takes a Hash rather than raw content
+// bytes (getting those bytes into a BlobTable is the caller's job, as it
+// already is for driver.Install), and Remove does not adjust any BlobTable's
+// reference counts for streams a removed subtree stops referencing.
 package wim
 
 import (
