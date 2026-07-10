@@ -60,7 +60,7 @@
 //     the Select\Default -> ControlSetNNN resolution a SYSTEM hive's
 //     "current control set" conventionally requires: both are generic,
 //     INF-independent Windows-service-registry concepts, so they live in the
-//     sibling service package (github.com/gavin-john/gowim/service -
+//     sibling service package (github.com/Pandapip1/gowim/service -
 //     service.Install, service.CurrentControlSet; see that package's
 //     citations). registryinstall.go's InstallRegistry resolves each
 //     ServiceInstall's BinaryDirID+BinaryPath (via the same DirID model as
@@ -73,7 +73,7 @@
 //     PnP/driver-install-specific, so it stays here, written into a
 //     caller-supplied *regf.Key tree (registryinstall.go's
 //     mergeCriticalDeviceDatabase) via the sibling regf package
-//     (github.com/gavin-john/gowim/regf) for the on-disk hive shape, reusing
+//     (github.com/Pandapip1/gowim/regf) for the on-disk hive shape, reusing
 //     the service package's exported FindOrCreateSubkey/SetValue navigation
 //     helpers rather than a second private copy of that logic.
 //

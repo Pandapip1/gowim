@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/gavin-john/gowim/regf"
+	"github.com/Pandapip1/gowim/regf"
 )
 
 // buildSystemHiveRoot hand-builds a minimal SYSTEM-hive-shaped root key:

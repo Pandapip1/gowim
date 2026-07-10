@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gavin-john/gowim/regf"
+	"github.com/Pandapip1/gowim/regf"
 )
 
 // CurrentControlSet resolves a SYSTEM hive's authoritative control set:

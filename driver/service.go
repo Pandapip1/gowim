@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gavin-john/gowim/inf"
+	"github.com/Pandapip1/gowim/inf"
 )
 
 // spsvcinstAssocService is the SPSVCINST_ASSOCSERVICE bit (0x00000002) of an

@@ -3,7 +3,7 @@ package service
 import (
 	"errors"
 
-	"github.com/gavin-john/gowim/regf"
+	"github.com/Pandapip1/gowim/regf"
 )
 
 // Install produces/merges a Services\<svc.Name> subkey under servicesKey

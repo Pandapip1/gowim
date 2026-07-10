@@ -1,3 +1,3 @@
-module github.com/gavin-john/gowim/wim
+module github.com/Pandapip1/gowim/wim
 
 go 1.22

@@ -11,7 +11,7 @@ packages into WIM disk images: it lets a caller validate that a `.sys` file
 is a well-formed PE image, read its machine/architecture/timestamp/checksum,
 and — most importantly — locate the Attribute Certificate Table (the
 embedded Authenticode signature) as a raw byte range, ready to hand to the
-sibling package `github.com/gavin-john/gowim/cat`, which structurally parses
+sibling package `github.com/Pandapip1/gowim/cat`, which structurally parses
 the PKCS#7 SignedData blob inside it.
 
 ## Scope

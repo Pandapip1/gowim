@@ -8,8 +8,8 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/gavin-john/gowim/pe"
-	"github.com/gavin-john/gowim/wim"
+	"github.com/Pandapip1/gowim/pe"
+	"github.com/Pandapip1/gowim/wim"
 )
 
 // NewBlob is one payload file's content that was not already present in the

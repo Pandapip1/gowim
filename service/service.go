@@ -3,7 +3,7 @@
 // key tree that CreateService documents itself as writing to - and merges an
 // already-resolved Service registration into a caller-supplied *regf.Key
 // tree, using the sibling regf package
-// (github.com/gavin-john/gowim/regf) purely as a plain Key/Value struct tree,
+// (github.com/Pandapip1/gowim/regf) purely as a plain Key/Value struct tree,
 // exactly as the sibling driver package's install.go builds *wim.DirEntry
 // trees by hand with no special "tree API" from the wim package.
 //
@@ -30,7 +30,7 @@
 //   - The SYSTEM hive's DriverDatabase key tree, the Enum device-instance
 //     tree, or INFCACHE.1 - none of these are a "service" concept at all;
 //     see the sibling driver package's README
-//     (https://github.com/gavin-john/gowim/tree/main/driver#readme) for why
+//     (https://github.com/Pandapip1/gowim/tree/main/driver#readme) for why
 //     driver does not implement them either.
 //   - CriticalDeviceDatabase: registering a hardware ID against a service
 //     before PnP ever sees the device is a PnP/driver-install concept, not a

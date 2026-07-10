@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gavin-john/gowim/cat"
-	"github.com/gavin-john/gowim/inf"
+	"github.com/Pandapip1/gowim/cat"
+	"github.com/Pandapip1/gowim/inf"
 )
 
 // PayloadFile is one file a driver package's [Manufacturer]/Models/CopyFiles

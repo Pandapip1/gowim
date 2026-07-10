@@ -42,7 +42,7 @@ type Image struct {
 	// exposes its bCertificate payload as raw bytes without interpreting it;
 	// for an Authenticode-signed driver this is a PKCS#7 SignedData blob
 	// (structurally parsed by the sibling package
-	// github.com/gavin-john/gowim/cat, not by this package).
+	// github.com/Pandapip1/gowim/cat, not by this package).
 	Certificates []Certificate
 
 	// HeaderPadding is the verbatim bytes, if any, between the end of the

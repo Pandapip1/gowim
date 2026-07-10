@@ -35,7 +35,7 @@ var ErrTruncatedCertEntry = errors.New("pe: truncated WIN_CERTIFICATE entry")
 // For an Authenticode-signed driver, Type is CertTypePKCSSignedData and Data
 // is a raw PKCS#7 SignedData structure (the Authenticode signature). This
 // package does not parse that structure; see the sibling package
-// github.com/gavin-john/gowim/cat for structural PKCS#7 parsing.
+// github.com/Pandapip1/gowim/cat for structural PKCS#7 parsing.
 type Certificate struct {
 	// Revision is one of the CertRevision* constants (WIN_CERTIFICATE
 	// wRevision).

@@ -11,9 +11,9 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/gavin-john/gowim/cat"
-	"github.com/gavin-john/gowim/pe"
-	"github.com/gavin-john/gowim/wim"
+	"github.com/Pandapip1/gowim/cat"
+	"github.com/Pandapip1/gowim/pe"
+	"github.com/Pandapip1/gowim/wim"
 )
 
 // --- synthetic .sys payload (minimal but structurally valid PE32+ image) ---

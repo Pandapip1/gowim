@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"strings"
 
-	"github.com/gavin-john/gowim/regf"
+	"github.com/Pandapip1/gowim/regf"
 )
 
 // FindSubkey returns the direct child of key named name (matching Windows'

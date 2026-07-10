@@ -147,7 +147,7 @@ It **deliberately does not** implement:
 ## Usage
 
 ```go
-// import "github.com/gavin-john/gowim/service" for CurrentControlSet below.
+// import "github.com/Pandapip1/gowim/service" for CurrentControlSet below.
 
 fsys := os.DirFS("/path/to/extracted/driver/package")
 

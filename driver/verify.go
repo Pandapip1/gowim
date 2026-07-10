@@ -8,7 +8,7 @@ import (
 	"errors"
 	"io/fs"
 
-	"github.com/gavin-john/gowim/cat"
+	"github.com/Pandapip1/gowim/cat"
 )
 
 // VerifyStatus classifies the result of comparing one payload file's hash

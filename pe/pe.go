@@ -32,7 +32,7 @@
 // signature verification. In particular, the bCertificate payload of a
 // WIN_CERTIFICATE entry is a PKCS#7 SignedData structure — this package
 // exposes it only as raw bytes; structurally parsing that PKCS#7 content is
-// the job of the sibling package github.com/gavin-john/gowim/cat, which this
+// the job of the sibling package github.com/Pandapip1/gowim/cat, which this
 // package does not import or depend on.
 package pe
 

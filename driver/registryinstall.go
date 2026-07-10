@@ -1,12 +1,12 @@
 // This file extends the driver package to write a driver package's Services
 // and CriticalDeviceDatabase registry registration into a SYSTEM-hive-shaped
 // *regf.Key tree, using the sibling regf package
-// (github.com/gavin-john/gowim/regf) purely as a plain Key/Value struct tree
+// (github.com/Pandapip1/gowim/regf) purely as a plain Key/Value struct tree
 // - exactly as install.go builds *wim.DirEntry trees by hand with no special
 // "tree API" from the wim package. The generic *regf.Key/*regf.Value
 // find-or-create/navigation logic itself (and the AddService-derived
 // service-registration schema) now lives in the sibling
-// github.com/gavin-john/gowim/service package (see its README), which this
+// github.com/Pandapip1/gowim/service package (see its README), which this
 // file's Services-related code delegates to - service.FindSubkey/
 // FindOrCreateSubkey/FindValue/SetValue for CriticalDeviceDatabase's own
 // navigation needs below, and service.Install (via a service.Service built
@@ -54,8 +54,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gavin-john/gowim/regf"
-	"github.com/gavin-john/gowim/service"
+	"github.com/Pandapip1/gowim/regf"
+	"github.com/Pandapip1/gowim/service"
 )
 
 // mergeServiceInstall resolves svc's BinaryDirID+BinaryPath (via destDirs)

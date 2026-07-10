@@ -5,8 +5,8 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/gavin-john/gowim/regf"
-	"github.com/gavin-john/gowim/service"
+	"github.com/Pandapip1/gowim/regf"
+	"github.com/Pandapip1/gowim/service"
 )
 
 // registryTestINF extends testINF (driver_test.go) with a hardware ID +
