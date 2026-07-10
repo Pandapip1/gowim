@@ -116,9 +116,9 @@ func parseNKCell(data []byte) (*nkCell, error) {
 		largestValueNameSize:   le.Uint32(data[60:64]),
 		largestValueDataSize:   le.Uint32(data[64:68]),
 		unknown6:               le.Uint32(data[68:72]),
-		classNameSize:          le.Uint16(data[72:74]),
 	}
-	nameSize := int(le.Uint16(data[74:76]))
+	nameSize := int(le.Uint16(data[72:74]))
+	n.classNameSize = le.Uint16(data[74:76])
 	if nkHeaderSize+nameSize > len(data) {
 		return nil, fmt.Errorf("nk cell: name (size %d) overruns cell", nameSize)
 	}
@@ -146,8 +146,8 @@ func (n *nkCell) appendTo(dst []byte) []byte {
 	le.PutUint32(hdr[60:64], n.largestValueNameSize)
 	le.PutUint32(hdr[64:68], n.largestValueDataSize)
 	le.PutUint32(hdr[68:72], n.unknown6)
-	le.PutUint16(hdr[72:74], n.classNameSize)
-	le.PutUint16(hdr[74:76], uint16(len(n.name)))
+	le.PutUint16(hdr[72:74], uint16(len(n.name)))
+	le.PutUint16(hdr[74:76], n.classNameSize)
 	dst = append(dst, hdr[:]...)
 	dst = append(dst, n.name...)
 	return dst
