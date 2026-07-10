@@ -8,4 +8,7 @@ use (
 	./driver
 	./regf
 	./service
+	./xpress
+	./lzx
+	./lzms
 )
