@@ -56,20 +56,26 @@
 //
 //   - The documented well-known Services registry key schema
 //     (HKLM\SYSTEM\CurrentControlSet\Services\<name>'s Type/Start/
-//     ErrorControl/ImagePath/Group/DependOnGroup/DependOnService values; see
-//     "HKLM\SYSTEM\CurrentControlSet\Services Registry Tree",
-//     https://learn.microsoft.com/windows-hardware/drivers/install/hklm-system-currentcontrolset-services-registry-tree),
-//     and the CriticalDeviceDatabase mechanism for registering a device's
-//     hardware ID against a service before PnP ever sees the device (see
-//     criticaldevicedatabase.go's citations) - both written into a
-//     caller-supplied *regf.Key tree (registryinstall.go's InstallRegistry),
-//     using the sibling regf package
-//     (github.com/gavin-john/gowim/regf) for the on-disk hive shape.
+//     ErrorControl/ImagePath/Group/DependOnGroup/DependOnService values) and
+//     the Select\Default -> ControlSetNNN resolution a SYSTEM hive's
+//     "current control set" conventionally requires: both are generic,
+//     INF-independent Windows-service-registry concepts, so they live in the
+//     sibling service package (github.com/gavin-john/gowim/service -
+//     service.Install, service.CurrentControlSet; see that package's
+//     citations). registryinstall.go's InstallRegistry resolves each
+//     ServiceInstall's BinaryDirID+BinaryPath (via the same DirID model as
+//     dirid.go/PayloadFile) into a plain ImagePath string and delegates the
+//     rest to service.Install.
 //
-//   - The Select\Default -> ControlSetNNN resolution that a SYSTEM hive's
-//     "current control set" conventionally requires (controlset.go's
-//     CurrentControlSet), since CurrentControlSet is a runtime symbolic
-//     link rather than a real subtree an offline tool can just open.
+//   - The CriticalDeviceDatabase mechanism for registering a device's
+//     hardware ID against a service before PnP ever sees the device (see
+//     criticaldevicedatabase.go's citations) - unlike Services, this *is*
+//     PnP/driver-install-specific, so it stays here, written into a
+//     caller-supplied *regf.Key tree (registryinstall.go's
+//     mergeCriticalDeviceDatabase) via the sibling regf package
+//     (github.com/gavin-john/gowim/regf) for the on-disk hive shape, reusing
+//     the service package's exported FindOrCreateSubkey/SetValue navigation
+//     helpers rather than a second private copy of that logic.
 //
 // Deliberate simplifications of the above, since this package's job is only
 // to enumerate a package's payload *files* faithfully enough to hash and
@@ -112,8 +118,8 @@
 //     search turned up no authoritative Microsoft Learn (or equivalent)
 //     page describing this schema - unlike CriticalDeviceDatabase and the
 //     Services key schema, both of which are documented (see
-//     registryinstall.go's package-level doc comment for the full citation
-//     trail and reasoning, mirroring the empirical-verification rigor of
+//     registryinstall.go's and the sibling service package's citation
+//     trails and reasoning, mirroring the empirical-verification rigor of
 //     the DriverStore path-hash non-goal above).
 //   - The Enum device-instance tree
 //     (SYSTEM\CurrentControlSet\Enum\<enumerator>\<device-id>\<instance-id>).

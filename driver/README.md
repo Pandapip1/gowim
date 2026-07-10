@@ -46,17 +46,26 @@ the files a real installation would copy onto the target machine:
   and `Dependencies` (`service.go`'s `ServiceInstall`, `(*Package).Services`)
 - the documented `HKLM\SYSTEM\CurrentControlSet\Services\<name>` registry
   schema (`Type`/`Start`/`ErrorControl`/`ImagePath`/`Group`/`DependOnGroup`/
-  `DependOnService`;
-  [HKLM\SYSTEM\CurrentControlSet\Services Registry Tree](https://learn.microsoft.com/windows-hardware/drivers/install/hklm-system-currentcontrolset-services-registry-tree)),
-  and the `CriticalDeviceDatabase` mechanism for registering a device's
-  hardware ID against a service before PnP ever sees the device (see
-  `criticaldevicedatabase.go`'s citations) - both merged into a
-  caller-supplied `*regf.Key` tree via the sibling
-  [`regf`](../regf) package (`registryinstall.go`'s `InstallRegistry`)
-- the `Select\Default` -> `ControlSetNNN` resolution a SYSTEM hive's "current
-  control set" conventionally requires (`controlset.go`'s
-  `CurrentControlSet`), since `CurrentControlSet` is a runtime symbolic link
-  rather than a real subtree an offline tool can just open
+  `DependOnService`), and the `Select\Default` -> `ControlSetNNN` resolution a
+  SYSTEM hive's "current control set" conventionally requires - both of these
+  are generic, INF-independent Windows-service-registry concepts, and now
+  live in the sibling [`service`](../service) package
+  (`service.Install`/`service.CurrentControlSet`) rather than in `driver`
+  itself. `registryinstall.go`'s `InstallRegistry` resolves each
+  `ServiceInstall`'s `BinaryDirID`+`BinaryPath` into a plain `ImagePath`
+  string and delegates the actual registry merge to `service.Install`, so
+  `driver`'s own remaining scope here is just the INF-specific part: parsing
+  the `AddService` directive chain and resolving its `%dirid%\path` token. A
+  caller that already has a fully-resolved service registration in hand (not
+  derived from an INF) can depend on `service` alone, without pulling in
+  `driver`'s much heavier `inf`/`cat`/`pe`/`wim` dependency set.
+- the `CriticalDeviceDatabase` mechanism for registering a device's hardware
+  ID against a service before PnP ever sees the device (see
+  `criticaldevicedatabase.go`'s citations), which - unlike Services - *is*
+  PnP/driver-install-specific, so it stays in `driver` and is merged into a
+  caller-supplied `*regf.Key` tree via the sibling [`regf`](../regf) package,
+  reusing `service`'s exported `FindOrCreateSubkey`/`SetValue` navigation
+  helpers (`registryinstall.go`'s `mergeCriticalDeviceDatabase`)
 
 It deliberately simplifies platform/OS-version selection: rather than
 evaluating `TargetOSVersion` decorations (OS major/minor version, product
@@ -91,8 +100,8 @@ It **deliberately does not** implement:
   for a device. Checked, not just assumed: a documentation search turned up
   no authoritative Microsoft Learn (or equivalent) page describing this
   schema - unlike `CriticalDeviceDatabase` and the `Services` key schema,
-  both of which are documented (see `registryinstall.go`'s package-level doc
-  comment for the full citation trail).
+  both of which are documented (see `registryinstall.go`'s and the sibling
+  [`service`](../service) package's citation trails).
 - The `Enum` device-instance tree
   (`SYSTEM\CurrentControlSet\Enum\<enumerator>\<device-id>\<instance-id>`).
   Registering an actual device instance requires a real, live hardware
@@ -131,14 +140,15 @@ It **deliberately does not** implement:
 | `install.go` | `NewBlob`, `Install` (merge payload files into a `*wim.ImageMetadata` + `*wim.BlobTable`) |
 | `service.go` | `ServiceInstall`, `(*Package).Services` (AddService directive chain resolution) |
 | `criticaldevicedatabase.go` | `CriticalDeviceDatabaseEntry`, `(*Package).CriticalDeviceDatabaseEntries`, `CriticalDeviceDatabaseSubkeyName` |
-| `controlset.go` | `CurrentControlSet` (`Select\Default` -> `ControlSetNNN` resolution) |
-| `registryinstall.go` | local `regf.Key`/`regf.Value` find-or-create helpers, `InstallRegistry` (merge Services/CriticalDeviceDatabase into a `*regf.Key` tree) |
+| `registryinstall.go` | `InstallRegistry` (resolve each `ServiceInstall`'s `ImagePath` and delegate to `service.Install`; merge CriticalDeviceDatabase into a `*regf.Key` tree via `service`'s exported navigation helpers) |
 | `driver_test.go` | synthetic INF/catalog/PE fixtures and tests (payload files, verify, WIM install) |
 | `driver_registry_test.go` | synthetic INF/registry fixtures and tests (services, CDDB, control-set resolution, registry install) |
 
 ## Usage
 
 ```go
+// import "github.com/gavin-john/gowim/service" for CurrentControlSet below.
+
 fsys := os.DirFS("/path/to/extracted/driver/package")
 
 pkg, err := driver.LoadPackage(fsys, "contoso.inf", "amd64")
@@ -171,8 +181,11 @@ if err != nil {
 
 // Merge the package's Services and CriticalDeviceDatabase registry
 // registration into a SYSTEM hive's current control set. destDirs is the
-// same map used above for Install.
-currentControlSet, err := driver.CurrentControlSet(systemHive.Root)
+// same map used above for Install. CurrentControlSet now lives in the
+// sibling service package (a deliberate, documented API move - see that
+// package's README) - InstallRegistry's own signature/behavior is
+// unchanged.
+currentControlSet, err := service.CurrentControlSet(systemHive.Root)
 if err != nil {
     log.Fatal(err)
 }
@@ -214,11 +227,14 @@ construction style as `regf/regf_test.go`. Tests assert: `Services` enumerates
 the expected `ServiceInstall` (including the `AssocService` bit and parsed
 `Dependencies`/`LoadOrderGroup`); `CriticalDeviceDatabaseEntries` enumerates
 one entry per hardware/compatible ID with the right `ClassGuid`/`Service`;
-`CurrentControlSet` resolves the right `ControlSetNNN` via `Select\Default`;
 `InstallRegistry` produces the expected `Services\<name>` and
 `CriticalDeviceDatabase\<hwid>` subkeys/values, is idempotent (a second call
 does not duplicate subkeys or values), and the merged tree round-trips
-through `regf.Hive.AppendTo`/`regf.Parse`.
+through `regf.Hive.AppendTo`/`regf.Parse`. `CurrentControlSet`'s own
+resolution logic is now tested by the sibling
+[`service`](../service) package; `driver_registry_test.go` still calls
+`service.CurrentControlSet` to build a realistic tree for `InstallRegistry`'s
+tests.
 
 ## License
 

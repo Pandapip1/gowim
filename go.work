@@ -7,4 +7,5 @@ use (
 	./pe
 	./driver
 	./regf
+	./service
 )

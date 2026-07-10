@@ -19,6 +19,7 @@ module's own README for its precise scope and non-goals.
 | [`pe/`](pe/README.md) | PE/COFF container (used for `.sys` driver binaries) | done |
 | [`driver/`](driver/README.md) | ties `inf`+`cat`+`pe`+`wim` together: load a driver package, verify its files against its catalog, and build the WIM-side tree/blob additions to install it | done |
 | [`regf/`](regf/README.md) | Windows Registry hive (regf) files: base block, hive bins, key/value/security cells | done |
+| [`service/`](service/README.md) | generic (INF-independent) Windows service registry-registration schema: model a service and merge it into a `regf.Key` tree | done |
 
 These support installing `.inf`/`.cat`/`.sys` driver packages into WIM images
 — `inf`, `cat`, and `pe` handle the three file formats that make up a driver
@@ -35,13 +36,26 @@ its README for the citations/empirical checks behind both) — callers supply
 destination paths, and a final WIM-file writer (assembling a complete output
 file with real resource offsets) is still a future addition to `wim`.
 
+`service` is a standalone sibling of `driver` that depends only on `regf`: it
+models what a Windows service registration in the registry looks like
+(`Service`, the `CreateService`-derived `Type*`/`Start*`/`Error*`
+constants), merges one into a `Services\<name>` key (`Install`), and resolves
+a SYSTEM hive's `CurrentControlSet` (`Select\Default` -> `ControlSetNNN`).
+`driver` depends on `service` (not the other way around) and builds on top of
+it for the INF-specific parts — parsing the `AddService` directive chain and
+resolving its `%dirid%\path` token into a plain `ImagePath` — so that a
+caller who already has a fully-resolved service registration in hand, and
+has no INF to parse, can add it to a registry hive with just `service` and
+`regf`, without pulling in `driver`'s much heavier `inf`/`cat`/`pe`/`wim`
+dependency set.
+
 ## Working in this repo
 
 This is a multi-module workspace. From the repo root:
 
 ```
-go build ./wim/... ./inf/... ./cat/... ./pe/... ./driver/... ./regf/...
-go test  ./wim/... ./inf/... ./cat/... ./pe/... ./driver/... ./regf/...
+go build ./wim/... ./inf/... ./cat/... ./pe/... ./driver/... ./regf/... ./service/...
+go test  ./wim/... ./inf/... ./cat/... ./pe/... ./driver/... ./regf/... ./service/...
 ```
 
 (Plain `./...` doesn't resolve from the workspace root since it isn't itself
