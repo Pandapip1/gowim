@@ -53,12 +53,29 @@ container-level complexity than per-resource chunk framing (see
 run without unpacking it). Reading or writing a solid resource as data returns
 `ErrCompressedResource`.
 
-Filesystem capture/apply, and assembling an entire multi-resource WIM file
-(header + blob table + XML data + metadata resources + integrity table with
-correct offsets), remain out of scope too: `EncodeResourceData` produces one
-resource's payload bytes; laying out a whole file around several such
-resources is a caller concern (see `write_test.go` for a worked example built
-entirely from this package's own serialization primitives).
+**Assembling a complete, multi-image WIM file is directly supported** via
+`WriteTo`/`Assemble`. Given one `*ImageMetadata` per image, a `*BlobTable`
+whose entries already have correct `Hash`/`RefCount`/`PartNumber` (computing
+reference counts by walking dentry trees is the caller's job, not the
+writer's -- exactly as it already is for `driver.Install`), a `*XMLData`, and
+a `BlobSource` supplying each blob's raw content by hash, the writer lays out
+the whole file (blobs, then one metadata resource per image, then the blob
+table, then XML data, with the header patched in last once every offset is
+known -- the same order `write_test.go`'s original test-only `buildMinimalWIM`
+helper already used, generalized here into real package API), fills in every
+`BlobDescriptor.Resource`, and sets `Header.ImageCount`/`BootIndex`/
+`BootMetadata` correctly. It supports all three compression types (or none)
+uniformly for the whole container (a WIM has one compression type, not a
+per-blob choice), and multiple images sharing a blob by hash (the caller
+supplies one blob-table entry with `RefCount` reflecting all the images that
+reference it; the writer places its content once).
+
+Out of scope, matching the rest of this package: solid resources (the writer
+never emits `ResFlagSolid`), an integrity table (`Header.IntegrityTable` is
+always left zero/absent), and multi-part/split WIMs (`PartNumber`/
+`TotalParts` are always written as 1/1). Filesystem capture/apply remains out
+of scope too. See `writer.go`'s doc comments and `writer_test.go` for the
+full verification story.
 
 The path-based tree operations have their own explicit scope boundaries:
 `DirEntry.Add` takes a `Hash`, not raw content bytes - getting those bytes into
@@ -88,6 +105,7 @@ Everything lives in a single package, `wim`, one file per format concern:
 | `chunk.go` | `CompressionType`, `Header.CompressionType`, chunk-table size/count helpers shared by encode and decode |
 | `decompress.go` | `DecodeResourceData`, codec dispatch for decoding |
 | `compress.go` | `EncodeResourceData`, codec dispatch for encoding |
+| `writer.go` | `WriteTo`/`Assemble`: full multi-image WIM assembly, `BlobSource`/`MapBlobSource`, `WriteOptions` |
 | `reader.go` | `Reader` over `io.ReaderAt` |
 | `path.go` | `ErrNotFound`, `DirEntry.Child`, `DirEntry.Lookup` |
 | `read.go` | `Reader.ReadFile` |
@@ -99,7 +117,8 @@ Everything lives in a single package, `wim`, one file per format concern:
 | `path_test.go` | tests for the path-based tree operations and `MatchName` |
 | `chunk_test.go` | synthetic round-trip tests for `EncodeResourceData`/`DecodeResourceData` and `Header.CompressionType` |
 | `testdata_test.go`, `testdata/*.bin` | real, multi-chunk compressed resource fixtures (LZX from a real Windows 11 boot.wim, XPRESS/LZMS from fresh `wimlib-imagex capture` output) for hermetic ground-truth decode tests |
-| `write_test.go` | hand-assembles a full minimal WIM using `EncodeResourceData` plus this package's own serialization primitives, then reads it back with `Reader` |
+| `write_test.go` | hand-assembles a full minimal, single-image WIM using `EncodeResourceData` plus this package's own serialization primitives directly (the from-scratch reference `writer.go`'s `WriteTo` generalizes), then reads it back with `Reader` |
+| `writer_test.go` | multi-image, deduplicated-blob, all-compression-type (plus uncompressed) tests of `WriteTo`/`Assemble`, read back with `Reader` |
 
 ## Usage
 
@@ -171,6 +190,30 @@ Each component also parses from and serializes to a byte slice directly
 (`Parse*` functions and `AppendTo` methods), so you can build a WIM structure in
 memory and emit the individual resources.
 
+Assembling a complete two-image, LZX-compressed WIM from scratch:
+
+```go
+images := []*wim.ImageMetadata{image1, image2} // built via DirEntry.Add etc.
+bt := &wim.BlobTable{ /* Hash/RefCount/PartNumber already correct */ }
+xml := &wim.XMLData{Document: `<WIM><IMAGE INDEX="1">...</IMAGE><IMAGE INDEX="2">...</IMAGE></WIM>`}
+blobs := wim.MapBlobSource{ /* hash -> raw content bytes, for every blob bt references */ }
+
+out, err := wim.Assemble(images, bt, xml, blobs, wim.WriteOptions{
+    CompressionType: wim.HdrFlagCompressLZX,
+    ChunkSize:       32768,
+    BootIndex:       1, // 1-based index into images, or 0 for no boot image
+})
+if err != nil {
+    log.Fatal(err)
+}
+os.WriteFile("out.wim", out, 0644)
+```
+
+For large WIMs, prefer `wim.WriteTo(f, images, bt, xml, blobs, opts)` writing
+directly to an `*os.File` (or any `io.WriteSeeker`) over `Assemble`, and
+implement `BlobSource` to stream each blob's bytes from wherever they
+actually live, rather than holding every blob's content in memory at once.
+
 ## Tests
 
 ```
@@ -221,6 +264,34 @@ cover:
   contains invalid compressed data"), even though `lzx`'s own decoder
   accepted it. See `lzx/README.md`'s "A bug found and fixed by this
   verification" section and `lzx/huffman.go` for the fix.
+
+- **`WriteTo`/`Assemble` verified independently against `wimlib-imagex`**
+  (2026-07-10), for a genuinely multi-image case (not just the single-image
+  construction above): a hand-built 2-image WIM (files of several sizes
+  including one spanning multiple chunks, plus one blob shared/deduplicated
+  between both images via a single blob-table entry with `RefCount` 2) was
+  assembled once each for `CompressionNone`, XPRESS, LZX, and LZMS, then
+  checked with:
+  - `wimlib-imagex info`: correctly reports `Image Count: 2`, both images'
+    names, the right `Compression`/`Version`/`Chunk Size`/`Boot Index` for
+    every case.
+  - `wimlib-imagex apply` (both images, all four cases): every extracted
+    file's SHA-1 matched the original content exactly, including the shared
+    file extracted from *both* images.
+
+  This is a from-scratch construction (not reusing wimlib output), so it also
+  independently confirms this package's own real-WIM findings used to build
+  `WriteTo`: reading `boot.wim`/`install.esd` from a real Windows 11 23H2
+  install image with this package's own `Reader` showed the blob table and
+  XML data resources stored with `ResourceHeader.Flags == ResFlagMetadata`
+  only (never `ResFlagCompressed`, i.e. uncompressed) while each image's
+  metadata resource carries `ResFlagMetadata|ResFlagCompressed` (compressed,
+  non-solid, even in the LZMS-compressed `install.esd`); and that `boot.wim`
+  (LZX) uses `Version 0x10d00` (`VersionDefault`) while `install.esd` (LZMS)
+  uses `Version 0xe00` (`VersionSolid`). `WriteTo` reproduces both
+  conventions exactly. As with the single-image verification above, this
+  external-tool check is not re-run at `go test` time; it is recorded here as
+  a one-time result.
 
 ## License
 

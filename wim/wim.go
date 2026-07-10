@@ -44,13 +44,27 @@
 // container structure around them (BlobTable.SolidResources) is still fully
 // supported, just not unpacking the packed stream itself.
 //
-// Also out of scope, as before: filesystem capture/apply, and assembling an
-// entire multi-resource WIM file (header + blob table + XML data + metadata
-// resources + integrity table with correct offsets) -- EncodeResourceData
-// produces one resource's payload bytes; laying out a whole file around
-// several such resources is a caller concern (see write_test.go for a worked
-// example using this package's own Header/BlobTable/ImageMetadata/DirEntry/
-// XMLData serialization primitives).
+// Assembling an entire multi-resource, multi-image WIM file (header + blob
+// table + XML data + one metadata resource per image, with correct offsets
+// throughout) is directly supported: WriteTo (and its in-memory convenience
+// wrapper, Assemble) takes one *ImageMetadata per image, a *BlobTable whose
+// entries already have correct Hash/RefCount/PartNumber (only Resource is
+// filled in by the writer), a *XMLData, and a BlobSource for the raw content
+// bytes of every blob the table references; it lays everything out, calls
+// EncodeResourceData once per blob and once per image's metadata resource,
+// and patches the header in once every resource's final offset is known --
+// see write_test.go's buildMinimalWIM for the original, single-image,
+// test-only version of this same technique, which WriteTo generalizes into
+// real package API. Solid resources, an integrity table, and multi-part
+// (split) WIMs remain out of scope for the writer, same as for the rest of
+// this package: WriteTo never emits ResFlagSolid, always leaves
+// Header.IntegrityTable zero (absent, which is valid), and always writes
+// PartNumber/TotalParts as 1/1. Building each image's directory-entry
+// tree/security data, computing blob reference counts, and producing the
+// XML document's content remain the caller's job, exactly as they already
+// are for driver.Install.
+//
+// Filesystem capture/apply remain out of scope too.
 //
 // It also provides path-based operations over a DirEntry tree, generalizing
 // the path-walking/case-insensitive-child-lookup logic that callers like
