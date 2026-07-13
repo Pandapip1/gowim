@@ -38,14 +38,20 @@ func TestDefaultLengths(t *testing.T) {
 // decode() against manually computed canonical codewords, to check the
 // Huffman engine independent of any PA30-specific semantics.
 //
-// Symbols 0,1,2 have length 2; symbols 3,4 have length 3. Standard
-// canonical-code assignment (increasing length, then increasing symbol
-// index, codes numerically increasing per length) gives:
+// Symbols 0,1,2 have length 2; symbols 3,4 have length 3. PA30's
+// top-down/halving threshold construction (see huffman.go's type doc for
+// why this differs from DEFLATE) gives first[3]=0, first[2]=1, first[1]=2
+// (counts[1]=0, counts[2]=3, counts[3]=2), and an unchanged
+// standard-ordered symbols[] layout (length-2 group first: symbols 0,1,2;
+// then length-3 group: symbols 3,4). Working through decode()'s range
+// check by hand for each length/code-value combination gives:
 //
-//	symbol 0 -> "00"   symbol 1 -> "01"   symbol 2 -> "10"
-//	symbol 3 -> "110"  symbol 4 -> "111"
+//	symbol 0 -> "01"   symbol 1 -> "10"   symbol 2 -> "11"
+//	symbol 3 -> "000"  symbol 4 -> "001"
 //
-// (Kraft sum check: 3*(1/4) + 2*(1/8) = 1.0, a complete code.)
+// (Kraft sum check: 3*(1/4) + 2*(1/8) = 1.0, a complete code -- same
+// completeness as the DEFLATE-style example this replaced, just a
+// different assignment of which codeword belongs to which symbol.)
 func TestHuffmanDecodeHandComputedCodes(t *testing.T) {
 	lens := []int{2, 2, 2, 3, 3}
 	tree, err := buildHuffmanTree(lens, 3)
@@ -53,13 +59,13 @@ func TestHuffmanDecodeHandComputedCodes(t *testing.T) {
 		t.Fatalf("buildHuffmanTree: %v", err)
 	}
 
-	// Codewords, MSB first (the order decode() consumes bits in): 00 01 10 110 111
+	// Codewords, MSB first (the order decode() consumes bits in): 01 10 11 000 001
 	bitStream := []uint32{
-		0, 0, // symbol 0: "00"
-		0, 1, // symbol 1: "01"
-		1, 0, // symbol 2: "10"
-		1, 1, 0, // symbol 3: "110"
-		1, 1, 1, // symbol 4: "111"
+		0, 1, // symbol 0: "01"
+		1, 0, // symbol 1: "10"
+		1, 1, // symbol 2: "11"
+		0, 0, 0, // symbol 3: "000"
+		0, 0, 1, // symbol 4: "001"
 	}
 	br := newTestBitWriterReader(t, bitStream)
 

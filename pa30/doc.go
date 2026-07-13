@@ -1,10 +1,17 @@
 // Package pa30 implements a decoder for Microsoft's "PA30" MSDELTA patch
-// file format, restricted to the null-delta case (empty source buffer, no
-// preprocessing transforms, empty base rift table) used by WinSxS
-// `Windows\WinSxS\Manifests\*.manifest` files -- these are self-compressed,
-// not diffed against a prior version, so only that narrow case is needed
-// here (see the top-level TODO.md's CBS/servicing section for the broader
-// context this feeds into).
+// file format. It was originally scoped to the null-delta case only (empty
+// source buffer, no preprocessing transforms, empty base rift table), on
+// the assumption that WinSxS `Windows\WinSxS\Manifests\*.manifest` files
+// were self-compressed rather than diffed against a prior version. Real
+// data (see "Verification status" below) disproved that assumption: real
+// `.manifest` files are compressed against a large (~9-10KB), shared,
+// non-empty source buffer. This package's scope is therefore narrower than
+// originally intended -- it correctly decodes header fields and any
+// literal/back-reference content up to the point a real file's compressed
+// stream references that external source buffer, then errors out rather
+// than guessing (see the top-level TODO.md's CBS/servicing section for the
+// broader context, and the pending work to actually obtain and use that
+// buffer).
 //
 // # Provenance
 //
@@ -34,15 +41,26 @@
 //
 // # Verification status
 //
-// This decoder has NOT yet been verified against real WinSxS `.manifest`
-// bytes (that requires an independent ground truth -- a real
-// `ApplyDeltaB`/`msdelta.dll` call on a Windows host, or a wrapper tool like
-// wcpex/SXSEXP -- see TODO.md). Tests here check the bit reader and integer
-// decoding directly against the README's own worked example, and check the
-// Huffman engine and full decode pipeline for internal self-consistency
-// (hand-computed canonical codes, and round-tripping hand-built synthetic
-// patches), but that is not the same as confirming this matches Microsoft's
-// real, undocumented on-the-wire format.
+// This decoder HAS been checked against real WinSxS `.manifest` files
+// (2026-07-13), using github.com/smilingthax/msdelta-pa30-format's `dump`
+// binary as an independent, black-box ground-truth oracle (built and run,
+// its stdout read -- its source was not consulted for this check, only for
+// the earlier clean-room implementation pass described above). This caught
+// and fixed a real bug: this package's canonical Huffman code construction
+// originally used the textbook DEFLATE-style bottom-up threshold
+// recurrence (shortest code length gets the smallest code values); PA30's
+// real construction is top-down (longest code length gets the smallest
+// values, built via a halving recurrence) -- see huffman.go's type doc.
+// With that fixed, this package's header parsing, buffer extraction, and
+// Huffman/literal/back-reference decoding match the reference oracle
+// exactly on every real file tried, including reproducing the exact output
+// offset at which decoding must stop because the file references the
+// shared, currently-unsupported source buffer (see the package-level scope
+// note above). See TestDecodeRealManifestSample for the regression test
+// built from this real data. What remains unverified: decoding once the
+// shared source buffer is actually available (no real file has been fully,
+// end-to-end decoded yet), and the multi-block (non-isDefault) compression-
+// parameters path, which real-data testing so far hasn't exercised.
 //
 // # Non-goals
 //

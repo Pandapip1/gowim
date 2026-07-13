@@ -1,9 +1,15 @@
 # gowim/pa30
 
-A Go decoder for Microsoft's "PA30" MSDELTA patch file format, restricted to
-the **null-delta** case (empty source buffer, no preprocessing, empty base
-rift table) -- the case `Windows\WinSxS\Manifests\*.manifest` files use
-(they're self-compressed, not diffed against a prior version).
+A Go decoder for Microsoft's "PA30" MSDELTA patch file format. Originally
+scoped to the **null-delta** case (empty source buffer, no preprocessing,
+empty base rift table) on the assumption that
+`Windows\WinSxS\Manifests\*.manifest` files were self-compressed rather than
+diffed against a prior version -- **real-data testing disproved that
+assumption** (see "Verification status" below): real `.manifest` files are
+compressed against a large (~9-10KB), shared, non-empty source buffer this
+package does not yet have access to. This package correctly decodes header
+fields and any content up to the point a real file references that external
+buffer, then errors out rather than guessing.
 
 ## Why this exists, and its licensing approach
 
@@ -35,23 +41,43 @@ package was built from.
 - **Decoding only.** No encoder. (`TODO.md` notes an encoder may not even be
   needed, if component removal only ever deletes `.manifest` files rather
   than rewriting them.)
-- **Null-delta only.** A non-empty base rift table, or an SRC/FULLSRC match
-  (which references a prepended source buffer), returns an error rather
-  than being decoded -- this package has no source-buffer/rift-table
-  machinery at all.
+- **No shared-dictionary support (yet).** A non-empty base rift table, or an
+  SRC/FULLSRC match (which references a prepended source buffer), returns an
+  error rather than being decoded -- this package has no source-buffer/
+  rift-table machinery at all. This is the scope gap real `.manifest` files
+  actually hit (see below), not a rare edge case.
 - **No preprocessing.** A non-empty `preProcessBuffer` returns an error.
 
 ## Verification status
 
-**This decoder has not yet been verified against a real WinSxS `.manifest`
-file.** That requires an independent ground truth this project doesn't yet
-have on hand -- a real `ApplyDeltaB`/`msdelta.dll` call on a Windows host,
-or one of the wrapper tools (`wcpex`, `SXSEXP`) as an oracle. Until that
-happens, treat this package as a plausible-but-unconfirmed implementation of
-an undocumented format, not a trusted one. See `TODO.md` for the pending
-verification step.
+**This decoder has been checked against real WinSxS `.manifest` files**
+(2026-07-13), using `msdelta-pa30-format`'s `dump` binary as an independent,
+black-box ground-truth oracle: built and run, its stdout read, its source
+*not* consulted for this check (only for the earlier clean-room
+implementation pass above). This caught and fixed a real bug: this
+package's canonical Huffman construction originally used the textbook
+DEFLATE-style bottom-up threshold recurrence; PA30's real construction is
+top-down (see `huffman.go`'s `huffmanTree` doc comment for the fix and why
+it matters). With that fixed, header parsing, buffer extraction, and
+Huffman/literal/back-reference decoding all match the reference oracle
+exactly on every real file tried -- including reproducing the *exact*
+output offset at which decoding must stop because the file references the
+external shared source buffer described below.
 
-What testing *does* cover, all in `*_test.go`:
+**Major finding from this same verification pass: real `.manifest` files are
+not null-delta.** Every sampled file (36 total) is compressed against a
+shared, non-empty source buffer roughly 9-10KB in size (30 of them hit the
+identical offset and output position, implying one universal baseline, not
+a per-file previous-version diff). The buffer's origin is now identified,
+not just suspected: it's **PE resource type 0x266 (decimal 614), name 1,
+inside `wcp.dll`**, starting with `<?xml version='1.0'` -- confirmed by a
+[Cobalt.io writeup](https://www.cobalt.io/blog/part-2-decoding-windows-cbs-manifests-building-the-decoder)
+and matching this package's own empirical observation exactly. Obtaining
+and using that buffer (this repo's `pe` package could plausibly extract it)
+is the next step toward fully decoding real `.manifest` files -- not yet
+attempted. See `TODO.md`'s CBS/servicing section for the full trail.
+
+What testing covers, in `*_test.go`:
 
 - The bit reader and variable-length integer decoder against the reference
   README's own worked bit-level example (real ground truth from the format
@@ -59,12 +85,18 @@ What testing *does* cover, all in `*_test.go`:
 - The canonical Huffman engine against hand-computed codewords (independent
   of this package's own code).
 - The default code-length formula against hand-verified sizes.
+- `TestDecodeRealManifestSample`: a real `.manifest` file, checked against
+  the reference oracle's own output (header fields, and the exact output
+  offset decoding correctly stops at).
 - A full synthetic PA30 file (hand-built with a matching test-only bit
   writer) exercising the entire pipeline -- header, buffers, rift-table
   rejection, default Huffman lengths, and both literal and back-reference
-  match decoding -- but this is a self-built file, not a real
-  Windows-produced one, so it cannot catch a systematic misunderstanding of
-  the real format shared between this package and its own tests.
+  match decoding.
+
+Still unverified: decoding once the shared source buffer is available (no
+real file has been decoded fully end-to-end yet), and the multi-block
+(non-`isDefault`) compression-parameters path, which real-data testing
+hasn't exercised so far.
 
 ## Usage
 

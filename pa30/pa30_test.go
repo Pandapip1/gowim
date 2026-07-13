@@ -1,9 +1,65 @@
 package pa30
 
 import (
+	_ "embed"
 	"encoding/binary"
+	"strings"
 	"testing"
 )
+
+// realManifestSample is a real WinSxS `.manifest` file, copied verbatim
+// (2026-07-13) from a real Windows 11 VM
+// (`/var/lib/libvirt/images/win11.qcow2`, mounted read-only via
+// `guestmount --ro`), identity
+// amd64_022bd29263008e5688235b714058746f_b77a5c561934e089_4.0.15912.251_none_d13fd75b426163b5.
+// It starts with an 8-byte "DCM"+version prefix before the PA30 signature.
+//
+//go:embed testdata/real_manifest_sample.manifest
+var realManifestSample []byte
+
+// TestDecodeRealManifestSample decodes an actual WinSxS `.manifest` file
+// and checks its result against ground truth independently confirmed by
+// running github.com/smilingthax/msdelta-pa30-format's `dump` reference
+// tool (as a black-box binary, not by reading its source) against the same
+// file. That tool decodes this file's header identically to what's
+// asserted below, then successfully decodes literal bytes 0xEF, 0xBB, 0xBF
+// (a UTF-8 BOM) before failing on a DST match referencing offset 9069 at
+// output position 3 -- which is expected and out of this package's scope:
+// real `.manifest` files are compressed against a large (~9-10KB) shared
+// dictionary (confirmed to be PE resource 0x266/name 1 in `wcp.dll`, per
+// TODO.md), not an empty source buffer, so any match that reaches back
+// past the small amount of real output produced so far is a reference into
+// that unsupported dictionary, not a bug.
+//
+// This test exists to catch a regression in the Huffman engine specifically:
+// an earlier version of this package's canonical-code construction used the
+// textbook DEFLATE-style bottom-up threshold recurrence and decoded this
+// exact file's first content symbol as a nonsensical match at output
+// position 0 instead of the literal 0xEF -- see huffman.go's type doc for
+// why PA30's actual construction differs (top-down, not bottom-up).
+func TestDecodeRealManifestSample(t *testing.T) {
+	if len(realManifestSample) < 4 || string(realManifestSample[0:3]) != "DCM" {
+		t.Fatal("fixture missing expected DCM prefix")
+	}
+	body := realManifestSample[4:] // strip "DCM" + 1 version byte
+
+	_, h, err := Decode(body)
+	if h == nil {
+		t.Fatalf("Decode returned no header at all: %v", err)
+	}
+	if h.FileTypeSet != 1 || h.FileType != 1 || h.Flags != 0x20000 || h.TargetSize != 659 || h.TargetHashAlgID != 0 {
+		t.Errorf("header mismatch vs reference dump tool: %+v", *h)
+	}
+	if err == nil {
+		t.Fatal("Decode succeeded; expected an error referencing the unsupported shared dictionary (offset 9069 at output position 3)")
+	}
+	// The exact wording isn't load-bearing, but decoding 3 literal bytes
+	// correctly before failing at the dictionary reference is: this checks
+	// we got exactly as far as the reference tool did.
+	if !strings.Contains(err.Error(), "output offset 3") {
+		t.Errorf("error = %v, want it to reference output offset 3 (i.e. after correctly decoding the 3-byte UTF-8 BOM)", err)
+	}
+}
 
 // bitWriter is a test-only encoder mirroring bitReader's conventions
 // (LSB-first per byte, numbers via the nibble scheme, buffers via
@@ -99,16 +155,13 @@ func canonicalCodeword(t *testing.T, lens []int, maxLen int, sym int) (code uint
 	if err != nil {
 		t.Fatalf("buildHuffmanTree: %v", err)
 	}
-	first, idx := 0, 0
 	for l := 1; l <= maxLen; l++ {
 		count := tree.counts[l]
 		for k := 0; k < count; k++ {
-			if tree.symbols[idx+k] == sym {
-				return uint32(first + k), l
+			if tree.symbols[tree.start[l]+k] == sym {
+				return uint32(tree.first[l] + k), l
 			}
 		}
-		idx += count
-		first = (first + count) << 1
 	}
 	t.Fatalf("symbol %d not found in tree", sym)
 	return 0, 0
