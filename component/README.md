@@ -17,15 +17,17 @@ in-memory view over already-parsed manifests.
 
 - Parses every `.mum` file it's given via `mum.Parse` directly (no PA30
   involved -- `.mum` files are plain XML).
-- Parses every `.manifest` file it's given by first stripping its 8-byte
-  `"DCM"`+version prefix, then decoding via the sibling `pa30` package's
+- Parses every `.manifest` file it's given: if it has the 8-byte `"DCM"`
+  +version prefix, decodes it via the sibling `pa30` package's
   `DecodeWithSource` (which needs the real shared dictionary described in
-  `pa30/README.md`), then `mum.Parse` on the result.
+  `pa30/README.md`) first; otherwise treats it as already-plain XML (some
+  real files, e.g. the VC++ 8.0/9.0 CRT's, are stored uncompressed -- see
+  `pa30/README.md`'s SRC/FULLSRC section). Either way, `mum.Parse` runs on
+  the resulting XML. Confirmed (2026-07-13) to succeed on all 17189 files
+  in a real image's `Windows\WinSxS\Manifests`.
 - Records per-file failures on that file's `Entry.Err` rather than
-  aborting a whole build -- most real `.manifest` files still fail today
-  (they need SRC/FULLSRC match support `pa30` doesn't implement yet; see
-  `TODO.md`), so a `Store` is necessarily built from whatever fraction of a
-  real image's files current `pa30` support can actually decode.
+  aborting a whole build, so a `Store` can still be built from the rest of
+  a real image's files even if a future edge case isn't covered.
 - Dependency-edge resolution only follows `AssemblyIdentity`-based
   references (`Package.Parent`, `Update.Package`/`Update.Component`,
   `Dependency.DependentAssembly`) -- it does not follow
@@ -64,7 +66,8 @@ files, one real `.manifest` file plus the real shared dictionary needed to
 decode it. Tests cover parsing both file kinds, dependency-edge extraction,
 and every `Store` query method, including exercising the "dependency not
 found in this Store" path (expected when a `Store` is built from a small
-subset of a real image's files, as any real one currently must be -- see
+subset of a real image's files -- e.g. this package's own test fixtures --
+even though a full real image now decodes essentially completely; see
 Scope above).
 
 ## License

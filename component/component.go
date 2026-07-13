@@ -22,12 +22,13 @@
 // modeled as dependency edges here yet.
 //
 // A real image contains far more `.mum`/`.manifest` files than this
-// package's own tests exercise (this project has so far only fully
-// decoded 19 real `.manifest` files -- most real files need SRC/FULLSRC
-// match support `pa30` does not yet implement, see TODO.md); Build reports
-// per-file errors rather than failing outright so a Store can still be
-// built from whatever fraction of a real image's files this project's
-// current `pa30` support can decode.
+// package's own tests exercise, though `pa30`'s SRC/FULLSRC support
+// (confirmed 2026-07-13 against every file in a real image's
+// `Windows\WinSxS\Manifests`, all 17189) means a full image's files should
+// now decode essentially completely -- see TODO.md and `pa30/README.md`'s
+// SRC/FULLSRC section. Build still reports per-file errors rather than
+// failing outright, so a Store can still be built from the rest of a
+// real image's files if some future edge case isn't covered.
 package component
 
 import (

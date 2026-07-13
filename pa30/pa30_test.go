@@ -33,6 +33,25 @@ var realManifestSample []byte
 //go:embed testdata/wcp_dictionary.bin
 var wcpDictionary []byte
 
+// realManifestFullSRCSample is a real WinSxS `.manifest` file (identity
+// amd64_1394.inf.resources_31bf3856ad364e35_10.0.22621.1_en-us), copied
+// verbatim (2026-07-13) from the same VM as realManifestSample. Unlike that
+// fixture (DST/LRU matches only), this one's very first content symbol is a
+// FULLSRC match at output position 0 -- before this package's SRC/FULLSRC
+// implementation, decoding it failed immediately with "invalid
+// back-reference offset 0 (slot 3)" (see match.go/patch.go's SRC/FULLSRC
+// doc comments for why, and TODO.md's "Implement SRC/FULLSRC match
+// decoding" entry for the full research trail). Kept as a permanent
+// regression fixture for that fix, found while measuring full real-corpus
+// decode coverage (all 17189 files in a real image's
+// `Windows\WinSxS\Manifests`, which went from ~1% to 100% success after the
+// fix -- every one of them, including this one, cryptographically
+// hash-verified via DecodeWithSource's own TargetHash check, not merely
+// self-consistent).
+//
+//go:embed testdata/real_manifest_fullsrc_sample.manifest
+var realManifestFullSRCSample []byte
+
 // TestDecodeWithSourceRealManifestFullSuccess fully decodes a real WinSxS
 // `.manifest` file end-to-end for the first time (2026-07-13), using
 // wcpDictionary as the source buffer. Cross-validated two independent ways:
@@ -61,6 +80,31 @@ func TestDecodeWithSourceRealManifestFullSuccess(t *testing.T) {
 		t.Errorf("sha256(out) = %s, want %s (the real S256H value for this component)", got, wantSHA256)
 	}
 	want := `<assemblyIdentity name="022bd29263008e5688235b714058746f" version="4.0.15912.251" processorArchitecture="amd64" language="neutral" buildType="release" publicKeyToken="b77a5c561934e089" versionScope="nonSxS" />`
+	if !strings.Contains(string(out), want) {
+		t.Errorf("decoded output missing expected assemblyIdentity line; got:\n%s", out)
+	}
+}
+
+// TestDecodeWithSourceRealFULLSRCSample decodes realManifestFullSRCSample --
+// a real file whose first content symbol is a FULLSRC match, previously
+// failing outright (see that fixture's doc comment) -- and checks the
+// result the same two independent ways as
+// TestDecodeWithSourceRealManifestFullSuccess: exact TargetSize match, and
+// well-formed expected content. DecodeWithSource itself also verifies this
+// file's embedded TargetHash internally (returning an error on any
+// mismatch), so a nil error here already means the decoded bytes are
+// cryptographically confirmed correct, not merely plausible-looking.
+func TestDecodeWithSourceRealFULLSRCSample(t *testing.T) {
+	body := realManifestFullSRCSample[4:] // strip "DCM" + 1 version byte
+
+	out, h, err := DecodeWithSource(body, wcpDictionary)
+	if err != nil {
+		t.Fatalf("DecodeWithSource: %v", err)
+	}
+	if uint32(len(out)) != h.TargetSize {
+		t.Fatalf("len(out) = %d, want TargetSize %d", len(out), h.TargetSize)
+	}
+	want := `<assemblyIdentity name="1394.inf.Resources" version="10.0.22621.1" processorArchitecture="amd64" language="en-US" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS" />`
 	if !strings.Contains(string(out), want) {
 		t.Errorf("decoded output missing expected assemblyIdentity line; got:\n%s", out)
 	}

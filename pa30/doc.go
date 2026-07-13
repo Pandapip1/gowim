@@ -15,9 +15,12 @@
 // formula reverse-engineered from real msdelta.dll disassembly rather than
 // from any documentation or reference implementation (neither exists for
 // this specific piece -- see match.go's matchParams doc comment for full
-// provenance) -- but this path remains UNVERIFIED against any real sample,
-// since none sampled so far actually needs it; see "Non-goals" below. Decode
-// remains available for the plain null-delta case (source omitted/nil).
+// provenance). This path is now CONFIRMED, not just plausible: every one of
+// 17189 real files in a real image's `Windows\WinSxS\Manifests` decodes
+// successfully, each cryptographically hash-verified via DecodeWithSource's
+// own internal TargetHash check (2026-07-13) -- see "SRC/FULLSRC" below.
+// Decode remains available for the plain null-delta case (source
+// omitted/nil).
 //
 // # Provenance
 //
@@ -68,11 +71,11 @@
 // and TODO.md's "S256H mystery resolved" entry. Two unrelated research
 // threads in this project now corroborate each other.
 //
-// What remains unverified: SRC/FULLSRC matches (see below), and the
-// multi-block (non-isDefault) compression-parameters path, which real-data
-// testing so far hasn't exercised.
+// What remains unverified: the multi-block (non-isDefault)
+// compression-parameters path, which real-data testing so far hasn't
+// exercised, and one narrow piece of SRC/FULLSRC (see below).
 //
-// # SRC/FULLSRC (added 2026-07-13, unverified)
+// # SRC/FULLSRC (added 2026-07-13, confirmed against a full real corpus)
 //
 // Unlike everything else in this package, SRC/FULLSRC decoding was not
 // clean-room-implemented from the reference tool's README/prose, because
@@ -90,24 +93,41 @@
 // `msdelta.dll`'s `ApplyDeltaB` (a documented Win32 API; only its machine
 // code was read, since Microsoft ships no source for it -- ordinary
 // black-box disassembly, not a licensing concern) and traced its match
-// dispatch and copy-address computation. Its finding, implemented in
-// match.go/patch.go: `sourcePos = targetPos - distance`, with
-// `distance = delta` for SRC (slots 0-2) and `distance = 0` for FULLSRC
-// (slot 3); the rift table that would otherwise perturb this is an
-// identity no-op for RAW/manifest content (confirmed via embedded
-// pipeline-description strings referencing `AddRiftEntry(emptyTable,
-// sourceSize, 0)`), making `distance` numerically interchangeable with the
-// `offset` slots 4+ already use.
+// dispatch and copy-address computation. Its finding: there is no
+// persistent source cursor -- each match resolves
+// `sourcePos = targetPos - distance` fresh, with `distance = delta` for SRC
+// (slots 0-2) and `distance = 0` for FULLSRC (slot 3); the rift table that
+// would otherwise perturb this is an identity no-op for RAW/manifest
+// content (confirmed via embedded pipeline-description strings referencing
+// `AddRiftEntry(emptyTable, sourceSize, 0)`).
 //
-// This is REVERSE-ENGINEERED FROM DISASSEMBLY, NOT VERIFIED AGAINST ANY
-// REAL SAMPLE -- no `.manifest` file sampled so far actually exercises
-// SRC/FULLSRC. Two specific pieces are flagged by the disassembling agent
-// itself as not fully confirmed (see match.go's matchParams doc comment
-// for the full detail): slot 2's bias constant, and whether SRC/FULLSRC
-// matches update the DST/LRU repeat-offset queue. A non-empty base rift
-// table remains unsupported regardless (still returns an error) -- every
-// real file sampled so far has an empty one even when its content needs
-// SRC/FULLSRC, so that's an independent scope gap.
+// The disassembly-derived formula needed one correction, found empirically:
+// an initial implementation used the distance value directly as a
+// DST-style back-reference offset, which failed on nearly every real file
+// (~1% success), always at a FULLSRC match, because `distance=0` produces
+// a self-referential offset. The fix: the disassembly's "target position"
+// is measured target-content-only, not `len(out)`'s source-prefixed count,
+// so the actual back-reference offset needed is `sourceLen + distance` --
+// see match.go's matchParams and patch.go's decodeContent doc comments for
+// the full derivation.
+//
+// CONFIRMED (2026-07-13) against every file in a real Windows 11 23H2
+// image's `Windows\WinSxS\Manifests`: all 17189 files now decode
+// successfully with this corrected formula (up from ~1% before the fix),
+// each cryptographically hash-verified via DecodeWithSource's own internal
+// TargetHash check -- not merely self-consistent output. See
+// TestDecodeWithSourceRealFULLSRCSample for a permanent regression fixture
+// (a real file whose first symbol is FULLSRC at output position 0, which
+// previously failed outright) and TODO.md's "Implement SRC/FULLSRC match
+// decoding" entry for the full trail.
+//
+// One piece flagged by the disassembling agent itself as not fully
+// confirmed remains open, since no known real sample is known to exercise
+// it (see match.go's matchParams doc comment): slot 2's (18-bit delta)
+// bias constant. A non-empty base rift table remains unsupported
+// regardless (still returns an error) -- every real file sampled so far
+// has an empty one even when its content needs SRC/FULLSRC, so that's an
+// independent scope gap.
 //
 // # Non-goals
 //

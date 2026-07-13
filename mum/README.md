@@ -8,8 +8,12 @@ and component-level WinSxS manifests
 sibling `pa30` package -- this package only handles the XML, not PA30
 decompression itself).
 
-The base `<assembly>`/`assemblyIdentity` schema (`asm.v1`/`asm.v3`
-namespaces) is documented by Microsoft: [Assembly manifests -- Microsoft
+The base `<assembly>`/`assemblyIdentity` schema (`asm.v1`/`asm.v2`/`asm.v3`
+namespaces -- `Parse` accepts any of these three, confirmed necessary
+2026-07-13: some real `.manifest` files, e.g. the VC++ 8.0/9.0 CRT's, are
+plain, uncompressed `asm.v1` XML rather than PA30-compressed `asm.v3`;
+`Serialize` always normalizes back out to `asm.v3`) is documented by
+Microsoft: [Assembly manifests -- Microsoft
 Learn](https://learn.microsoft.com/en-us/windows/win32/sbscs/assembly-manifests),
 [Manifest file schema --
 Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/sbscs/manifest-file-schema).
@@ -49,6 +53,16 @@ vocabulary confirmed present across the real samples above:
 - `<deployment/>` (component-level; an always-empty marker so far) and any
   number of `<dependency>` (component-level; `discoverable` attr, one or
   more `<dependentAssembly dependencyType="...">` children)
+
+Boolean attributes (`discoverable`, `contained`, `detectNone`'s `default`)
+accept both `"true"`/`"false"` and `"yes"`/`"no"` on parse, always writing
+`"true"`/`"false"` back out. Confirmed necessary 2026-07-13 by decoding
+every real `.manifest` file in a real image's `Windows\WinSxS\Manifests`
+(17189 files, via the sibling `pa30` package): `discoverable` uses
+`"no"`/`"yes"` in the overwhelming majority of real samples (7043 "no" +
+4400 "yes" vs. only 368 "false", and no literal "true" observed at all) --
+`encoding/xml`'s default bool handling only accepts `"true"`/`"false"` and
+errored on anything else before this fix.
 
 It **deliberately does not** model every element real files can contain --
 the format has substantially more vocabulary (`<driver>`, `<satelliteInfo>`,

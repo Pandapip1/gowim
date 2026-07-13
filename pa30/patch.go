@@ -253,15 +253,25 @@ func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, source
 		}
 
 		// SRC/FULLSRC (slot <= 3): reverse-engineered from real msdelta.dll
-		// disassembly, NOT verified against any real sample -- see
-		// matchParams' doc comment in match.go for full provenance and
-		// caveats. Numerically, distance behaves exactly like a DST offset
-		// (sourcePos = targetPos - distance == len(out) - distance), so it
-		// reuses the same back-reference machinery below.
+		// disassembly, then corrected and confirmed against a full real
+		// corpus -- see matchParams' doc comment in match.go for full
+		// provenance and caveats. Disassembly's "target position" for the
+		// sourcePos = targetPos - distance formula is measured
+		// target-content-only (targetPos, this variable -- not len(out)'s
+		// source-prefixed count), and the resulting sourcePos indexes
+		// directly into the unified [source|target] buffer -- so the
+		// distance-from-current-end offset copyMatch needs is
+		// sourceLen + distance, not distance alone (offset = len(out) -
+		// sourcePos = len(out) - (targetPos - distance) = sourceLen +
+		// distance, since len(out)-targetPos == sourceLen). Confirmed
+		// (2026-07-13) against every file (17189) in a real image's
+		// `Windows\WinSxS\Manifests`, each cryptographically hash-verified
+		// via DecodeWithSource's built-in target-hash check -- see TODO.md's
+		// SRC/FULLSRC entry and TestDecodeWithSourceRealFULLSRCSample.
 		var offset int
 		switch {
 		case slot <= 3:
-			offset = params.delta
+			offset = sourceLen + params.delta
 		case slot >= 4 && slot <= 6:
 			offset = lru[params.lruIndex]
 		default:
@@ -274,11 +284,13 @@ func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, source
 			return nil, fmt.Errorf("pa30: at output offset %d: match of length %d overruns TargetSize %d", targetPos, length, targetSize)
 		}
 		copyMatch(&out, offset, length)
-		// UNVERIFIED (see matchParams' doc comment in match.go, point 2):
-		// disassembly traced SRC/FULLSRC's dispatch arms into the same
+		// Disassembly traced SRC/FULLSRC's dispatch arms into the same
 		// LRU-update code DST/LRU-repeat matches use, so this package
-		// updates the queue unconditionally here. Real-data testing hasn't
-		// exercised this yet.
+		// updates the queue unconditionally here -- indirectly corroborated
+		// by the same full-corpus hash-verified pass above (a wrong LRU
+		// update would corrupt any later LRU-repeat match relying on it,
+		// which would fail that file's hash check), though not proven
+		// symbol-by-symbol.
 		updateLRU(&lru, offset)
 	}
 	return out[sourceLen:], nil

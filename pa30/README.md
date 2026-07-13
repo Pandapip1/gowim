@@ -10,8 +10,9 @@ non-empty source buffer, now identified, extracted, and embedded as
 `testdata/wcp_dictionary.bin`. `DecodeWithSource` **fully and correctly
 decodes real `.manifest` files** whose content only needs DST/LRU
 back-references into that buffer -- see `TestDecodeWithSourceRealManifestFullSuccess`.
-SRC/FULLSRC matches (a separate addressing scheme) are now also decoded, but
-**unverified against real data** -- see "SRC/FULLSRC" below.
+SRC/FULLSRC matches (a separate addressing scheme) are now also decoded and
+**confirmed against every file in a full real image's WinSxS Manifests
+directory** -- see "SRC/FULLSRC" below.
 
 ## Why this exists, and its licensing approach
 
@@ -44,9 +45,9 @@ package was built from.
   needed, if component removal only ever deletes `.manifest` files rather
   than rewriting them.)
 - **DST/LRU back-references into a source buffer are supported**
-  (`DecodeWithSource`). **SRC/FULLSRC matches are also decoded, but
-  unverified against real data** -- see "SRC/FULLSRC" below. A non-empty
-  base rift table is still unsupported regardless and returns an error.
+  (`DecodeWithSource`), **as are SRC/FULLSRC matches**, confirmed against a
+  full real corpus -- see "SRC/FULLSRC" below. A non-empty base rift table
+  is still unsupported regardless and returns an error.
 - **No preprocessing.** A non-empty `preProcessBuffer` returns an error.
 
 ## Verification status
@@ -101,10 +102,10 @@ What testing covers, in `*_test.go`:
   match decoding.
 
 Still unverified: the multi-block (non-`isDefault`) compression-parameters
-path, which real-data testing hasn't exercised so far, and SRC/FULLSRC
-matches (see below).
+path, which real-data testing hasn't exercised so far, and one narrow piece
+of SRC/FULLSRC (see below).
 
-## SRC/FULLSRC (added 2026-07-13, unverified against real data)
+## SRC/FULLSRC (added 2026-07-13, confirmed against a full real corpus)
 
 Unlike everything else in this package, SRC/FULLSRC was **not** clean-room
 implemented from `msdelta-pa30-format`'s README/prose -- there's none to
@@ -126,19 +127,33 @@ fresh, where `distance = delta` for SRC (slots 0-2) and `distance = 0` for
 FULLSRC (slot 3); the rift table is confirmed (via embedded
 pipeline-description strings in `msdelta.dll` referencing
 `AddRiftEntry(emptyTable, sourceSize, 0)`) to be an identity no-op for
-RAW/manifest content, making `distance` numerically interchangeable with the
-`offset` DST/LRU matches already use.
+RAW/manifest content.
 
-Two pieces the disassembling agent itself flagged as not fully confirmed are
-implemented per its best reading but explicitly called out in code comments
-(see `match.go`'s `matchParams` doc comment): slot 2's bias constant, and
-whether SRC/FULLSRC updates the DST/LRU repeat-offset queue. FULLSRC's
-`distance=0` is suspicious on its face (a self-referential zero-offset
-match) and is deliberately left to trip `decodeContent`'s existing
-offset-validity check rather than silently reinterpreted. **No real sample
-decoded so far actually exercises SRC/FULLSRC** -- see `TODO.md`'s
-"Implement SRC/FULLSRC match decoding" entry for the full trail and what
-would be needed to confirm this.
+**The disassembly-derived formula alone was not quite right.** An initial
+implementation used `distance` directly as a DST-style back-reference
+offset, which failed on nearly every real file (~1% success), always at a
+FULLSRC match, because `distance=0` produces a self-referential offset
+(`sourcePos == targetPos`, impossible for a length>0 copy) -- exactly the
+"suspicious on its face" case flagged when this was first implemented. The
+fix, found empirically: the disassembly's "target position" is measured
+target-content-only, not the source-prefixed `len(out)`, so the actual
+offset needed is `sourceLen + distance`, not `distance` alone -- see
+`match.go`/`patch.go`'s doc comments for the full derivation.
+
+**Confirmed (2026-07-13) against every file in a real Windows 11 23H2
+image's `Windows\WinSxS\Manifests`: all 17189 files now decode successfully
+with this corrected formula** (up from ~1% before the fix), each
+cryptographically hash-verified via `DecodeWithSource`'s own internal
+`TargetHash` check -- not merely self-consistent output. See
+`TestDecodeWithSourceRealFULLSRCSample` for a permanent regression fixture
+(a real file whose first symbol is FULLSRC at output position 0, which
+previously failed outright).
+
+One piece the disassembling agent itself flagged as not fully confirmed
+remains open, since no known real sample is known to exercise it (see
+`match.go`'s `matchParams` doc comment): slot 2's (18-bit delta) bias
+constant. See `TODO.md`'s "Implement SRC/FULLSRC match decoding" entry for
+the full trail.
 
 ## Usage
 

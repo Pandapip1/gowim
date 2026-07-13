@@ -32,24 +32,29 @@ func ParseMUM(fileName string, data []byte) *Entry {
 }
 
 // ParseManifest builds an Entry for a component-level `.manifest` file's
-// raw on-disk bytes (the "DCM"+version-byte-prefixed, PA30-compressed
-// form), using dict as the shared source buffer PA30 decoding needs (see
-// the sibling `pa30` package's DecodeWithSource and its testdata/
-// wcp_dictionary.bin). A file needing SRC/FULLSRC support `pa30` doesn't
-// implement yet, or any other decode/parse failure, is reported via the
-// returned Entry's Err field rather than a second return value, so callers
-// building a Store from many files can collect every entry uniformly (see
-// package docs).
+// raw on-disk bytes, using dict as the shared source buffer PA30 decoding
+// needs (see the sibling `pa30` package's DecodeWithSource and its
+// testdata/wcp_dictionary.bin). Most real files are "DCM"+version-byte-
+// prefixed, PA30-compressed XML, but some -- confirmed 2026-07-13 while
+// measuring this package's decode coverage against a full real image's
+// Manifests directory (17189 files): older, pre-CBS runtime component
+// manifests such as the VC++ 8.0/9.0 CRT's, 193 of that sample -- are
+// instead already-plain, uncompressed XML with no PA30 layer at all. Files
+// missing the DCM prefix are parsed directly as XML rather than treated as
+// an error; any other decode/parse failure is reported via the returned
+// Entry's Err field rather than a second return value, so callers building
+// a Store from many files can collect every entry uniformly (see package
+// docs).
 func ParseManifest(fileName string, data []byte, dict []byte) *Entry {
 	e := &Entry{Kind: KindComponent, FileName: fileName}
-	if len(data) < 4 || string(data[0:3]) != "DCM" {
-		e.Err = fmt.Errorf("component: %s: missing DCM prefix", fileName)
-		return e
-	}
-	xmlData, _, err := pa30.DecodeWithSource(data[4:], dict)
-	if err != nil {
-		e.Err = fmt.Errorf("component: decode %s: %w", fileName, err)
-		return e
+	xmlData := data
+	if len(data) >= 3 && string(data[0:3]) == "DCM" {
+		var err error
+		xmlData, _, err = pa30.DecodeWithSource(data[4:], dict)
+		if err != nil {
+			e.Err = fmt.Errorf("component: decode %s: %w", fileName, err)
+			return e
+		}
 	}
 	m, err := mum.Parse(xmlData)
 	if err != nil {

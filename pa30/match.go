@@ -43,52 +43,56 @@ func expandSlot7(br *bitReader) (int, error) {
 // match. Exactly one of delta, lruIndex, offset is meaningful, depending on
 // which slot range produced it (see decodeMatchParams).
 //
-// SRC/FULLSRC ADDRESSING -- REVERSE-ENGINEERED, NOT VERIFIED AGAINST REAL
-// DATA. Per TODO.md's 2026-07-13 "SRC/FULLSRC decoding" research entry: the
-// reference README/tool this package was otherwise clean-room-implemented
-// from never actually decodes SRC/FULLSRC (its own `dump.c` only prints
-// their length, never computing a source address), so there was no prose
-// description to implement from. This package's SRC/FULLSRC handling
-// instead comes from a background agent's static disassembly of the real
-// `msdelta.dll`'s `ApplyDeltaB` (a genuine, documented Win32 API -- only its
-// machine code was read, not any of its own source, since Microsoft ships
-// no source for it; this is standard black-box/clean-room disassembly, not
-// a licensing concern). That agent's finding: there is no persistent source
-// cursor -- each match resolves `sourcePos = targetPos - distance` fresh,
-// where `distance = delta` for SRC (slots 0-2) and `distance = 0` for
-// FULLSRC (slot 3), and the "rift table" that would otherwise perturb this
-// is confirmed (via embedded pipeline-description strings referencing
-// `AddRiftEntry(emptyTable, sourceSize, 0)`) to be an identity/no-op for
-// RAW (manifest) content. Numerically this makes `distance` interchangeable
-// with the `offset` slots 4+ already use (see decodeContent), which is why
-// slot 0-3 handling below reuses the same field.
+// SRC/FULLSRC ADDRESSING -- reverse-engineered from disassembly, since
+// confirmed empirically against a full real corpus. Per TODO.md's
+// 2026-07-13 "SRC/FULLSRC decoding" research entry: the reference
+// README/tool this package was otherwise clean-room-implemented from never
+// actually decodes SRC/FULLSRC (its own `dump.c` only prints their length,
+// never computing a source address), so there was no prose description to
+// implement from. This package's SRC/FULLSRC handling instead comes from a
+// background agent's static disassembly of the real `msdelta.dll`'s
+// `ApplyDeltaB` (a genuine, documented Win32 API -- only its machine code
+// was read, not any of its own source, since Microsoft ships no source for
+// it; this is standard black-box/clean-room disassembly, not a licensing
+// concern). That agent's finding: there is no persistent source cursor --
+// each match resolves `sourcePos = targetPos - distance` fresh, where
+// `distance = delta` for SRC (slots 0-2) and `distance = 0` for FULLSRC
+// (slot 3), and the "rift table" that would otherwise perturb this is
+// confirmed (via embedded pipeline-description strings referencing
+// `AddRiftEntry(emptyTable, sourceSize, 0)`) to be an identity/no-op for RAW
+// (manifest) content.
 //
-// Two specific pieces of this are flagged by the disassembling agent itself
-// as NOT fully confirmed, and remain open TODO items pending a real sample
-// that actually exercises them (none sampled so far need SRC/FULLSRC at
-// all):
+// The disassembly-derived formula alone was NOT quite right: an initial
+// implementation used `offset = distance` directly (numerically
+// interchangeable with the DST/LRU `offset` slots 4+ use), but real-corpus
+// testing (see below) showed this fails on essentially every file, always
+// at a FULLSRC match, always because `distance=0` produces a
+// self-referential zero offset (sourcePos == current write position,
+// impossible for a length>0 copy). The correction, confirmed empirically:
+// `targetPos` in the disassembly's formula is measured target-content-only
+// (this package's `targetPos` variable in decodeContent, NOT `len(out)`'s
+// source-prefixed count), so the back-reference offset copyMatch needs is
+// `sourceLen + distance`, not `distance` alone -- see decodeContent.
 //
-//  1. Slot 2's bias (18-bit delta field): the disassembly showed an
-//     UNCONDITIONAL `+0xa000`, not the signed-conditional ±0xa000 this
-//     package previously had (a discrepancy against the DEFLATE-adjacent
-//     assumption that slots 0/1's conditional-sign pattern would extend to
-//     slot 2 too). Implemented below per the disassembly finding, but
-//     unverified against any real slot-2 sample.
-//  2. Whether SRC/FULLSRC matches update the DST/LRU repeat-offset queue:
-//     the agent traced both the SRC and FULLSRC dispatch arms landing in
-//     the same LRU-update code DST matches use, contradicting this
-//     package's earlier assumption that only DST/LRU-repeat matches touch
-//     the queue. Implemented below (decodeContent) per that finding --
-//     "medium-high confidence, not exhaustively proven" per the agent --
-//     but likewise unverified against real data.
+// CONFIRMED (2026-07-13) against a full real Windows 11 23H2 image: all
+// 17189 files in a real `Windows\WinSxS\Manifests` now decode successfully
+// via DecodeWithSource with this formula (up from ~1% before the
+// `sourceLen +` correction), EVERY one cryptographically hash-verified via
+// DecodeWithSource's own internal TargetHash check -- not merely
+// self-consistent output. See TestDecodeWithSourceRealFULLSRCSample for a
+// permanent regression fixture (a real file whose first symbol is FULLSRC
+// at output position 0, which previously failed outright) and TODO.md's
+// "Implement SRC/FULLSRC match decoding" entry for the full trail.
 //
-// FULLSRC in particular is suspicious on its face: distance=0 means
-// sourcePos == targetPos, i.e. a self-referential zero-offset match, which
-// decodeContent's existing offset>0 validity check will reject outright
-// (see its "invalid back-reference offset" error). Rather than silently
-// papering over that with an unverified reinterpretation, this package
-// deliberately lets that check surface it as an error -- a real FULLSRC-
-// using sample is needed to determine what's actually being missed.
+// One piece flagged by the disassembling agent itself as not fully
+// confirmed remains unverified, since no real sample is known to exercise
+// it: slot 2's bias (18-bit delta field) -- disassembly showed an
+// UNCONDITIONAL `+0xa000`, not the signed-conditional ±0xa000 this package
+// previously had (a discrepancy against the DEFLATE-adjacent assumption
+// that slots 0/1's conditional-sign pattern would extend to slot 2 too).
+// Implemented per the disassembly finding, but the 17189-file corpus test
+// above doesn't prove this specific branch, since it can't confirm which
+// files (if any) actually decoded an 18-bit delta this large.
 type matchParams struct {
 	delta    int // slots 0-3 (SRC/FULLSRC): distance, per the doc above
 	lruIndex int // slots 4-6 (LRU repeat)
@@ -124,9 +128,10 @@ func decodeMatchParams(br *bitReader, aligned *huffmanTree, slot int) (matchPara
 			return matchParams{}, err
 		}
 		raw := int(v) - 0x20000
-		// UNVERIFIED (see matchParams' doc comment, point 1): disassembly of
-		// the real msdelta.dll showed this bias applied unconditionally,
-		// unlike slots 0/1's signed-conditional ±bias.
+		// UNVERIFIED (see matchParams' doc comment): disassembly of the real
+		// msdelta.dll showed this bias applied unconditionally, unlike
+		// slots 0/1's signed-conditional ±bias. Not disproven either -- no
+		// known real sample exercises an 18-bit SRC delta this large.
 		return matchParams{delta: raw + 0xa000}, nil
 	case slot == 3:
 		return matchParams{delta: 0}, nil // FULLSRC: no parameters, distance always 0
