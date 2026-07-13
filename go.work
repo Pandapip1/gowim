@@ -13,4 +13,5 @@ use (
 	./lzms
 	./mum
 	./pa30
+	./component
 )

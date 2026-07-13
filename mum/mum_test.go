@@ -21,6 +21,17 @@ var (
 	fixtureSelectableFeature []byte
 	//go:embed testdata/capability_language.mum
 	fixtureCapabilityLanguage []byte
+
+	// fixtureComponentManifest is a real component-level manifest -- the
+	// decompressed content of a real WinSxS `.manifest` file (identity
+	// 022bd29263008e5688235b714058746f, 4.0.15912.251, amd64), produced by
+	// the sibling `pa30` package's DecodeWithSource (2026-07-13) and
+	// cross-validated there against an independent SHA-256 (see
+	// pa30/pa30_test.go and TODO.md's "S256H mystery resolved" entry). This
+	// is the <deployment>/<dependency> vocabulary, not the <package>/
+	// <update> vocabulary the other fixtures use.
+	//go:embed testdata/component_manifest_sample.xml
+	fixtureComponentManifest []byte
 )
 
 func TestParsePackageWithUpdates(t *testing.T) {
@@ -145,6 +156,42 @@ func TestParseCapabilityLanguage(t *testing.T) {
 	}
 }
 
+func TestParseComponentManifest(t *testing.T) {
+	m, err := Parse(fixtureComponentManifest)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if m.Identity.Name != "022bd29263008e5688235b714058746f" {
+		t.Errorf("Identity.Name = %q", m.Identity.Name)
+	}
+	if m.Identity.VersionScope != "nonSxS" {
+		t.Errorf("Identity.VersionScope = %q", m.Identity.VersionScope)
+	}
+	if m.Deployment == nil {
+		t.Fatal("Deployment is nil")
+	}
+	if m.Package != nil {
+		t.Errorf("Package = %+v, want nil (component manifests use Dependencies, not Package)", m.Package)
+	}
+	if len(m.Dependencies) != 1 {
+		t.Fatalf("len(Dependencies) = %d, want 1", len(m.Dependencies))
+	}
+	dep := m.Dependencies[0]
+	if dep.Discoverable {
+		t.Errorf("Dependencies[0].Discoverable = true, want false")
+	}
+	if len(dep.DependentAssembly) != 1 {
+		t.Fatalf("len(DependentAssembly) = %d, want 1", len(dep.DependentAssembly))
+	}
+	da := dep.DependentAssembly[0]
+	if da.DependencyType != "install" {
+		t.Errorf("DependentAssembly[0].DependencyType = %q", da.DependencyType)
+	}
+	if da.Identity.Name != "System" {
+		t.Errorf("DependentAssembly[0].Identity.Name = %q", da.Identity.Name)
+	}
+}
+
 // TestSerializeRoundTrip verifies that Parse -> Serialize -> Parse again
 // yields semantically identical data for every real fixture, i.e. nothing
 // modeled by this package is lost across a round trip (vendor extensions
@@ -156,6 +203,7 @@ func TestSerializeRoundTrip(t *testing.T) {
 		"kb_wrapper":           fixtureKBWrapper,
 		"selectable_feature":   fixtureSelectableFeature,
 		"capability_language":  fixtureCapabilityLanguage,
+		"component_manifest":   fixtureComponentManifest,
 	}
 	for name, raw := range fixtures {
 		t.Run(name, func(t *testing.T) {
@@ -181,6 +229,12 @@ func TestSerializeRoundTrip(t *testing.T) {
 				if len(m1.Package.Updates) != len(m2.Package.Updates) {
 					t.Errorf("Updates count mismatch: got %d, want %d", len(m2.Package.Updates), len(m1.Package.Updates))
 				}
+			}
+			if (m1.Deployment == nil) != (m2.Deployment == nil) {
+				t.Errorf("Deployment presence mismatch after round trip")
+			}
+			if len(m1.Dependencies) != len(m2.Dependencies) {
+				t.Errorf("Dependencies count mismatch: got %d, want %d", len(m2.Dependencies), len(m1.Dependencies))
 			}
 		})
 	}

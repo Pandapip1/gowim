@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
+  <assemblyIdentity name="022bd29263008e5688235b714058746f" version="4.0.15912.251" processorArchitecture="amd64" language="neutral" buildType="release" publicKeyToken="b77a5c561934e089" versionScope="nonSxS" />
+  <deployment />
+  <dependency discoverable="false">
+    <dependentAssembly dependencyType="install">
+      <assemblyIdentity name="System" version="4.0.15912.251" processorArchitecture="amd64" language="neutral" buildType="release" publicKeyToken="b77a5c561934e089" />
+    </dependentAssembly>
+  </dependency>
+</assembly>

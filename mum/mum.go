@@ -1,29 +1,35 @@
-// Package mum implements parsing and serialization of Windows servicing
-// package manifests (.mum files, e.g. Windows\servicing\Packages\*.mum): the
-// plain-XML "asm.v3" documents CBS (Component-Based Servicing) uses to
-// declare a package's identity, its relationship to other packages
-// (parent/update/dependency), and optional-feature selectability.
+// Package mum implements parsing and serialization of the "asm.v3" CBS
+// (Component-Based Servicing) manifest XML shape used by two related but
+// distinct file classes: package-level servicing manifests (.mum files,
+// e.g. Windows\servicing\Packages\*.mum) and component-level WinSxS
+// manifests (Windows\WinSxS\Manifests\*.manifest, once decompressed from
+// PA30 by the sibling `pa30` package -- this package itself only handles
+// the XML, not PA30 decompression).
 //
 // Scope: the base <assembly>/<assemblyIdentity> schema is documented by
 // Microsoft (see
 // https://learn.microsoft.com/en-us/windows/win32/sbscs/assembly-manifests
 // and https://learn.microsoft.com/en-us/windows/win32/sbscs/manifest-file-schema).
-// The CBS-specific asm.v3 vocabulary modeled here (<package>, <update>,
-// <parent>, <installerAssembly>, <selectable>, <detectNone>,
-// <declareCapability>, <component>) is NOT documented anywhere found; it was
-// empirically inferred by sampling real .mum files (1262 files from a real
-// Windows 11 23H2 image on 2026-07-10, plus a further real-VM cross-check on
-// 2026-07-13 whose findings are recorded in this repo's top-level TODO.md).
+// The CBS-specific asm.v3 vocabulary modeled here is NOT documented
+// anywhere found; it was empirically inferred by sampling real files:
+//
+//   - Package-level (.mum) vocabulary -- <package>, <update>, <parent>,
+//     <installerAssembly>, <selectable>, <detectNone>, <declareCapability>,
+//     <component> (as an <update> child) -- from 1262 real .mum files
+//     (2026-07-10) plus a further real-VM cross-check (2026-07-13),
+//     recorded in this repo's top-level TODO.md.
+//   - Component-level (.manifest) vocabulary -- <deployment/>,
+//     <dependency>, <dependentAssembly> -- from 19 real .manifest files
+//     successfully decoded by the sibling `pa30` package (2026-07-13),
+//     also recorded in TODO.md. A given real manifest has been observed to
+//     use one vocabulary or the other, never both.
+//
 // Elements outside this modeled set (e.g. vendor extensions like
 // <mum2:customInformation>, <driver>, <satelliteInfo>, <MutualExclusionGroup>)
 // are silently ignored on Parse and dropped on Serialize -- this package is
-// not a lossless round-trip of arbitrary .mum content, only of the subset
-// needed to identify a package's identity, its declared payload/component
-// references, and its dependency edges.
-//
-// This package does NOT read WinSxS `.manifest` files (as opposed to
-// `.mum` files): those are PA30-delta-compressed, a separate, still
-// under-research format documented in TODO.md, not plain XML.
+// not a lossless round-trip of arbitrary manifest content, only of the
+// subset needed to identify a package/component's identity, its declared
+// payload/component references, and its dependency edges.
 package mum
 
 import (
@@ -135,6 +141,32 @@ type DeclareCapability struct {
 	Dependencies []CapabilityIdentity `xml:"dependency>capabilityIdentity"`
 }
 
+// Deployment is a <deployment/> marker element: an always-empty element
+// seen in every component-level (WinSxS `.manifest`) manifest sampled so
+// far (19 real files, decoded via the sibling `pa30` package, 2026-07-13).
+// Its exact meaning is unconfirmed -- it carries no attributes in any
+// sample seen -- but its mere presence distinguishes a component-level
+// manifest from a package-level `.mum` file, which uses <package>/<update>
+// instead.
+type Deployment struct{}
+
+// DependentAssembly is a <dependentAssembly> element nested in a
+// <dependency>: the identity of another assembly/component this manifest
+// requires.
+type DependentAssembly struct {
+	DependencyType string           `xml:"dependencyType,attr,omitempty"`
+	Identity       AssemblyIdentity `xml:"assemblyIdentity"`
+}
+
+// Dependency is a <dependency> element: one or more required assemblies,
+// seen in component-level (WinSxS `.manifest`) manifests. This is a
+// different vocabulary from `.mum` package-level manifests' <update>/
+// <package> nesting, even though both express "this depends on that".
+type Dependency struct {
+	Discoverable      bool                `xml:"discoverable,attr"`
+	DependentAssembly []DependentAssembly `xml:"dependentAssembly"`
+}
+
 // Package is a manifest's <package> element: the servicing package this
 // manifest declares, and its relationships to other packages/components.
 type Package struct {
@@ -164,6 +196,13 @@ type Manifest struct {
 
 	Identity AssemblyIdentity `xml:"assemblyIdentity"`
 	Package  *Package         `xml:"package"`
+
+	// Deployment and Dependencies are the component-level (WinSxS
+	// `.manifest`) vocabulary, an alternative to Package/Updates -- see
+	// their type docs. Real samples seen so far have one or the other, not
+	// both.
+	Deployment   *Deployment  `xml:"deployment"`
+	Dependencies []Dependency `xml:"dependency"`
 }
 
 // Parse decodes a servicing package manifest from its raw .mum file bytes

@@ -1,34 +1,39 @@
 # gowim/mum
 
-A Go implementation of Windows servicing package manifests (`.mum` files,
-e.g. `Windows\servicing\Packages\*.mum`): the plain-XML documents CBS
-(Component-Based Servicing) uses to declare a package's identity, its
-relationship to other packages (parent/update/dependency), and
-optional-feature selectability.
+A Go implementation of the "asm.v3" CBS (Component-Based Servicing) manifest
+XML shape, used by two related but distinct file classes: package-level
+servicing manifests (`.mum` files, e.g. `Windows\servicing\Packages\*.mum`)
+and component-level WinSxS manifests
+(`Windows\WinSxS\Manifests\*.manifest`, once decompressed from PA30 by the
+sibling `pa30` package -- this package only handles the XML, not PA30
+decompression itself).
 
 The base `<assembly>`/`assemblyIdentity` schema (`asm.v1`/`asm.v3`
 namespaces) is documented by Microsoft: [Assembly manifests -- Microsoft
 Learn](https://learn.microsoft.com/en-us/windows/win32/sbscs/assembly-manifests),
 [Manifest file schema --
 Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/sbscs/manifest-file-schema).
-The CBS-specific `asm.v3` vocabulary modeled here (`<package>`, `<update>`,
-`<parent>`, `<installerAssembly>`, `<selectable>`, `<detectNone>`,
-`<declareCapability>`, `<component>`) is **not** documented anywhere found
--- it was empirically inferred, per this repo's standing reverse-engineering
-policy, from two rounds of real-data inspection recorded in the top-level
-`TODO.md`: 1262 real `.mum` files sampled from a Windows 11 23H2 image
-(2026-07-10), and a further cross-check against a real, running Windows VM
-(`guestmount --ro` against `/var/lib/libvirt/images/win11.qcow2`,
-2026-07-13) used to derive and verify this package's test fixtures.
+The CBS-specific `asm.v3` vocabulary modeled here is **not** documented
+anywhere found -- it was empirically inferred, per this repo's standing
+reverse-engineering policy, from real-data inspection recorded in the
+top-level `TODO.md`:
+
+- **Package-level (`.mum`) vocabulary** -- `<package>`, `<update>`,
+  `<parent>`, `<installerAssembly>`, `<selectable>`, `<detectNone>`,
+  `<declareCapability>`, `<component>` -- from 1262 real `.mum` files
+  sampled from a Windows 11 23H2 image (2026-07-10), plus a further
+  cross-check against a real, running Windows VM (`guestmount --ro` against
+  `/var/lib/libvirt/images/win11.qcow2`, 2026-07-13).
+- **Component-level (`.manifest`) vocabulary** -- `<deployment/>`,
+  `<dependency>`, `<dependentAssembly>` -- from 19 real `.manifest` files
+  successfully decoded end-to-end by the sibling `pa30` package
+  (2026-07-13), the first time this project could read that format at all.
+  A given real manifest has been observed to use one vocabulary or the
+  other, never both.
 
 ## Scope
 
-This package handles `.mum` files only -- plain UTF-8 XML. It does **not**
-handle WinSxS `.manifest` files (`Windows\WinSxS\Manifests\*.manifest`):
-those are PA30-delta-compressed, a separate, still under-research binary
-format (see `TODO.md`'s CBS/servicing section), not XML.
-
-Within `.mum` files, this package models exactly the element/attribute
+Within these files, this package models exactly the element/attribute
 vocabulary confirmed present across the real samples above:
 
 - root `<assembly>` attributes (`manifestVersion`, `copyright`,
@@ -41,18 +46,20 @@ vocabulary confirmed present across the real samples above:
   `<selectable>` (+ `<detectNone>`), `<package>`, or `<component>`
 - `<declareCapability>`: a provided `<capability><capabilityIdentity>` and
   any number of required `<dependency><capabilityIdentity>` entries
+- `<deployment/>` (component-level; an always-empty marker so far) and any
+  number of `<dependency>` (component-level; `discoverable` attr, one or
+  more `<dependentAssembly dependencyType="...">` children)
 
-It **deliberately does not** model every element real `.mum` files can
-contain -- the format has substantially more vocabulary
-(`<driver>`, `<satelliteInfo>`, `<MutualExclusionGroup>`,
-`<NonAncestorDependencies>`, vendor extensions like
-`<mum2:customInformation>`, etc., per a raw-element survey across all 2532
-real `.mum` files in the `win11.qcow2` sample) than is needed to identify a
-package's identity, its declared payload/component references, and its
-dependency edges -- the scope needed for the component-store work this
-package feeds into. `Parse` silently ignores unmodeled elements
-(`encoding/xml`'s default behavior); `Serialize` therefore does not
-losslessly round-trip a manifest containing them. See
+It **deliberately does not** model every element real files can contain --
+the format has substantially more vocabulary (`<driver>`, `<satelliteInfo>`,
+`<MutualExclusionGroup>`, `<NonAncestorDependencies>`, vendor extensions
+like `<mum2:customInformation>`, etc., per a raw-element survey across all
+2532 real `.mum` files in the `win11.qcow2` sample) than is needed to
+identify a package/component's identity, its declared payload/component
+references, and its dependency edges -- the scope needed for the
+component-store work this package feeds into. `Parse` silently ignores
+unmodeled elements (`encoding/xml`'s default behavior); `Serialize`
+therefore does not losslessly round-trip a manifest containing them. See
 `TestSerializeDropsUnmodeledExtensions` in `mum_test.go`, which documents
 this limitation as a passing test rather than leaving it implicit.
 
@@ -89,10 +96,15 @@ plain package/update chain, a KB wrapper (`<parent>` +
 `<detectNone>`), and a language-feature manifest (`<declareCapability>` +
 `<dependency>` + nested `<component>`, which also contains the
 `<mum2:customInformation>` vendor extension used to test the
-unmodeled-element-drop behavior above). Tests assert both field-level parse
-correctness against known values read directly from these real files, and
-that `Parse` -> `Serialize` -> `Parse` again reproduces the same modeled
-data.
+unmodeled-element-drop behavior above).
+`testdata/component_manifest_sample.xml` is the decompressed output of a
+real WinSxS `.manifest` file, produced by the sibling `pa30` package
+(cross-validated there against an independent SHA-256 -- see
+`pa30/pa30_test.go` and `TODO.md`'s "S256H mystery resolved" entry), used
+here to test the `<deployment>`/`<dependency>` vocabulary. Tests assert both
+field-level parse correctness against known values read directly from these
+real files, and that `Parse` -> `Serialize` -> `Parse` again reproduces the
+same modeled data.
 
 ## License
 
