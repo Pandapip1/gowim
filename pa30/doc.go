@@ -11,9 +11,12 @@
 // and, as of this fix, fully and correctly decodes real `.manifest` files
 // whose content only needs DST/LRU back-references into it (see
 // TestDecodeWithSourceRealManifestFullSuccess for a real, cross-validated
-// example). Files whose content needs SRC/FULLSRC matches (which use a
-// delta/rift-offset addressing scheme this package does not implement) still
-// return an error rather than being decoded -- see "Non-goals" below. Decode
+// example). SRC/FULLSRC matches are now also decoded, via a distance-based
+// formula reverse-engineered from real msdelta.dll disassembly rather than
+// from any documentation or reference implementation (neither exists for
+// this specific piece -- see match.go's matchParams doc comment for full
+// provenance) -- but this path remains UNVERIFIED against any real sample,
+// since none sampled so far actually needs it; see "Non-goals" below. Decode
 // remains available for the plain null-delta case (source omitted/nil).
 //
 // # Provenance
@@ -65,20 +68,53 @@
 // and TODO.md's "S256H mystery resolved" entry. Two unrelated research
 // threads in this project now corroborate each other.
 //
-// What remains unverified: files whose content needs SRC/FULLSRC matches
-// (see "Non-goals"), and the multi-block (non-isDefault) compression-
-// parameters path, which real-data testing so far hasn't exercised.
+// What remains unverified: SRC/FULLSRC matches (see below), and the
+// multi-block (non-isDefault) compression-parameters path, which real-data
+// testing so far hasn't exercised.
+//
+// # SRC/FULLSRC (added 2026-07-13, unverified)
+//
+// Unlike everything else in this package, SRC/FULLSRC decoding was not
+// clean-room-implemented from the reference tool's README/prose, because
+// there is none to read: the reference `msdelta-pa30-format` tool's own
+// `dump.c` never computes a SRC/FULLSRC source address either (it only
+// prints their decoded length), by its own admission a bitstream dumper
+// rather than a full decompressor for this match type. Two public patents
+// cited by that tool (US6466999, US6938109B1) were read directly but
+// turned out to describe older/adjacent mechanisms (offline symbol-aware
+// "rift table" generation; LZ77 history-window pre-loading) rather than
+// PA30's actual slot/delta bitstream encoding -- exhausted as a source for
+// this specific gap.
+//
+// Instead, a background agent statically disassembled the real, genuine
+// `msdelta.dll`'s `ApplyDeltaB` (a documented Win32 API; only its machine
+// code was read, since Microsoft ships no source for it -- ordinary
+// black-box disassembly, not a licensing concern) and traced its match
+// dispatch and copy-address computation. Its finding, implemented in
+// match.go/patch.go: `sourcePos = targetPos - distance`, with
+// `distance = delta` for SRC (slots 0-2) and `distance = 0` for FULLSRC
+// (slot 3); the rift table that would otherwise perturb this is an
+// identity no-op for RAW/manifest content (confirmed via embedded
+// pipeline-description strings referencing `AddRiftEntry(emptyTable,
+// sourceSize, 0)`), making `distance` numerically interchangeable with the
+// `offset` slots 4+ already use.
+//
+// This is REVERSE-ENGINEERED FROM DISASSEMBLY, NOT VERIFIED AGAINST ANY
+// REAL SAMPLE -- no `.manifest` file sampled so far actually exercises
+// SRC/FULLSRC. Two specific pieces are flagged by the disassembling agent
+// itself as not fully confirmed (see match.go's matchParams doc comment
+// for the full detail): slot 2's bias constant, and whether SRC/FULLSRC
+// matches update the DST/LRU repeat-offset queue. A non-empty base rift
+// table remains unsupported regardless (still returns an error) -- every
+// real file sampled so far has an empty one even when its content needs
+// SRC/FULLSRC, so that's an independent scope gap.
 //
 // # Non-goals
 //
 // This package does not implement:
 //
-//   - SRC/FULLSRC matches (a delta/rift-offset addressing scheme, distinct
-//     from the DST/LRU back-references this package does support even with
-//     a source buffer) or a non-empty base rift table -- both return errors
-//     rather than being decoded. Every real file sampled so far has an
-//     empty base rift table regardless of whether its content needs
-//     SRC/FULLSRC, so these are independent scope gaps, not the same one.
+//   - A non-empty base rift table -- returns an error rather than being
+//     decoded. Every real file sampled so far has an empty one.
 //   - Non-empty preprocessing buffers -- return an error.
 //   - Encoding. Only decoding is implemented; see TODO.md's note that an
 //     encoder may not even be needed if component removal only ever

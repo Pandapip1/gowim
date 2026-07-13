@@ -10,8 +10,8 @@ non-empty source buffer, now identified, extracted, and embedded as
 `testdata/wcp_dictionary.bin`. `DecodeWithSource` **fully and correctly
 decodes real `.manifest` files** whose content only needs DST/LRU
 back-references into that buffer -- see `TestDecodeWithSourceRealManifestFullSuccess`.
-Files needing SRC/FULLSRC matches (a separate, still-unimplemented
-addressing scheme) still return an error.
+SRC/FULLSRC matches (a separate addressing scheme) are now also decoded, but
+**unverified against real data** -- see "SRC/FULLSRC" below.
 
 ## Why this exists, and its licensing approach
 
@@ -44,9 +44,9 @@ package was built from.
   needed, if component removal only ever deletes `.manifest` files rather
   than rewriting them.)
 - **DST/LRU back-references into a source buffer are supported**
-  (`DecodeWithSource`); **SRC/FULLSRC matches are not** (a separate
-  delta/rift-offset addressing scheme), nor is a non-empty base rift table
-  -- both return errors rather than being decoded.
+  (`DecodeWithSource`). **SRC/FULLSRC matches are also decoded, but
+  unverified against real data** -- see "SRC/FULLSRC" below. A non-empty
+  base rift table is still unsupported regardless and returns an error.
 - **No preprocessing.** A non-empty `preProcessBuffer` returns an error.
 
 ## Verification status
@@ -100,9 +100,45 @@ What testing covers, in `*_test.go`:
   rejection, default Huffman lengths, and both literal and back-reference
   match decoding.
 
-Still unverified: files needing SRC/FULLSRC matches, and the multi-block
-(non-`isDefault`) compression-parameters path, which real-data testing
-hasn't exercised so far.
+Still unverified: the multi-block (non-`isDefault`) compression-parameters
+path, which real-data testing hasn't exercised so far, and SRC/FULLSRC
+matches (see below).
+
+## SRC/FULLSRC (added 2026-07-13, unverified against real data)
+
+Unlike everything else in this package, SRC/FULLSRC was **not** clean-room
+implemented from `msdelta-pa30-format`'s README/prose -- there's none to
+read: its own `dump.c` recognizes these match types' bitstream symbols but
+never computes a real source address for them (only prints decoded length),
+by its own admission a bitstream *dumper*, not a full decompressor, for this
+match type. Two patents it cites (US6466999, US6938109B1) were read in full
+and found to describe older/adjacent mechanisms (offline symbol-aware "rift
+table" preprocessing; LZ77 history-window pre-loading), not PA30's actual
+slot/delta bitstream encoding -- exhausted as a source for this gap.
+
+Instead, a background agent statically disassembled the real, genuine
+`msdelta.dll`'s `ApplyDeltaB` (a documented Win32 API; only its machine code
+was read, since Microsoft ships no source for it -- ordinary black-box
+disassembly, not a licensing concern like the `msdelta-pa30-format` question
+above). Finding, implemented in `match.go`/`patch.go`: no persistent source
+cursor exists -- each match resolves `sourcePos = targetPos - distance`
+fresh, where `distance = delta` for SRC (slots 0-2) and `distance = 0` for
+FULLSRC (slot 3); the rift table is confirmed (via embedded
+pipeline-description strings in `msdelta.dll` referencing
+`AddRiftEntry(emptyTable, sourceSize, 0)`) to be an identity no-op for
+RAW/manifest content, making `distance` numerically interchangeable with the
+`offset` DST/LRU matches already use.
+
+Two pieces the disassembling agent itself flagged as not fully confirmed are
+implemented per its best reading but explicitly called out in code comments
+(see `match.go`'s `matchParams` doc comment): slot 2's bias constant, and
+whether SRC/FULLSRC updates the DST/LRU repeat-offset queue. FULLSRC's
+`distance=0` is suspicious on its face (a self-referential zero-offset
+match) and is deliberately left to trip `decodeContent`'s existing
+offset-validity check rather than silently reinterpreted. **No real sample
+decoded so far actually exercises SRC/FULLSRC** -- see `TODO.md`'s
+"Implement SRC/FULLSRC match decoding" entry for the full trail and what
+would be needed to confirm this.
 
 ## Usage
 
@@ -112,7 +148,7 @@ dict, _ := os.ReadFile("wcp_dictionary.bin") // see testdata/ for how to get one
 
 out, header, err := pa30.DecodeWithSource(data, dict)
 if err != nil {
-    log.Fatal(err) // e.g. a match this package doesn't support (SRC/FULLSRC)
+    log.Fatal(err) // e.g. a non-empty base rift table this package doesn't support
 }
 // out is the decompressed manifest XML; parse with the sibling mum package.
 ```

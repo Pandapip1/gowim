@@ -208,10 +208,10 @@ func buildBlockTrees(lens []int) (blockTrees, error) {
 // it's used as the initial contents of the output buffer (never itself
 // re-emitted; only stripped off before returning) so DST/LRU matches can
 // reference into it -- this is how real WinSxS `.manifest` files actually
-// decode (see doc.go). SRC/FULLSRC matches (slots 0-3) use a
-// delta/rift-offset addressing scheme this package does not implement
-// (independent of whether a source buffer is present) and are reported as
-// errors rather than decoded.
+// decode (see doc.go). SRC/FULLSRC matches (slots 0-3) are decoded via a
+// distance-based formula reverse-engineered from real msdelta.dll
+// disassembly, NOT verified against any real sample yet -- see matchParams'
+// doc comment in match.go for full provenance and caveats.
 func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, source []byte, targetSize int) ([]byte, error) {
 	sourceLen := len(source)
 	out := make([]byte, sourceLen, sourceLen+targetSize)
@@ -243,10 +243,6 @@ func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, source
 			}
 		}
 
-		if slot <= 3 {
-			return nil, fmt.Errorf("pa30: at output offset %d: SRC/FULLSRC match (slot %d) not supported", targetPos, slot)
-		}
-
 		params, err := decodeMatchParams(br, t.aligned, slot)
 		if err != nil {
 			return nil, fmt.Errorf("content: at output offset %d: match params: %w", targetPos, err)
@@ -256,19 +252,33 @@ func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, source
 			return nil, fmt.Errorf("content: at output offset %d: length: %w", targetPos, err)
 		}
 
+		// SRC/FULLSRC (slot <= 3): reverse-engineered from real msdelta.dll
+		// disassembly, NOT verified against any real sample -- see
+		// matchParams' doc comment in match.go for full provenance and
+		// caveats. Numerically, distance behaves exactly like a DST offset
+		// (sourcePos = targetPos - distance == len(out) - distance), so it
+		// reuses the same back-reference machinery below.
 		var offset int
-		if slot >= 4 && slot <= 6 {
+		switch {
+		case slot <= 3:
+			offset = params.delta
+		case slot >= 4 && slot <= 6:
 			offset = lru[params.lruIndex]
-		} else {
+		default:
 			offset = params.offset
 		}
 		if offset <= 0 || offset > len(out) {
-			return nil, fmt.Errorf("pa30: at output offset %d: invalid back-reference offset %d", targetPos, offset)
+			return nil, fmt.Errorf("pa30: at output offset %d: invalid back-reference offset %d (slot %d)", targetPos, offset, slot)
 		}
 		if targetPos+length > targetSize {
 			return nil, fmt.Errorf("pa30: at output offset %d: match of length %d overruns TargetSize %d", targetPos, length, targetSize)
 		}
 		copyMatch(&out, offset, length)
+		// UNVERIFIED (see matchParams' doc comment in match.go, point 2):
+		// disassembly traced SRC/FULLSRC's dispatch arms into the same
+		// LRU-update code DST/LRU-repeat matches use, so this package
+		// updates the queue unconditionally here. Real-data testing hasn't
+		// exercised this yet.
 		updateLRU(&lru, offset)
 	}
 	return out[sourceLen:], nil
