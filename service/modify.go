@@ -14,7 +14,7 @@ import (
 // that svc no longer sets.
 //
 // Unlike Install, Modify requires the subkey to already exist: it looks it
-// up via FindSubkey rather than creating it, and returns an error wrapping
+// up via Subkey rather than creating it, and returns an error wrapping
 // ErrNotFound (checkable with errors.Is) if svc.Name has no existing
 // Services subkey, rather than silently creating one. This lets callers
 // distinguish "install a new service" from "reconfigure one that should
@@ -27,7 +27,7 @@ func Modify(servicesKey *regf.Key, svc Service) error {
 		return wrapErr("modify", err)
 	}
 
-	key := FindSubkey(servicesKey, svc.Name)
+	key := servicesKey.Subkey(svc.Name)
 	if key == nil {
 		return wrapErr("modify", fmt.Errorf("service %q: %w", svc.Name, ErrNotFound))
 	}

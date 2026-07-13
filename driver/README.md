@@ -63,9 +63,9 @@ the files a real installation would copy onto the target machine:
   ID against a service before PnP ever sees the device (see
   `criticaldevicedatabase.go`'s citations), which - unlike Services - *is*
   PnP/driver-install-specific, so it stays in `driver` and is merged into a
-  caller-supplied `*regf.Key` tree via the sibling [`regf`](../regf) package,
-  reusing `service`'s exported `FindOrCreateSubkey`/`SetValue` navigation
-  helpers (`registryinstall.go`'s `mergeCriticalDeviceDatabase`)
+  caller-supplied `*regf.Key` tree using the sibling [`regf`](../regf)
+  package's generic `FindOrCreateSubkey`/`SetValue` `Key` methods directly
+  (`registryinstall.go`'s `mergeCriticalDeviceDatabase`)
 
 `listinstalled.go`'s `ListInstalled` enumerates the driver package folders
 already present in an image's DriverStore - the immediate subdirectories of

@@ -40,7 +40,7 @@ func Read(servicesKey *regf.Key, name string) (Service, error) {
 		return Service{}, wrapErr("read", errors.New("no service name given"))
 	}
 
-	key := FindSubkey(servicesKey, name)
+	key := servicesKey.Subkey(name)
 	if key == nil {
 		return Service{}, wrapErr("read", fmt.Errorf("service %q: %w", name, ErrNotFound))
 	}
@@ -65,11 +65,11 @@ func Read(servicesKey *regf.Key, name string) (Service, error) {
 	}
 	svc.ErrorControl = errCtl
 
-	imagePath := FindValue(key, "ImagePath")
+	imagePath := key.Value("ImagePath")
 	if imagePath == nil {
 		return Service{}, wrapErr("read", fmt.Errorf("service %q: no ImagePath value", name))
 	}
-	svc.ImagePath = utf16LEToString(imagePath.Data)
+	svc.ImagePath = imagePath.SZ()
 
 	svc.Group = readSZ(key, "Group")
 	svc.DisplayName = readSZ(key, "DisplayName")
@@ -80,4 +80,34 @@ func Read(servicesKey *regf.Key, name string) (Service, error) {
 	svc.DependOnService = readMultiSZ(key, "DependOnService")
 
 	return svc, nil
+}
+
+// readDWORD decodes key's REG_DWORD value named name, erroring if the value
+// is absent or is not exactly 4 bytes.
+func readDWORD(key *regf.Key, name string) (uint32, error) {
+	v := key.Value(name)
+	if v == nil {
+		return 0, fmt.Errorf("no %s value", name)
+	}
+	return v.DWORD()
+}
+
+// readSZ decodes key's (REG_SZ or REG_EXPAND_SZ) value named name as a
+// UTF-16LE string, returning "" if the value is absent.
+func readSZ(key *regf.Key, name string) string {
+	v := key.Value(name)
+	if v == nil {
+		return ""
+	}
+	return v.SZ()
+}
+
+// readMultiSZ decodes key's REG_MULTI_SZ value named name into its
+// component strings, returning nil if the value is absent.
+func readMultiSZ(key *regf.Key, name string) []string {
+	v := key.Value(name)
+	if v == nil {
+		return nil
+	}
+	return v.MultiSZ()
 }

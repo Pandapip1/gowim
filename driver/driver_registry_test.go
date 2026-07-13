@@ -245,17 +245,17 @@ func TestInstallRegistry(t *testing.T) {
 		t.Fatalf("InstallRegistry: %v", err)
 	}
 
-	servicesKey := service.FindSubkey(cs, "Services")
+	servicesKey := cs.Subkey("Services")
 	if servicesKey == nil {
 		t.Fatal("no Services subkey after InstallRegistry")
 	}
-	svcKey := service.FindSubkey(servicesKey, "ContosoDrv")
+	svcKey := servicesKey.Subkey("ContosoDrv")
 	if svcKey == nil {
 		t.Fatal("no Services\\ContosoDrv subkey after InstallRegistry")
 	}
 
 	checkDWORD := func(name string, want uint32) {
-		v := service.FindValue(svcKey, name)
+		v := svcKey.Value(name)
 		if v == nil {
 			t.Fatalf("no %s value under Services\\ContosoDrv", name)
 		}
@@ -270,7 +270,7 @@ func TestInstallRegistry(t *testing.T) {
 	checkDWORD("Start", 3)
 	checkDWORD("ErrorControl", 1)
 
-	imagePath := service.FindValue(svcKey, "ImagePath")
+	imagePath := svcKey.Value("ImagePath")
 	if imagePath == nil {
 		t.Fatal("no ImagePath value")
 	}
@@ -282,19 +282,19 @@ func TestInstallRegistry(t *testing.T) {
 		t.Errorf("ImagePath = %q, want %q", got, wantPath)
 	}
 
-	group := service.FindValue(svcKey, "Group")
+	group := svcKey.Value("Group")
 	if group == nil || utf16LEToStringForTest(group.Data) != "Extended Base" {
 		t.Errorf("Group = %+v, want %q", group, "Extended Base")
 	}
 
-	dependOnGroup := service.FindValue(svcKey, "DependOnGroup")
+	dependOnGroup := svcKey.Value("DependOnGroup")
 	if dependOnGroup == nil || dependOnGroup.Type != regf.RegMultiSZ {
 		t.Fatalf("DependOnGroup missing or wrong type: %+v", dependOnGroup)
 	}
 	if got := multiSZToStringsForTest(dependOnGroup.Data); len(got) != 1 || got[0] != "NetBIOSGroup" {
 		t.Errorf("DependOnGroup = %v, want [NetBIOSGroup]", got)
 	}
-	dependOnService := service.FindValue(svcKey, "DependOnService")
+	dependOnService := svcKey.Value("DependOnService")
 	if dependOnService == nil || dependOnService.Type != regf.RegMultiSZ {
 		t.Fatalf("DependOnService missing or wrong type: %+v", dependOnService)
 	}
@@ -302,27 +302,27 @@ func TestInstallRegistry(t *testing.T) {
 		t.Errorf("DependOnService = %v, want [RpcSs]", got)
 	}
 
-	controlKey := service.FindSubkey(cs, "Control")
+	controlKey := cs.Subkey("Control")
 	if controlKey == nil {
 		t.Fatal("no Control subkey")
 	}
-	cddbKey := service.FindSubkey(controlKey, "CriticalDeviceDatabase")
+	cddbKey := controlKey.Subkey("CriticalDeviceDatabase")
 	if cddbKey == nil {
 		t.Fatal("no Control\\CriticalDeviceDatabase subkey")
 	}
-	mainSub := service.FindSubkey(cddbKey, "acpi#contoso0001")
+	mainSub := cddbKey.Subkey("acpi#contoso0001")
 	if mainSub == nil {
 		t.Fatal("no CriticalDeviceDatabase\\acpi#contoso0001 subkey")
 	}
-	classGUID := service.FindValue(mainSub, "ClassGUID")
+	classGUID := mainSub.Value("ClassGUID")
 	if classGUID == nil || utf16LEToStringForTest(classGUID.Data) != "{4d36e97d-e325-11ce-bfc1-08002be10318}" {
 		t.Errorf("ClassGUID = %+v", classGUID)
 	}
-	svcValue := service.FindValue(mainSub, "Service")
+	svcValue := mainSub.Value("Service")
 	if svcValue == nil || utf16LEToStringForTest(svcValue.Data) != "ContosoDrv" {
 		t.Errorf("Service = %+v, want ContosoDrv", svcValue)
 	}
-	if service.FindSubkey(cddbKey, "acpi#contoso0001_compat") == nil {
+	if cddbKey.Subkey("acpi#contoso0001_compat") == nil {
 		t.Fatal("no CriticalDeviceDatabase\\acpi#contoso0001_compat subkey")
 	}
 
@@ -362,16 +362,16 @@ func TestInstallRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentControlSet on round-tripped hive: %v", err)
 	}
-	parsedServices := service.FindSubkey(parsedCS, "Services")
-	if parsedServices == nil || service.FindSubkey(parsedServices, "ContosoDrv") == nil {
+	parsedServices := parsedCS.Subkey("Services")
+	if parsedServices == nil || parsedServices.Subkey("ContosoDrv") == nil {
 		t.Fatal("round-tripped hive missing Services\\ContosoDrv")
 	}
-	parsedControl := service.FindSubkey(parsedCS, "Control")
+	parsedControl := parsedCS.Subkey("Control")
 	if parsedControl == nil {
 		t.Fatal("round-tripped hive missing Control")
 	}
-	parsedCDDB := service.FindSubkey(parsedControl, "CriticalDeviceDatabase")
-	if parsedCDDB == nil || service.FindSubkey(parsedCDDB, "acpi#contoso0001") == nil {
+	parsedCDDB := parsedControl.Subkey("CriticalDeviceDatabase")
+	if parsedCDDB == nil || parsedCDDB.Subkey("acpi#contoso0001") == nil {
 		t.Fatal("round-tripped hive missing CriticalDeviceDatabase\\acpi#contoso0001")
 	}
 }

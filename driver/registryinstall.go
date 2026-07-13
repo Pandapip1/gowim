@@ -4,13 +4,14 @@
 // (github.com/Pandapip1/gowim/regf) purely as a plain Key/Value struct tree
 // - exactly as install.go builds *wim.DirEntry trees by hand with no special
 // "tree API" from the wim package. The generic *regf.Key/*regf.Value
-// find-or-create/navigation logic itself (and the AddService-derived
-// service-registration schema) now lives in the sibling
+// find-or-create/navigation logic itself now lives directly on *regf.Key
+// (regf.Key.FindOrCreateSubkey/SetValue etc., see regf/key.go) for
+// CriticalDeviceDatabase's own navigation needs below, while the
+// AddService-derived service-registration schema lives in the sibling
 // github.com/Pandapip1/gowim/service package (see its README), which this
-// file's Services-related code delegates to - service.FindSubkey/
-// FindOrCreateSubkey/FindValue/SetValue for CriticalDeviceDatabase's own
-// navigation needs below, and service.Install (via a service.Service built
-// from a resolved ServiceInstall) for Services\<name>.
+// file's Services-related code delegates to via service.Install (given a
+// service.Service built from a resolved ServiceInstall) for
+// Services\<name>.
 //
 // Explicit non-goals (in addition to those in driver.go's package doc):
 //
@@ -46,7 +47,9 @@
 //     regf.Key/regf.Value structures given an already-loaded *regf.Hive's (or
 //     freshly-built) Key tree; the caller handles file I/O, exactly as
 //     Install's wim-side counterpart only returns in-memory nodes rather than
-//     writing a WIM file itself.
+//     writing a WIM file itself. See the sibling
+//     github.com/Pandapip1/gowim/registry package for locating/loading the
+//     standard hive set from a WIM image and saving a modified one back.
 package driver
 
 import (
@@ -101,17 +104,17 @@ func mergeServiceInstall(servicesKey *regf.Key, svc ServiceInstall, destDirs map
 // cddbKey (the caller-supplied CriticalDeviceDatabase key itself), named per
 // CriticalDeviceDatabaseSubkeyName, with the ClassGUID/Service values - see
 // the CriticalDeviceDatabaseEntry doc comment in criticaldevicedatabase.go
-// for citations. It reuses the sibling service package's generic
-// find-or-create/set-value navigation helpers rather than keeping a second,
+// for citations. It uses the sibling regf package's generic
+// find-or-create/set-value navigation methods rather than keeping a second,
 // private copy of that logic.
 func mergeCriticalDeviceDatabase(cddbKey *regf.Key, entries []CriticalDeviceDatabaseEntry) {
 	for _, e := range entries {
-		key := service.FindOrCreateSubkey(cddbKey, CriticalDeviceDatabaseSubkeyName(e.HardwareID))
+		key := cddbKey.FindOrCreateSubkey(CriticalDeviceDatabaseSubkeyName(e.HardwareID))
 		if e.ClassGuid != "" {
-			service.SetValue(key, "ClassGUID", regf.RegSZ, stringToUTF16LE(e.ClassGuid))
+			key.SetValue("ClassGUID", regf.RegSZ, regf.EncodeSZ(e.ClassGuid))
 		}
 		if e.Service != "" {
-			service.SetValue(key, "Service", regf.RegSZ, stringToUTF16LE(e.Service))
+			key.SetValue("Service", regf.RegSZ, regf.EncodeSZ(e.Service))
 		}
 	}
 }
@@ -133,7 +136,7 @@ func mergeCriticalDeviceDatabase(cddbKey *regf.Key, entries []CriticalDeviceData
 //
 // Like Install, InstallRegistry is safe to call more than once with the
 // same package against the same tree: the underlying find-or-create/
-// set-value helpers (now in the sibling service package) find-or-create
+// set-value methods (regf.Key.FindOrCreateSubkey/SetValue) find-or-create
 // rather than blindly append, so a second call updates (rather than
 // duplicates) the same Services\<name> and CriticalDeviceDatabase\<hwid>
 // subkeys/values.
@@ -154,15 +157,15 @@ func InstallRegistry(currentControlSet *regf.Key, pkg *Package, destDirs map[Dir
 		return err
 	}
 
-	servicesKey := service.FindOrCreateSubkey(currentControlSet, "Services")
+	servicesKey := currentControlSet.FindOrCreateSubkey("Services")
 	for _, svc := range services {
 		if err := mergeServiceInstall(servicesKey, svc, destDirs); err != nil {
 			return err
 		}
 	}
 
-	controlKey := service.FindOrCreateSubkey(currentControlSet, "Control")
-	cddbKey := service.FindOrCreateSubkey(controlKey, "CriticalDeviceDatabase")
+	controlKey := currentControlSet.FindOrCreateSubkey("Control")
+	cddbKey := controlKey.FindOrCreateSubkey("CriticalDeviceDatabase")
 	mergeCriticalDeviceDatabase(cddbKey, cdEntries)
 
 	return nil

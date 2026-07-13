@@ -72,12 +72,17 @@ and `install.go`.
   `ControlSetNNN` indirection — generic SYSTEM-hive knowledge, included here
   (rather than split into yet another module) so this package is usable
   entirely on its own to find where the `Services` key belongs.
-- Exported `*regf.Key`/`*regf.Value` navigation helpers (`FindSubkey`,
-  `FindOrCreateSubkey`, `RemoveSubkey`, `FindValue`, `SetValue`,
-  `RemoveValue`) that `Install`/`Modify`/`Delete` are themselves built from,
-  and that the sibling `driver` package reuses for its own
-  `CriticalDeviceDatabase` merging rather than keeping a second, private copy
-  of the same find-or-create logic.
+- `Install`/`Modify`/`Delete`/`Read` are themselves built on generic
+  `*regf.Key`/`*regf.Value` navigation methods (`Subkey`,
+  `FindOrCreateSubkey`, `DeleteSubkey`, `Value`, `SetValue`, `DeleteValue`,
+  plus typed `DWORD`/`SZ`/`MultiSZ` codecs) that now live directly on
+  `regf.Key`/`regf.Value` in the sibling `regf` package (see its README's
+  "Registry generalization" section) — not in this package. This package
+  used to carry that logic itself (`keys.go`, now removed); it moved to
+  `regf` so any hive-agnostic caller (this package's own SYSTEM-hive
+  `Services` tree, the sibling `driver` package's `CriticalDeviceDatabase`
+  merging, or code against any other hive entirely) can share one
+  implementation instead of each keeping a private copy.
 
 It deliberately does **not** implement:
 
@@ -130,11 +135,9 @@ It deliberately does **not** implement:
 | File | Responsibility |
 |------|----------------|
 | `service.go` | package doc, `Service`, `Type*`/`Start*`/`Error*` constants, `ErrNotFound`, `wrapErr` |
-| `encoding.go` | `stringToUTF16LE`/`utf16LEToString`/`multiSZToStrings` |
-| `keys.go` | `FindSubkey`/`FindOrCreateSubkey`/`RemoveSubkey`/`FindValue`/`SetValue`/`RemoveValue`, `uint32LEBytes`/`multiSZBytes` encoders, `setOrRemoveSZ`, `readDWORD`/`readSZ`/`readMultiSZ` decoders |
-| `install.go` | `Install`, plus `validateService`/`writeServiceValues` (the merge logic shared with `Modify`) |
+| `install.go` | `Install`, plus `validateService`/`writeServiceValues`/`setOrRemoveSZ` (the merge logic shared with `Modify`), all built on the sibling `regf` package's `regf.Key`/`regf.Value` methods |
 | `modify.go` | `Modify` (like `Install`, but requires the service to already exist) |
-| `read.go` | `Read` (parse an existing `Services\<Name>` subkey back into a `Service`) |
+| `read.go` | `Read` (parse an existing `Services\<Name>` subkey back into a `Service`), plus its own local `readDWORD`/`readSZ`/`readMultiSZ` decoders built on `regf.Value`'s typed accessors |
 | `delete.go` | `Delete` (remove a `Services\<Name>` subkey entirely) |
 | `enable.go` | `SetStartType`, `Enable`, `Disable` |
 | `list.go` | `List` (enumerate service names under a `Services` key) |
@@ -150,7 +153,7 @@ currentControlSet, err := service.CurrentControlSet(root)
 if err != nil {
     log.Fatal(err)
 }
-servicesKey := service.FindOrCreateSubkey(currentControlSet, "Services")
+servicesKey := currentControlSet.FindOrCreateSubkey("Services")
 
 err = service.Install(servicesKey, service.Service{
     Name:            "ContosoDrv",

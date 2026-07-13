@@ -183,21 +183,21 @@ func TestUninstall(t *testing.T) {
 	}
 
 	// The Services\ContosoDrv key is gone.
-	servicesKey := findSubkeyForTest(cs, "Services")
+	servicesKey := cs.Subkey("Services")
 	if servicesKey == nil {
 		t.Fatal("no Services subkey")
 	}
-	if findSubkeyForTest(servicesKey, "ContosoDrv") != nil {
+	if servicesKey.Subkey("ContosoDrv") != nil {
 		t.Fatal("Services\\ContosoDrv still present after Uninstall")
 	}
 
 	// Only ContosoDrv's CriticalDeviceDatabase entry was removed; OtherDrv's
 	// is untouched.
-	controlKey := findSubkeyForTest(cs, "Control")
+	controlKey := cs.Subkey("Control")
 	if controlKey == nil {
 		t.Fatal("no Control subkey")
 	}
-	cddbKey := findSubkeyForTest(controlKey, "CriticalDeviceDatabase")
+	cddbKey := controlKey.Subkey("CriticalDeviceDatabase")
 	if cddbKey == nil {
 		t.Fatal("no CriticalDeviceDatabase subkey")
 	}
@@ -264,17 +264,4 @@ func TestUninstallRequiredArgs(t *testing.T) {
 	if err := Uninstall(bt, cs, fileRepo, "contoso.inf_amd64_dead", ""); err == nil {
 		t.Error("expected an error for an empty serviceName")
 	}
-}
-
-// findSubkeyForTest looks up a direct child subkey by name (case-sensitive
-// is fine here since all test fixtures use consistent casing); a thin local
-// stand-in for service.FindSubkey to avoid importing the service package
-// solely for this lookup in tests that are otherwise regf-only.
-func findSubkeyForTest(key *regf.Key, name string) *regf.Key {
-	for _, k := range key.Subkeys {
-		if k.NameUTF8() == name {
-			return k
-		}
-	}
-	return nil
 }

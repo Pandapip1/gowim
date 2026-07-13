@@ -1,10 +1,8 @@
 package driver
 
 import (
-	"encoding/binary"
 	"errors"
 	"strings"
-	"unicode/utf16"
 
 	"github.com/Pandapip1/gowim/regf"
 	"github.com/Pandapip1/gowim/service"
@@ -95,14 +93,14 @@ func Uninstall(bt *wim.BlobTable, currentControlSet *regf.Key, driverStoreParent
 	}
 
 	if currentControlSet != nil {
-		if servicesKey := service.FindSubkey(currentControlSet, "Services"); servicesKey != nil {
+		if servicesKey := currentControlSet.Subkey("Services"); servicesKey != nil {
 			if err := service.Delete(servicesKey, serviceName); err != nil && !errors.Is(err, service.ErrNotFound) {
 				return wrapErr("uninstall", err)
 			}
 		}
 
-		if controlKey := service.FindSubkey(currentControlSet, "Control"); controlKey != nil {
-			if cddbKey := service.FindSubkey(controlKey, "CriticalDeviceDatabase"); cddbKey != nil {
+		if controlKey := currentControlSet.Subkey("Control"); controlKey != nil {
+			if cddbKey := controlKey.Subkey("CriticalDeviceDatabase"); cddbKey != nil {
 				removeCriticalDeviceDatabaseEntries(cddbKey, serviceName)
 			}
 		}
@@ -192,29 +190,11 @@ func removeCriticalDeviceDatabaseEntries(cddbKey *regf.Key, serviceName string) 
 // cddbServiceValue decodes a CriticalDeviceDatabase subkey's own "Service"
 // value (see criticaldevicedatabase.go's citations) back to a Go string, or
 // "" if absent - the read-side counterpart of mergeCriticalDeviceDatabase's
-// write of the same value. Kept private to driver rather than added as new
-// exported service package API, mirroring registryinstall.go's own existing
-// local helpers.
+// write of the same value.
 func cddbServiceValue(key *regf.Key) string {
-	v := service.FindValue(key, "Service")
+	v := key.Value("Service")
 	if v == nil {
 		return ""
 	}
-	return utf16LEToString(v.Data)
-}
-
-// utf16LEToString decodes UTF-16LE bytes (no BOM, no terminator) back to a
-// Go string - the reverse of stringToUTF16LE (install.go). wim's and
-// service's own decode helpers of the same shape are unexported, so this is
-// duplicated here, mirroring how install.go already duplicates the
-// encode-side stringToUTF16LE for the same reason.
-func utf16LEToString(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-	u16 := make([]uint16, len(b)/2)
-	for i := range u16 {
-		u16[i] = binary.LittleEndian.Uint16(b[i*2:])
-	}
-	return string(utf16.Decode(u16))
+	return v.SZ()
 }

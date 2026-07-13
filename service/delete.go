@@ -20,7 +20,7 @@ func Delete(servicesKey *regf.Key, name string) error {
 		return wrapErr("delete", errors.New("no service name given"))
 	}
 
-	if !RemoveSubkey(servicesKey, name) {
+	if !servicesKey.DeleteSubkey(name) {
 		return wrapErr("delete", fmt.Errorf("service %q: %w", name, ErrNotFound))
 	}
 	return nil

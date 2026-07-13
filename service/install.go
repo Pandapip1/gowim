@@ -9,7 +9,7 @@ import (
 
 // Install produces/merges a Services\<svc.Name> subkey under servicesKey
 // (which the caller has already navigated/created, e.g. via
-// CurrentControlSet plus FindOrCreateSubkey(currentControlSet, "Services"))
+// CurrentControlSet plus currentControlSet.FindOrCreateSubkey("Services"))
 // with the well-known service registration values - see "HKLM\SYSTEM\
 // CurrentControlSet\Services Registry Tree",
 // https://learn.microsoft.com/windows-hardware/drivers/install/hklm-system-currentcontrolset-services-registry-tree
@@ -49,7 +49,7 @@ func Install(servicesKey *regf.Key, svc Service) error {
 		return wrapErr("install", err)
 	}
 
-	key := FindOrCreateSubkey(servicesKey, svc.Name)
+	key := servicesKey.FindOrCreateSubkey(svc.Name)
 	writeServiceValues(key, svc)
 	return nil
 }
@@ -72,10 +72,10 @@ func validateService(svc Service) error {
 // Install (find-or-create) and Modify (must already exist) so the two never
 // duplicate this logic.
 func writeServiceValues(key *regf.Key, svc Service) {
-	SetValue(key, "Type", regf.RegDWORD, uint32LEBytes(svc.Type))
-	SetValue(key, "Start", regf.RegDWORD, uint32LEBytes(svc.Start))
-	SetValue(key, "ErrorControl", regf.RegDWORD, uint32LEBytes(svc.ErrorControl))
-	SetValue(key, "ImagePath", regf.RegExpandSZ, stringToUTF16LE(svc.ImagePath))
+	key.SetValue("Type", regf.RegDWORD, regf.EncodeDWORD(svc.Type))
+	key.SetValue("Start", regf.RegDWORD, regf.EncodeDWORD(svc.Start))
+	key.SetValue("ErrorControl", regf.RegDWORD, regf.EncodeDWORD(svc.ErrorControl))
+	key.SetValue("ImagePath", regf.RegExpandSZ, regf.EncodeSZ(svc.ImagePath))
 
 	setOrRemoveSZ(key, "Group", svc.Group)
 	setOrRemoveSZ(key, "DisplayName", svc.DisplayName)
@@ -83,13 +83,25 @@ func writeServiceValues(key *regf.Key, svc Service) {
 	setOrRemoveSZ(key, "ObjectName", svc.ObjectName)
 
 	if len(svc.DependOnGroup) > 0 {
-		SetValue(key, "DependOnGroup", regf.RegMultiSZ, multiSZBytes(svc.DependOnGroup))
+		key.SetValue("DependOnGroup", regf.RegMultiSZ, regf.EncodeMultiSZ(svc.DependOnGroup))
 	} else {
-		RemoveValue(key, "DependOnGroup")
+		key.DeleteValue("DependOnGroup")
 	}
 	if len(svc.DependOnService) > 0 {
-		SetValue(key, "DependOnService", regf.RegMultiSZ, multiSZBytes(svc.DependOnService))
+		key.SetValue("DependOnService", regf.RegMultiSZ, regf.EncodeMultiSZ(svc.DependOnService))
 	} else {
-		RemoveValue(key, "DependOnService")
+		key.DeleteValue("DependOnService")
+	}
+}
+
+// setOrRemoveSZ sets key's REG_SZ value named name to value if value is
+// non-empty, or removes it if value is "" - the shared "optional string
+// field" pattern Install/Modify use for Group/DisplayName/Description/
+// ObjectName.
+func setOrRemoveSZ(key *regf.Key, name, value string) {
+	if value != "" {
+		key.SetValue(name, regf.RegSZ, regf.EncodeSZ(value))
+	} else {
+		key.DeleteValue(name)
 	}
 }

@@ -31,21 +31,22 @@ import (
 // boot into next and is always present on disk.)
 //
 // This is the natural utility a caller of this package needs to find where
-// to put the Services key (e.g. FindOrCreateSubkey(currentControlSet,
-// "Services")) - it is generic SYSTEM-hive knowledge, not specific to
-// services, but is included here (rather than in a separate module) so this
-// package is usable entirely on its own.
+// to put the Services key (e.g.
+// currentControlSet.FindOrCreateSubkey("Services")) - it is generic
+// SYSTEM-hive knowledge, not specific to services, but is included here
+// (rather than in a separate module) so this package is usable entirely on
+// its own.
 func CurrentControlSet(systemRoot *regf.Key) (*regf.Key, error) {
 	if systemRoot == nil {
 		return nil, wrapErr("current control set", errors.New("nil SYSTEM hive root key"))
 	}
 
-	selectKey := FindSubkey(systemRoot, "Select")
+	selectKey := systemRoot.Subkey("Select")
 	if selectKey == nil {
 		return nil, wrapErr("current control set", errors.New(`no "Select" subkey under SYSTEM hive root`))
 	}
 
-	defVal := FindValue(selectKey, "Default")
+	defVal := selectKey.Value("Default")
 	if defVal == nil {
 		return nil, wrapErr("current control set", errors.New(`no "Default" value under "Select"`))
 	}
@@ -55,7 +56,7 @@ func CurrentControlSet(systemRoot *regf.Key) (*regf.Key, error) {
 	n := binary.LittleEndian.Uint32(defVal.Data[:4])
 
 	name := fmt.Sprintf("ControlSet%03d", n)
-	cs := FindSubkey(systemRoot, name)
+	cs := systemRoot.Subkey(name)
 	if cs == nil {
 		return nil, wrapErr("current control set", fmt.Errorf("no %q subkey under SYSTEM hive root", name))
 	}

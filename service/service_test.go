@@ -19,19 +19,19 @@ func buildSystemHiveRoot() *regf.Key {
 	}
 
 	controlSet001 := &regf.Key{
-		Name: stringToUTF16LE("ControlSet001"),
+		Name: regf.EncodeSZ("ControlSet001"),
 		Subkeys: []*regf.Key{
-			{Name: stringToUTF16LE("Services")},
+			{Name: regf.EncodeSZ("Services")},
 		},
 	}
 
 	selectKey := &regf.Key{
-		Name: stringToUTF16LE("Select"),
+		Name: regf.EncodeSZ("Select"),
 		Values: []regf.Value{
-			{Name: stringToUTF16LE("Default"), Type: regf.RegDWORD, Data: dword(1)},
-			{Name: stringToUTF16LE("Current"), Type: regf.RegDWORD, Data: dword(1)},
-			{Name: stringToUTF16LE("LastKnownGood"), Type: regf.RegDWORD, Data: dword(1)},
-			{Name: stringToUTF16LE("Failed"), Type: regf.RegDWORD, Data: dword(0)},
+			{Name: regf.EncodeSZ("Default"), Type: regf.RegDWORD, Data: dword(1)},
+			{Name: regf.EncodeSZ("Current"), Type: regf.RegDWORD, Data: dword(1)},
+			{Name: regf.EncodeSZ("LastKnownGood"), Type: regf.RegDWORD, Data: dword(1)},
+			{Name: regf.EncodeSZ("Failed"), Type: regf.RegDWORD, Data: dword(0)},
 		},
 	}
 
@@ -65,7 +65,7 @@ func TestCurrentControlSetErrors(t *testing.T) {
 
 	noDefault := &regf.Key{
 		Flags:   regf.KeyFlagHiveEntry,
-		Subkeys: []*regf.Key{{Name: stringToUTF16LE("Select")}},
+		Subkeys: []*regf.Key{{Name: regf.EncodeSZ("Select")}},
 	}
 	if _, err := CurrentControlSet(noDefault); err == nil {
 		t.Error("expected an error when Select has no Default value")
@@ -78,7 +78,7 @@ func TestInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentControlSet: %v", err)
 	}
-	servicesKey := FindOrCreateSubkey(cs, "Services")
+	servicesKey := cs.FindOrCreateSubkey("Services")
 
 	svc := Service{
 		Name:            "ContosoDrv",
@@ -95,13 +95,13 @@ func TestInstall(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
-	svcKey := FindSubkey(servicesKey, "ContosoDrv")
+	svcKey := servicesKey.Subkey("ContosoDrv")
 	if svcKey == nil {
 		t.Fatal("no Services\\ContosoDrv subkey after Install")
 	}
 
 	checkDWORD := func(name string, want uint32) {
-		v := FindValue(svcKey, name)
+		v := svcKey.Value(name)
 		if v == nil {
 			t.Fatalf("no %s value under Services\\ContosoDrv", name)
 		}
@@ -116,7 +116,7 @@ func TestInstall(t *testing.T) {
 	checkDWORD("Start", StartDemand)
 	checkDWORD("ErrorControl", ErrorNormal)
 
-	imagePath := FindValue(svcKey, "ImagePath")
+	imagePath := svcKey.Value("ImagePath")
 	if imagePath == nil {
 		t.Fatal("no ImagePath value")
 	}
@@ -127,19 +127,19 @@ func TestInstall(t *testing.T) {
 		t.Errorf("ImagePath = %q, want %q", got, svc.ImagePath)
 	}
 
-	group := FindValue(svcKey, "Group")
+	group := svcKey.Value("Group")
 	if group == nil || utf16LEToStringForTest(group.Data) != "Extended Base" {
 		t.Errorf("Group = %+v, want %q", group, "Extended Base")
 	}
 
-	dependOnGroup := FindValue(svcKey, "DependOnGroup")
+	dependOnGroup := svcKey.Value("DependOnGroup")
 	if dependOnGroup == nil || dependOnGroup.Type != regf.RegMultiSZ {
 		t.Fatalf("DependOnGroup missing or wrong type: %+v", dependOnGroup)
 	}
 	if got := multiSZToStringsForTest(dependOnGroup.Data); len(got) != 1 || got[0] != "NetBIOSGroup" {
 		t.Errorf("DependOnGroup = %v, want [NetBIOSGroup]", got)
 	}
-	dependOnService := FindValue(svcKey, "DependOnService")
+	dependOnService := svcKey.Value("DependOnService")
 	if dependOnService == nil || dependOnService.Type != regf.RegMultiSZ {
 		t.Fatalf("DependOnService missing or wrong type: %+v", dependOnService)
 	}
@@ -168,13 +168,13 @@ func TestInstall(t *testing.T) {
 	if err := Install(servicesKey, svc2); err != nil {
 		t.Fatalf("third Install (clearing optional fields): %v", err)
 	}
-	if FindValue(svcKey, "Group") != nil {
+	if svcKey.Value("Group") != nil {
 		t.Error("Group value still present after re-installing without a Group")
 	}
-	if FindValue(svcKey, "DependOnGroup") != nil {
+	if svcKey.Value("DependOnGroup") != nil {
 		t.Error("DependOnGroup value still present after re-installing without DependOnGroup")
 	}
-	if FindValue(svcKey, "DependOnService") != nil {
+	if svcKey.Value("DependOnService") != nil {
 		t.Error("DependOnService value still present after re-installing without DependOnService")
 	}
 	if len(svcKey.Values) != 4 {
@@ -198,8 +198,8 @@ func TestInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentControlSet on round-tripped hive: %v", err)
 	}
-	parsedServices := FindSubkey(parsedCS, "Services")
-	if parsedServices == nil || FindSubkey(parsedServices, "ContosoDrv") == nil {
+	parsedServices := parsedCS.Subkey("Services")
+	if parsedServices == nil || parsedServices.Subkey("ContosoDrv") == nil {
 		t.Fatal("round-tripped hive missing Services\\ContosoDrv")
 	}
 }
@@ -210,7 +210,7 @@ func TestInstallErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentControlSet: %v", err)
 	}
-	servicesKey := FindOrCreateSubkey(cs, "Services")
+	servicesKey := cs.FindOrCreateSubkey("Services")
 
 	if err := Install(nil, Service{Name: "X", ImagePath: `\x`}); err == nil {
 		t.Error("expected an error for a nil services key")

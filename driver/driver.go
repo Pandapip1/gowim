@@ -72,10 +72,10 @@
 //     criticaldevicedatabase.go's citations) - unlike Services, this *is*
 //     PnP/driver-install-specific, so it stays here, written into a
 //     caller-supplied *regf.Key tree (registryinstall.go's
-//     mergeCriticalDeviceDatabase) via the sibling regf package
-//     (github.com/Pandapip1/gowim/regf) for the on-disk hive shape, reusing
-//     the service package's exported FindOrCreateSubkey/SetValue navigation
-//     helpers rather than a second private copy of that logic.
+//     mergeCriticalDeviceDatabase) using the sibling regf package's
+//     (github.com/Pandapip1/gowim/regf) generic FindOrCreateSubkey/SetValue
+//     Key methods directly, rather than a second private copy of that
+//     logic.
 //
 // Deliberate simplifications of the above, since this package's job is only
 // to enumerate a package's payload *files* faithfully enough to hash and

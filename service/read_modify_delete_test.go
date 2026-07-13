@@ -34,7 +34,7 @@ func newTestServicesKey(t *testing.T) *regf.Key {
 	if err != nil {
 		t.Fatalf("CurrentControlSet: %v", err)
 	}
-	return FindOrCreateSubkey(cs, "Services")
+	return cs.FindOrCreateSubkey("Services")
 }
 
 func TestReadRoundTrip(t *testing.T) {
@@ -88,7 +88,7 @@ func TestModifyNotFoundDoesNotCreate(t *testing.T) {
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Modify error = %v, want it to wrap ErrNotFound", err)
 	}
-	if FindSubkey(servicesKey, svc.Name) != nil {
+	if servicesKey.Subkey(svc.Name) != nil {
 		t.Error("Modify on a nonexistent service must not create one")
 	}
 }
@@ -119,11 +119,11 @@ func TestModifyUpdatesExisting(t *testing.T) {
 		t.Errorf("Read after Modify = %+v, want %+v", got, updated)
 	}
 
-	svcKey := FindSubkey(servicesKey, svc.Name)
-	if FindValue(svcKey, "Description") != nil {
+	svcKey := servicesKey.Subkey(svc.Name)
+	if svcKey.Value("Description") != nil {
 		t.Error("Description value still present after Modify cleared it")
 	}
-	if FindValue(svcKey, "DependOnGroup") != nil {
+	if svcKey.Value("DependOnGroup") != nil {
 		t.Error("DependOnGroup value still present after Modify cleared it")
 	}
 }
@@ -139,7 +139,7 @@ func TestDelete(t *testing.T) {
 	if err := Delete(servicesKey, svc.Name); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if FindSubkey(servicesKey, svc.Name) != nil {
+	if servicesKey.Subkey(svc.Name) != nil {
 		t.Error("Services subkey still present after Delete")
 	}
 

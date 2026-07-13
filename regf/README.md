@@ -36,9 +36,17 @@ versions -- uses:
   descriptor itself preserved as an opaque byte blob
 
 `Parse` builds a plain in-memory `Key` tree (mirroring `wim.DirEntry`'s
-shape: a struct with a `Subkeys []*Key` field, built and walked directly, no
-special "add node" API) from a raw hive byte slice, and `Hive.AppendTo`
-serializes such a tree back to valid regf bytes.
+shape: a struct with a `Subkeys []*Key` field) from a raw hive byte slice,
+and `Hive.AppendTo` serializes such a tree back to valid regf bytes. Unlike
+`wim.DirEntry`, `Key`/`Value` also carry a generic, hive-agnostic navigation
+API (added 2026-07-13; see `key.go`): case-insensitive subkey/value
+lookup, find-or-create, delete, backslash-separated path navigation, and
+typed `REG_DWORD`/`REG_SZ`/`REG_MULTI_SZ` encode/decode helpers. This used
+to live one level up, hardcoded to the sibling `service` package's
+`Services`-tree use case; it moved here so any hive (SYSTEM, SOFTWARE,
+COMPONENTS, `NTUSER.DAT`, ...) and any caller can share one implementation
+-- see "Usage" below and the top-level `TODO.md`'s "Registry generalization"
+section.
 
 It deliberately does **not** implement:
 
@@ -78,6 +86,7 @@ Everything lives in a single package, `regf`, one file per format concern:
 | `cell.go` | generic cell framing (`readCell`) and the `cellArena` build helper |
 | `nk.go` | `Key` (the public tree type) + the raw `nk` cell shape |
 | `vk.go` | `Value` (the public value type) + the raw `vk` cell shape and the inline-data convention |
+| `key.go` | generic `Key`/`Value` navigation: `Subkey`/`FindOrCreateSubkey`/`DeleteSubkey`, `Value`/`SetValue`/`DeleteValue`, path-based `OpenPath`/`FindOrCreatePath`/`DeletePath`, and typed `DWORD`/`SZ`/`MultiSZ` codecs (`EncodeDWORD`/`EncodeSZ`/`EncodeMultiSZ`) |
 | `subkeylist.go` | `lf`/`lh`/`li`/`ri` subkey-list cells + the LH hash algorithm |
 | `sk.go` | the opaque `sk` (security) cell |
 | `bigdata.go` | `db` big-data cell + segment-list reassembly |
@@ -107,6 +116,17 @@ walk = func(k *regf.Key, path string) {
     }
 }
 walk(hive.Root, "")
+
+// Generic, hive-agnostic navigation: works against any hive's Key tree.
+software := hive.Root.OpenPath(`Microsoft\Windows NT\CurrentVersion`)
+if software != nil {
+    if v := software.Value("ProductName"); v != nil {
+        fmt.Println(v.SZ())
+    }
+}
+policies := hive.Root.FindOrCreatePath(`Microsoft\Windows\Something`)
+policies.SetValue("SomeSetting", regf.RegDWORD, regf.EncodeDWORD(1))
+hive.Root.DeletePath(`Microsoft\Windows\SomethingElse`)
 
 // Build a fresh hive from scratch and serialize it.
 fresh := &regf.Hive{
