@@ -31,11 +31,12 @@ type NewBlob struct {
 // resolve to, e.g. destDirs[driver.DirIDDriverStore] =
 // `Windows\System32\DriverStore\FileRepository\mydriver.inf_amd64_xxxxxxxx`.
 // Path strings may use '/' or '\' as the separator; both are accepted and
-// normalized to path components. Install does not compute this path itself
-// for DIRID 13 (see the package doc's stated non-goal regarding the
-// DriverStore hashing scheme) - the caller must supply it (and any other
-// DIRID the package's files use) explicitly. It is an error for a payload
-// file's DirID to be absent from destDirs.
+// normalized to path components. DIRID 13 (DirIDDriverStore) is the one
+// exception: if pkg's files use it and destDirs does not already supply an
+// explicit override, Install computes the real DriverStore folder name
+// itself (see FileRepositoryDirName) rather than requiring the caller to.
+// It is an error for any other DIRID a payload file uses to be absent from
+// destDirs.
 //
 // Each payload file whose DestName ends in ".sys" (case-insensitively) is
 // parsed with pe.Parse as a sanity check that it is a well-formed PE image
@@ -58,6 +59,24 @@ func Install(md *wim.ImageMetadata, bt *wim.BlobTable, pkg *Package, destDirs ma
 	if bt == nil {
 		return nil, nil, wrapErr("install", errors.New("nil blob table"))
 	}
+
+	dd := make(map[DirID]string, len(destDirs)+1)
+	for k, v := range destDirs {
+		dd[k] = v
+	}
+	if _, ok := dd[DirIDDriverStore]; !ok {
+		for _, pf := range pkg.Files {
+			if pf.DirID == DirIDDriverStore {
+				dirName, err := pkg.fileRepositoryDirName()
+				if err != nil {
+					return nil, nil, wrapErr("install", err)
+				}
+				dd[DirIDDriverStore] = `Windows\System32\DriverStore\FileRepository\` + dirName
+				break
+			}
+		}
+	}
+	destDirs = dd
 
 	existing := make(map[wim.Hash]*wim.BlobDescriptor, len(bt.Entries))
 	for i := range bt.Entries {

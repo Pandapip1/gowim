@@ -101,24 +101,31 @@ caller-supplied architecture token, and does not resolve the multi-disk
 location is always the optional `SourceDisksFiles` subdir underneath the
 INF's own directory (a single, already-unpacked driver source tree).
 
+The Windows DriverStore's FileRepository folder-naming scheme (the
+`<infname>_<platform>_<hash>` folder under
+`\Windows\System32\DriverStore\FileRepository\`) used to be on the
+"deliberately does not implement" list below -- it's genuinely undocumented
+anywhere publicly (confirmed directly by a Microsoft engineer on a 2008
+newsgroup thread, who recommended calling the documented
+`SetupGetInfDriverStoreLocation()` API instead of computing it yourself),
+and an initial check confirmed the 16-hex-character suffix isn't a plain
+MD5/SHA-1/SHA-256 of the INF's bytes. **It's no longer a non-goal**:
+reverse-engineered (2026-07-13) via clean-room disassembly of the real
+`drvstore.dll` (reading only its machine code -- Microsoft ships no source
+for it, so this is ordinary black-box disassembly, not a licensing concern)
+and empirically validated against 102 real driver packages sampled from a
+real Windows 11 23H2 image (102/102 exact matches). The actual algorithm
+turned out to be simpler than a cryptographic-hash guess: a base-39
+polynomial rolling hash (`h = h*0x27 + byte`) over the driver's raw `.inf`
+file bytes alone -- no architecture, payload, or catalog content involved.
+See `driverstore.go`'s `driverStoreHash`/`FileRepositoryDirName` doc
+comments for the full disassembly trail (function addresses, ruled-out red
+herrings) and `TODO.md`'s "Driver package additions" entry for the research
+narrative. `Install` now computes DIRID 13's destination automatically
+unless the caller supplies an explicit override.
+
 It **deliberately does not** implement:
 
-- The Windows DriverStore's FileRepository path-hashing scheme (the
-  `<infname>_<hash>` folder naming under
-  `\Windows\System32\DriverStore\FileRepository\`). That scheme is
-  undocumented/reverse-engineered, not sourced from an authoritative spec,
-  and this repo's policy is to never speculate about undocumented internals.
-  This was checked empirically rather than just assumed: extracting the real
-  `FileRepository`/`INF` directories from a Windows 11 23H2 `install.esd`
-  showed byte-identical copies of e.g. `1394.inf` stored under
-  `1394.inf_amd64_f05cd2933ff9e649`, but MD5, SHA-1, and SHA-256 of that exact
-  file (full digest and both truncated ends) all disagree with the folder's
-  16 hex-character suffix, across every package checked - so the suffix is
-  not a simple hash of the INF's bytes, and reproducing it would mean
-  reverse-engineering (or replicating unknown internal state of)
-  `setupapi.dll`/`drvstore.dll`, which is out of scope here. `Install`
-  instead takes the destination directory path for each DIRID used by the
-  package as an explicit parameter.
 - The `SYSTEM` hive's `DriverDatabase` key tree
   (`SYSTEM\DriverDatabase\DriverPackages`, `DeviceIds`, etc), the internal
   driver-ranking database PnP uses to choose among multiple matching drivers
@@ -163,12 +170,14 @@ It **deliberately does not** implement:
 | `load.go` | `Package`, `PayloadFile`, `LoadPackage` (INF parse + catalog resolution + CopyFiles/SourceDisksFiles/DestinationDirs enumeration) |
 | `verify.go` | `VerifyStatus`, `FileVerification`, `(*Package).Verify` |
 | `install.go` | `NewBlob`, `Install` (merge payload files into a `*wim.ImageMetadata` + `*wim.BlobTable`) |
+| `driverstore.go` | `FileRepositoryDirName`/`driverStoreHash` (the reverse-engineered DriverStore folder-name hash; see its doc comments for the disassembly trail) |
 | `service.go` | `ServiceInstall`, `(*Package).Services` (AddService directive chain resolution) |
 | `criticaldevicedatabase.go` | `CriticalDeviceDatabaseEntry`, `(*Package).CriticalDeviceDatabaseEntries`, `CriticalDeviceDatabaseSubkeyName` |
-| `registryinstall.go` | `InstallRegistry` (resolve each `ServiceInstall`'s `ImagePath` and delegate to `service.Install`; merge CriticalDeviceDatabase into a `*regf.Key` tree via `service`'s exported navigation helpers) |
+| `registryinstall.go` | `InstallRegistry` (resolve each `ServiceInstall`'s `ImagePath` and delegate to `service.Install`; merge CriticalDeviceDatabase into a `*regf.Key` tree via `regf`'s generic navigation methods) |
 | `listinstalled.go` | `InstalledPackage`, `ListInstalled` (enumerate DriverStore package folders already present in an image) |
 | `uninstall.go` | `Uninstall` (reverse of `Install`+`InstallRegistry`: detach a package's DriverStore folder, adjust blob RefCounts, delete its Services key, remove just its own CriticalDeviceDatabase entries) |
 | `driver_test.go` | synthetic INF/catalog/PE fixtures and tests (payload files, verify, WIM install) |
+| `driverstore_test.go` | real `.inf` fixtures (`testdata/real_1394.inf`, `testdata/real_ntprint.inf`) and tests reproducing their exact real DriverStore folder-name hashes |
 | `driver_registry_test.go` | synthetic INF/registry fixtures and tests (services, CDDB, control-set resolution, registry install) |
 | `uninstall_test.go` | synthetic FileRepository/blob-table/SYSTEM-hive-shaped fixtures and tests (`ListInstalled`, `Uninstall`'s file/service/CDDB removal and idempotency) |
 
@@ -194,11 +203,10 @@ for _, r := range results {
 }
 
 // Merge the package's payload files into an existing image's metadata and
-// blob table. The caller supplies the destination path for every DIRID the
-// package's files use (this package does not compute DriverStore paths).
-destDirs := map[driver.DirID]string{
-    driver.DirIDDriverStore: `Windows\System32\DriverStore\FileRepository\contoso.inf_amd64_<...>`,
-}
+// blob table. The caller supplies the destination path for any DIRID the
+// package's files use other than 13 (DirIDDriverStore) -- Install computes
+// that one itself, reproducing the real DriverStore folder-name hash.
+destDirs := map[driver.DirID]string{}
 root, newBlobs, err := driver.Install(imageMetadata, blobTable, pkg, destDirs)
 if err != nil {
     log.Fatal(err)

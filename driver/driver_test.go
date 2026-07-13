@@ -467,7 +467,36 @@ func TestInstallRejectsCorruptSys(t *testing.T) {
 	}
 }
 
+// TestInstallMissingDestDir checks that Install still requires an explicit
+// destDirs entry for any DIRID other than 13 (DirIDDriverStore, which
+// Install now computes automatically -- see TestInstallComputesDriverStoreDir).
 func TestInstallMissingDestDir(t *testing.T) {
+	fsys, _, _ := buildFS(t)
+	pkg, err := LoadPackage(fsys, "contoso.inf", "amd64")
+	if err != nil {
+		t.Fatalf("LoadPackage: %v", err)
+	}
+	// Splice in an extra payload file under an arbitrary DIRID no fixture
+	// INF uses, so it's guaranteed absent from destDirs.
+	pkg.Files = append(pkg.Files, PayloadFile{
+		DestName:   "extra.dll",
+		SourceName: "helper.dll",
+		SourcePath: "helper.dll",
+		DirID:      20000,
+	})
+
+	md := &wim.ImageMetadata{Root: &wim.DirEntry{Attributes: wim.FileAttributeDirectory, SecurityID: wim.SecurityIDNone}}
+	bt := &wim.BlobTable{}
+	if _, _, err := Install(md, bt, pkg, map[DirID]string{}); err == nil {
+		t.Fatal("expected an error when no destination directory is supplied for a non-DriverStore DIRID")
+	}
+}
+
+// TestInstallComputesDriverStoreDir checks that Install now computes DIRID
+// 13's destination itself (via FileRepositoryDirName) when destDirs doesn't
+// supply an explicit override, reproducing the real DriverStore folder-name
+// hash reverse-engineered from drvstore.dll (see driverstore.go).
+func TestInstallComputesDriverStoreDir(t *testing.T) {
 	fsys, _, _ := buildFS(t)
 	pkg, err := LoadPackage(fsys, "contoso.inf", "amd64")
 	if err != nil {
@@ -475,9 +504,19 @@ func TestInstallMissingDestDir(t *testing.T) {
 	}
 	md := &wim.ImageMetadata{Root: &wim.DirEntry{Attributes: wim.FileAttributeDirectory, SecurityID: wim.SecurityIDNone}}
 	bt := &wim.BlobTable{}
-	if _, _, err := Install(md, bt, pkg, map[DirID]string{}); err == nil {
-		t.Fatal("expected an error when no destination directory is supplied")
+
+	root, _, err := Install(md, bt, pkg, map[DirID]string{})
+	if err != nil {
+		t.Fatalf("Install (no destDirs at all): %v", err)
 	}
+
+	infData, err := fsys.ReadFile("contoso.inf")
+	if err != nil {
+		t.Fatalf("ReadFile(contoso.inf): %v", err)
+	}
+	wantDirName := FileRepositoryDirName("contoso.inf", infData, "amd64")
+
+	findPath(t, root, "Windows", "System32", "DriverStore", "FileRepository", wantDirName, "driver.sys")
 }
 
 func findPath(t *testing.T, root *wim.DirEntry, components ...string) *wim.DirEntry {
