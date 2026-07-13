@@ -31,9 +31,21 @@ type Header struct {
 	TargetHash      []byte
 }
 
-// Decode decodes a PA30 patch file's target buffer. See doc.go for scope
-// (null-delta only) and verification status.
+// Decode decodes a PA30 patch file's target buffer, for the empty-source
+// (null-delta) case. See doc.go for scope and verification status. Real
+// WinSxS `.manifest` files are NOT null-delta -- use DecodeWithSource with
+// their shared dictionary source buffer instead (see doc.go).
 func Decode(data []byte) ([]byte, *Header, error) {
+	return DecodeWithSource(data, nil)
+}
+
+// DecodeWithSource decodes a PA30 patch file's target buffer, using source
+// as the buffer the patch's DST/LRU back-references may reach into (it is
+// never itself part of the returned output). Pass nil for the null-delta
+// case (equivalent to Decode). See doc.go for scope and verification
+// status; in particular, SRC/FULLSRC matches are never supported,
+// regardless of source.
+func DecodeWithSource(data []byte, source []byte) ([]byte, *Header, error) {
 	if len(data) < 12 || string(data[0:4]) != "PA30" {
 		return nil, nil, fmt.Errorf("pa30: missing PA30 signature")
 	}
@@ -84,7 +96,7 @@ func Decode(data []byte) ([]byte, *Header, error) {
 		return nil, nil, fmt.Errorf("pa30: patchBuffer: %w", err)
 	}
 
-	out, err := parsePatchBuffer(patchBuf, int(h.TargetSize))
+	out, err := parsePatchBuffer(patchBuf, source, int(h.TargetSize))
 	if err != nil {
 		return nil, h, err
 	}

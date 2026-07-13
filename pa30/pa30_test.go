@@ -1,8 +1,10 @@
 package pa30
 
 import (
+	"crypto/sha256"
 	_ "embed"
 	"encoding/binary"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -16,6 +18,53 @@ import (
 //
 //go:embed testdata/real_manifest_sample.manifest
 var realManifestSample []byte
+
+// wcpDictionary is the real, shared ~9KB "source buffer" every WinSxS
+// `.manifest` file is actually PA30-delta-compressed against (see doc.go).
+// Extracted (2026-07-13) as PE resource type 614 (0x266), name 1, language
+// 1033, from a real `wcp.dll`
+// (`Windows\WinSxS\amd64_microsoft-windows-servicingstack_31bf3856ad364e35_10.0.22621.6120_none_e967976c42c72025\wcp.dll`
+// on the same VM as realManifestSample) via `wrestool` (icoutils) -- a
+// standard, documented PE-resource-directory extraction, not a
+// reverse-engineered format; only which resource ID holds this data came
+// from third-party research (a Cobalt.io writeup), not this package's own
+// reverse engineering.
+//
+//go:embed testdata/wcp_dictionary.bin
+var wcpDictionary []byte
+
+// TestDecodeWithSourceRealManifestFullSuccess fully decodes a real WinSxS
+// `.manifest` file end-to-end for the first time (2026-07-13), using
+// wcpDictionary as the source buffer. Cross-validated two independent ways:
+// (1) the decoded byte length exactly matches the header's TargetSize; (2)
+// its SHA-256 exactly matches the `S256H` registry value this project
+// separately found (and, until now, could not explain) for this exact
+// component identity while reverse-engineering the COMPONENTS hive
+// (2026-07-10/13 research, see TODO.md) -- i.e. two unrelated research
+// threads in this project now corroborate each other. The decoded XML is
+// also a well-formed, complete `<assembly>` manifest (assemblyIdentity,
+// deployment, dependency/dependentAssembly), parseable by the sibling `mum`
+// package.
+func TestDecodeWithSourceRealManifestFullSuccess(t *testing.T) {
+	body := realManifestSample[4:] // strip "DCM" + 1 version byte
+
+	out, h, err := DecodeWithSource(body, wcpDictionary)
+	if err != nil {
+		t.Fatalf("DecodeWithSource: %v", err)
+	}
+	if uint32(len(out)) != h.TargetSize {
+		t.Fatalf("len(out) = %d, want TargetSize %d", len(out), h.TargetSize)
+	}
+	const wantSHA256 = "72d0a662ad2721ba2a5df925a958c064eacd3fa7e58f95217a662f6c4f9eb1d0"
+	sum := sha256.Sum256(out)
+	if got := hex.EncodeToString(sum[:]); got != wantSHA256 {
+		t.Errorf("sha256(out) = %s, want %s (the real S256H value for this component)", got, wantSHA256)
+	}
+	want := `<assemblyIdentity name="022bd29263008e5688235b714058746f" version="4.0.15912.251" processorArchitecture="amd64" language="neutral" buildType="release" publicKeyToken="b77a5c561934e089" versionScope="nonSxS" />`
+	if !strings.Contains(string(out), want) {
+		t.Errorf("decoded output missing expected assemblyIdentity line; got:\n%s", out)
+	}
+}
 
 // TestDecodeRealManifestSample decodes an actual WinSxS `.manifest` file
 // and checks its result against ground truth independently confirmed by

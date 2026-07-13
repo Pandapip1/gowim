@@ -22,10 +22,16 @@ type blockTrees struct {
 }
 
 // parsePatchBuffer parses a PA30 patchBuffer's raw content bytes (extracted
-// via readBuffer) and decodes its target-buffer content, restricted to the
-// null-delta case: a non-empty base rift table is rejected outright, since
-// this package does not implement general source-to-target diffing.
-func parsePatchBuffer(data []byte, targetSize int) ([]byte, error) {
+// via readBuffer) and decodes its target-buffer content. source, if
+// non-nil, is prepended to the decode-time output buffer so that DST/LRU
+// back-references may reach into it (this is how real WinSxS `.manifest`
+// files are actually compressed -- see doc.go); a non-empty *base rift
+// table* is still rejected outright regardless of source, since this
+// package does not implement block-reordering/rift-offset machinery at
+// all (empirically, real `.manifest` files have an empty rift table even
+// though they reference a non-empty source buffer -- the two are
+// independent bits of scope).
+func parsePatchBuffer(data []byte, source []byte, targetSize int) ([]byte, error) {
 	br, err := newBitReader(data)
 	if err != nil {
 		return nil, fmt.Errorf("patch buffer: %w", err)
@@ -36,7 +42,7 @@ func parsePatchBuffer(data []byte, targetSize int) ([]byte, error) {
 		return nil, fmt.Errorf("patch buffer: base rift table flag: %w", err)
 	}
 	if nonEmpty != 0 {
-		return nil, fmt.Errorf("pa30: non-empty base rift table not supported (only null-delta patches are)")
+		return nil, fmt.Errorf("pa30: non-empty base rift table not supported")
 	}
 
 	blocks, blockStarts, err := readCompressionParameters(br)
@@ -44,7 +50,7 @@ func parsePatchBuffer(data []byte, targetSize int) ([]byte, error) {
 		return nil, err
 	}
 
-	return decodeContent(br, blocks, blockStarts, targetSize)
+	return decodeContent(br, blocks, blockStarts, source, targetSize)
 }
 
 // readCompressionParameters parses the "Composite Format" compression
@@ -196,24 +202,32 @@ func buildBlockTrees(lens []int) (blockTrees, error) {
 	return blockTrees{main: main, length: length, aligned: aligned}, nil
 }
 
-// decodeContent decodes the compressor bitstream into targetSize output
-// bytes, using blocks[i]'s Huffman tables once the output position reaches
-// blockStarts[i]. SRC/FULLSRC matches (slots 0-3) reference a prepended
-// source buffer this package does not support (null-delta scope only) and
-// are reported as errors rather than decoded.
-func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, targetSize int) ([]byte, error) {
-	out := make([]byte, 0, targetSize)
+// decodeContent decodes the compressor bitstream into targetSize target
+// bytes, using blocks[i]'s Huffman tables once the absolute output position
+// (source-prefix included) reaches blockStarts[i]. If source is non-nil,
+// it's used as the initial contents of the output buffer (never itself
+// re-emitted; only stripped off before returning) so DST/LRU matches can
+// reference into it -- this is how real WinSxS `.manifest` files actually
+// decode (see doc.go). SRC/FULLSRC matches (slots 0-3) use a
+// delta/rift-offset addressing scheme this package does not implement
+// (independent of whether a source buffer is present) and are reported as
+// errors rather than decoded.
+func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, source []byte, targetSize int) ([]byte, error) {
+	sourceLen := len(source)
+	out := make([]byte, sourceLen, sourceLen+targetSize)
+	copy(out, source)
 	var lru [3]int
 	blockIdx := 0
-	for len(out) < targetSize {
+	for len(out)-sourceLen < targetSize {
 		for blockIdx+1 < len(blocks) && len(out) >= blockStarts[blockIdx+1] {
 			blockIdx++
 		}
 		t := blocks[blockIdx]
+		targetPos := len(out) - sourceLen
 
 		sym, err := t.main.decode(br)
 		if err != nil {
-			return nil, fmt.Errorf("content: at output offset %d: %w", len(out), err)
+			return nil, fmt.Errorf("content: at output offset %d: %w", targetPos, err)
 		}
 		if sym < 256 {
 			out = append(out, byte(sym))
@@ -225,21 +239,21 @@ func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, target
 		if slot == 7 {
 			slot, err = expandSlot7(br)
 			if err != nil {
-				return nil, fmt.Errorf("content: at output offset %d: slot7 expansion: %w", len(out), err)
+				return nil, fmt.Errorf("content: at output offset %d: slot7 expansion: %w", targetPos, err)
 			}
 		}
 
 		if slot <= 3 {
-			return nil, fmt.Errorf("pa30: at output offset %d: SRC/FULLSRC match (slot %d) requires a non-empty source buffer, not supported", len(out), slot)
+			return nil, fmt.Errorf("pa30: at output offset %d: SRC/FULLSRC match (slot %d) not supported", targetPos, slot)
 		}
 
 		params, err := decodeMatchParams(br, t.aligned, slot)
 		if err != nil {
-			return nil, fmt.Errorf("content: at output offset %d: match params: %w", len(out), err)
+			return nil, fmt.Errorf("content: at output offset %d: match params: %w", targetPos, err)
 		}
 		length, err := decodeLength(br, t.length, lenField)
 		if err != nil {
-			return nil, fmt.Errorf("content: at output offset %d: length: %w", len(out), err)
+			return nil, fmt.Errorf("content: at output offset %d: length: %w", targetPos, err)
 		}
 
 		var offset int
@@ -249,13 +263,13 @@ func decodeContent(br *bitReader, blocks []blockTrees, blockStarts []int, target
 			offset = params.offset
 		}
 		if offset <= 0 || offset > len(out) {
-			return nil, fmt.Errorf("pa30: at output offset %d: invalid back-reference offset %d", len(out), offset)
+			return nil, fmt.Errorf("pa30: at output offset %d: invalid back-reference offset %d", targetPos, offset)
 		}
-		if len(out)+length > targetSize {
-			return nil, fmt.Errorf("pa30: at output offset %d: match of length %d overruns TargetSize %d", len(out), length, targetSize)
+		if targetPos+length > targetSize {
+			return nil, fmt.Errorf("pa30: at output offset %d: match of length %d overruns TargetSize %d", targetPos, length, targetSize)
 		}
 		copyMatch(&out, offset, length)
 		updateLRU(&lru, offset)
 	}
-	return out, nil
+	return out[sourceLen:], nil
 }

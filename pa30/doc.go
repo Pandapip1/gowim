@@ -1,17 +1,20 @@
 // Package pa30 implements a decoder for Microsoft's "PA30" MSDELTA patch
-// file format. It was originally scoped to the null-delta case only (empty
-// source buffer, no preprocessing transforms, empty base rift table), on
-// the assumption that WinSxS `Windows\WinSxS\Manifests\*.manifest` files
-// were self-compressed rather than diffed against a prior version. Real
-// data (see "Verification status" below) disproved that assumption: real
+// file format, used by WinSxS `Windows\WinSxS\Manifests\*.manifest` files.
+// It was originally scoped to the null-delta case only (empty source
+// buffer), on the assumption that these files were self-compressed rather
+// than diffed against a prior version. Real data disproved that: real
 // `.manifest` files are compressed against a large (~9-10KB), shared,
-// non-empty source buffer. This package's scope is therefore narrower than
-// originally intended -- it correctly decodes header fields and any
-// literal/back-reference content up to the point a real file's compressed
-// stream references that external source buffer, then errors out rather
-// than guessing (see the top-level TODO.md's CBS/servicing section for the
-// broader context, and the pending work to actually obtain and use that
-// buffer).
+// non-empty source buffer -- confirmed (2026-07-13) to be PE resource type
+// 614 (0x266), name 1, inside `wcp.dll`, extracted via `wrestool` (a
+// standard, documented PE-resource extraction) and embedded as
+// testdata/wcp_dictionary.bin. DecodeWithSource takes that buffer directly
+// and, as of this fix, fully and correctly decodes real `.manifest` files
+// whose content only needs DST/LRU back-references into it (see
+// TestDecodeWithSourceRealManifestFullSuccess for a real, cross-validated
+// example). Files whose content needs SRC/FULLSRC matches (which use a
+// delta/rift-offset addressing scheme this package does not implement) still
+// return an error rather than being decoded -- see "Non-goals" below. Decode
+// remains available for the plain null-delta case (source omitted/nil).
 //
 // # Provenance
 //
@@ -51,24 +54,32 @@
 // recurrence (shortest code length gets the smallest code values); PA30's
 // real construction is top-down (longest code length gets the smallest
 // values, built via a halving recurrence) -- see huffman.go's type doc.
-// With that fixed, this package's header parsing, buffer extraction, and
-// Huffman/literal/back-reference decoding match the reference oracle
-// exactly on every real file tried, including reproducing the exact output
-// offset at which decoding must stop because the file references the
-// shared, currently-unsupported source buffer (see the package-level scope
-// note above). See TestDecodeRealManifestSample for the regression test
-// built from this real data. What remains unverified: decoding once the
-// shared source buffer is actually available (no real file has been fully,
-// end-to-end decoded yet), and the multi-block (non-isDefault) compression-
+//
+// With the dictionary in hand, DecodeWithSource fully decoded a real
+// `.manifest` file end-to-end for the first time, cross-validated two
+// independent ways: the output length exactly matches the header's
+// TargetSize, and its SHA-256 exactly matches a `COMPONENTS`-hive `S256H`
+// registry value this project separately found (and, until this point,
+// could not explain) for the same component identity while
+// reverse-engineering the COMPONENTS hive -- see TestDecodeWithSourceRealManifestFullSuccess
+// and TODO.md's "S256H mystery resolved" entry. Two unrelated research
+// threads in this project now corroborate each other.
+//
+// What remains unverified: files whose content needs SRC/FULLSRC matches
+// (see "Non-goals"), and the multi-block (non-isDefault) compression-
 // parameters path, which real-data testing so far hasn't exercised.
 //
 // # Non-goals
 //
 // This package does not implement:
 //
-//   - Non-null-delta patches: a non-empty base rift table, SRC/FULLSRC
-//     matches (which reference a prepended source buffer), or any
-//     preprocessing transform all return errors rather than being decoded.
+//   - SRC/FULLSRC matches (a delta/rift-offset addressing scheme, distinct
+//     from the DST/LRU back-references this package does support even with
+//     a source buffer) or a non-empty base rift table -- both return errors
+//     rather than being decoded. Every real file sampled so far has an
+//     empty base rift table regardless of whether its content needs
+//     SRC/FULLSRC, so these are independent scope gaps, not the same one.
+//   - Non-empty preprocessing buffers -- return an error.
 //   - Encoding. Only decoding is implemented; see TODO.md's note that an
 //     encoder may not even be needed if component removal only ever
 //     deletes `.manifest` files rather than rewriting them.
