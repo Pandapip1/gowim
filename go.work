@@ -11,4 +11,5 @@ use (
 	./xpress
 	./lzx
 	./lzms
+	./mum
 )
