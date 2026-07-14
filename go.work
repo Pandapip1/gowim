@@ -1,18 +1,19 @@
 go 1.22
 
 use (
-	./wim
-	./inf
+	./appx
 	./cat
-	./pe
+	./component
 	./driver
-	./regf
-	./service
-	./xpress
-	./lzx
+	./inf
 	./lzms
+	./lzx
 	./mum
 	./pa30
-	./component
+	./pe
+	./regf
 	./registry
+	./service
+	./wim
+	./xpress
 )

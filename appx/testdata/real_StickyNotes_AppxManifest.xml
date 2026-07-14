@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<Package IgnorableNamespaces="uap mp rescap desktop build" xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10" xmlns:build="http://schemas.microsoft.com/developer/appx/2015/build">
+  
+  <Identity Name="Microsoft.MicrosoftStickyNotes" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="4.0.6104.0" ProcessorArchitecture="x64"/>
+  <mp:PhoneIdentity PhoneProductId="35dc71b8-c407-4fad-bee2-3473791f58f8" PhonePublisherId="95d94207-0c7c-47ed-82db-d75c81153c35"/>
+  <Properties>
+    <DisplayName>ms-resource:StickyNotesStoreAppName</DisplayName>
+    <PublisherDisplayName>Microsoft Corporation</PublisherDisplayName>
+    <Logo>Assets\Icons\StickyNotesStoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19011.0" MaxVersionTested="10.0.19011.0"/>
+    <TargetDeviceFamily Name="Windows.Core" MinVersion="10.0.18362.0" MaxVersionTested="10.0.19556.0"/>
+    <PackageDependency Name="Microsoft.VCLibs.140.00" MinVersion="14.0.33519.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"/>
+  </Dependencies>
+  <Resources>
+    <Resource Language="EN-US"/>
+    <Resource Language="EN-GB"/>
+    <Resource uap:Scale="200"/>
+    
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="StickyNotesStub.exe" EntryPoint="Microsoft.Notes.Application.App">
+      <uap:VisualElements DisplayName="ms-resource:StickyNotesAppName" Square150x150Logo="Assets\Icons\StickyNotesMedTile.png" Square44x44Logo="Assets\Icons\StickyNotesAppList.png" Description="Sticky Notes" BackgroundColor="#414141">
+        <uap:DefaultTile Wide310x150Logo="Assets\Icons\StickyNotesWideTile.png" Square310x310Logo="Assets\Icons\StickyNotesLargeTile.png" Square71x71Logo="Assets\Icons\StickyNotesSmallTile.png">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="square150x150Logo"/>
+            <uap:ShowOn Tile="wide310x150Logo"/>
+            <uap:ShowOn Tile="square310x310Logo"/>
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+        <uap:SplashScreen Image="Assets\Icons\StickyNotesSplashScreen.png" BackgroundColor="#414141" uap5:Optional="true"/>
+        <uap:LockScreen BadgeLogo="Assets\Icons\StickyNotesBadgeLogo.png" Notification="badge"/>
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+  <Extensions>
+    <Extension Category="windows.activatableClass.inProcessServer">
+      <InProcessServer>
+        <Path>Microsoft.Apps.Stubs.dll</Path>
+        <ActivatableClass ActivatableClassId="Microsoft.Apps.Stubs.InstallControl" ThreadingModel="both"/>
+        <ActivatableClass ActivatableClassId="Microsoft.Apps.Stubs.VerticalOverflowDetector" ThreadingModel="both"/>
+        <ActivatableClass ActivatableClassId="Microsoft.Apps.Stubs.UpgradeHelper" ThreadingModel="both"/>
+        <ActivatableClass ActivatableClassId="Microsoft.Apps.Stubs.XamlMetaDataProvider" ThreadingModel="both"/>
+        <ActivatableClass ActivatableClassId="Microsoft.Apps.Stubs.ActivationHelper" ThreadingModel="both"/>
+      </InProcessServer>
+    </Extension>
+  </Extensions>
+  <build:Metadata>
+    <build:Item Name="cl.exe" Version="19.41.34120.0"/>
+    <build:Item Name="VisualStudio" Version="17.0"/>
+    <build:Item Name="OperatingSystem" Version="10.0.20348.1 (WinBuild.160101.0800)"/>
+    <build:Item Name="Microsoft.Build.AppxPackage.dll" Version="17.11.40329.36016"/>
+    <build:Item Name="ProjectGUID" Value="{54F335F7-C584-DF1F-4B26-AB25464E2999}"/>
+    <build:Item Name="OptimizingToolset" Value="None"/>
+    <build:Item Name="TargetRuntime" Value="Native"/>
+    <build:Item Name="Microsoft.Windows.UI.Xaml.Build.Tasks.dll" Version="10.0.18362.1"/>
+    <build:Item Name="MakePri.exe" Version="10.0.18362.1 (WinBuild.160101.0800)"/>
+  </build:Metadata>
+</Package>
