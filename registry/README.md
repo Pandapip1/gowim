@@ -37,6 +37,13 @@ eventually assembles/writes the WIM file.
   `Value`, `SetValue`, `DeleteValue`, `OpenPath`, `FindOrCreatePath`,
   `DeletePath`), which work against any hive's tree once `LoadHiveSet` has
   it loaded.
+- `DefaultUILanguage`/`ProcessorArchitecture` (`imageinfo.go`) read an
+  offline image's default UI language (an LCID string, e.g. `"0409"`) and
+  processor architecture (e.g. `"AMD64"`) from a loaded `SYSTEM` hive's root
+  key -- confirmed (not assumed) to live there, not in `SOFTWARE`, by direct
+  inspection of a real, pristine factory `install.esd`'s hives; see the
+  functions' own doc comments for the full research trail and Microsoft
+  documentation citations.
 
 ## Usage
 
