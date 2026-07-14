@@ -8,9 +8,9 @@
 //
 // This is the "actual Windows component module" referenced throughout this
 // repo's top-level TODO.md: it does not itself parse XML or decompress
-// PA30 (see `mum` and `pa30` for that), and it does not mutate an image
-// (see TODO.md's removal item, not yet implemented) -- it only builds a
-// read-only, in-memory view over already-parsed manifests.
+// PA30 (see `mum` and `pa30` for that) -- it only builds a read-only,
+// in-memory view over already-parsed manifests, plus (see remove.go) a
+// best-effort way to delete one's files from an image.
 //
 // # Scope and known limitations
 //

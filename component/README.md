@@ -9,9 +9,9 @@ package/component dependency edges resolvable against each other.
 
 This is the "actual Windows component module" referenced throughout this
 repo's top-level `TODO.md`. It does not itself parse XML or decompress
-PA30 (see `mum` and `pa30`), and it does not mutate an image (removal is a
-separate, not-yet-implemented TODO item) -- it only builds a read-only,
-in-memory view over already-parsed manifests.
+PA30 (see `mum` and `pa30`) -- it only builds a read-only, in-memory view
+over already-parsed manifests, plus (see `Remove` below) a best-effort way
+to delete one's files from an image.
 
 ## Scope
 
@@ -33,6 +33,21 @@ in-memory view over already-parsed manifests.
   `Dependency.DependentAssembly`) -- it does not follow
   `DeclareCapability`-based capability tokens (a different identity
   namespace), which aren't modeled as dependency edges here.
+- `Remove` deletes an `Entry`'s on-disk files as a best-effort fallback,
+  per this repo's TODO.md CBS/servicing research verdict: the `COMPONENTS`
+  hive's schema is undocumented and not safely mutable, so `Remove` only
+  ever deletes plain files/directories (a `KindPackage` entry's `.mum` +
+  paired `.cat`; a `KindComponent` entry's `.manifest` + optional WinSxS
+  payload directory), leaving that hive untouched and, by design,
+  inconsistent with the image afterward -- a documented, permanent
+  limitation. Both pairing assumptions (`.mum`/`.cat` always paired 1:1;
+  a `.manifest` file's WinSxS payload directory being optional) were
+  verified against a real Windows 11 23H2 image, not assumed -- see
+  `remove.go`'s doc comment.
+- Component/package *installation* (the reverse of `Remove`) is a stated
+  future goal but is not implemented -- see `TODO.md`'s "CBS/servicing
+  package subsystem" section for what's still open, including whether a
+  `pa30` encoder ends up being a prerequisite.
 
 ## Usage
 
@@ -52,6 +67,13 @@ store.ByName("HyperV-*")            // glob over identity names
 store.ByKB("KB5030219")             // exact Package.Identifier match
 store.ByArchitecture("amd64")
 store.ResolveDependencies(someEntry) // look up each declared dependency in the store
+
+// Removal: resolve a pattern via the Store, then delete each match's files.
+for _, e := range store.ByName("Some-Bloat-Package*") {
+    if err := component.Remove(root, blobTable, e); err != nil {
+        log.Fatal(err)
+    }
+}
 ```
 
 ## Tests
