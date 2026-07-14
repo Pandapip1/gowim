@@ -70,10 +70,30 @@ func (r *bitReader) readBits(n uint) uint32 {
 	return v
 }
 
-// align discards any bits currently buffered (but not yet consumed from the
-// byte stream), realigning subsequent raw byte reads to the next 16-bit
-// coding-unit boundary. Matches bitstream_align().
+// align discards any bits currently buffered, realigning subsequent raw
+// byte reads to the next 16-bit coding-unit boundary. Ported line-for-line
+// from wimlib's own two-step sequence at the one call site that uses it
+// (src/lzx_decompress.c's LZX_BLOCKTYPE_UNCOMPRESSED case:
+// "bitstream_ensure_bits(is, 1); bitstream_align(is);"), not just
+// bitstream_align() alone (include/wimlib/decompress_common.h), which by
+// itself is trivial (just zeroes bitsleft/bitbuf) -- the preceding
+// ensure_bits(1) call is what actually matters here. wimlib's own comment
+// at that call site explains why: "if the stream is *already* aligned, the
+// correct thing to do is to throw away the next 16 bits (this is probably
+// a mistake in the format)" -- i.e. requesting at least 1 bit forces a
+// fresh 16-bit fetch whenever none is currently buffered, and that whole
+// unit must then be discarded even though the stream was already
+// byte/unit-aligned, a deliberate (if accidental) quirk real encoders
+// reproduce and a decoder must match bit-for-bit or desync. Omitting the
+// ensure(1) call here (i.e. calling align only when nbits happens to
+// already be 0) was the actual bug found 2026-07-14 via a real Windows 11
+// install.wim file
+// (amd64_windows-senseclient-service_.../nl7models0804.dll's chunk 60,
+// which contains an UNCOMPRESSED block landing exactly on an
+// already-aligned boundary): without the forced fetch, no extra unit was
+// discarded, desynchronizing every subsequent block header read.
 func (r *bitReader) align() {
+	r.ensure(1)
 	r.buf = 0
 	r.nbits = 0
 }

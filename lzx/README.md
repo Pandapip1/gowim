@@ -214,6 +214,38 @@ codewords and is complete, while keeping the code canonical (the
 lower-valued symbol still gets codeword 0); `buildLengths` now does the
 same (see `TestBuildLengthsSingleUsedSymbolIsComplete` in `lzx_test.go`).
 
+### A second bug found and fixed: real-world `install.wim`, 2026-07-14
+
+Found while testing an out-of-tree tool (a small nano11-style debloat
+harness built to exercise `wim`/`appx`/`registry`/`service` end-to-end
+against a real, stock Windows 11 25H2 retail ISO's `sources/install.wim`,
+not part of this repo): decoding the "Windows 11 Pro" edition failed on a
+real file, `Windows\WinSxS\amd64_windows-senseclient-service_...\
+nl7models0804.dll` (a Windows Defender ML model binary — large,
+low-redundancy data, exactly the kind of content real encoders store as an
+`LZX_BLOCKTYPE_UNCOMPRESSED` block rather than attempting to compress).
+
+`bitReader.align` (called at the start of every uncompressed block) simply
+zeroed the bit buffer without ever forcing a fetch first. Per wimlib's own
+`src/lzx_decompress.c`, the real sequence is `bitstream_ensure_bits(is, 1);
+bitstream_align(is);` — and per that code's own comment, this is
+deliberate: *"if the stream is already aligned, the correct thing to do is
+to throw away the next 16 bits (this is probably a mistake in the
+format)"*. This package's decoder was missing that forced extra-unit
+discard, so whenever an uncompressed block happened to start on an
+already-aligned boundary (as in the real file above), the following block
+header read desynchronized against the true bitstream position, failing
+with "invalid block size" a few chunks later once the corruption
+compounded. Fixed by porting wimlib's exact two-step sequence
+(`bitReader.align` now calls `ensure(1)` before discarding); see
+`bitreader_test.go`'s `TestAlignSkipsFullUnitWhenAlreadyAligned`/
+`TestAlignDiscardsPartialUnitWhenNotAligned` for the isolated bit-reader
+behavior, and `uncompressed_block_test.go`'s
+`TestDecompressRealUncompressedBlockChunk` for the real 32768-byte chunk
+(embedded verbatim in `testdata/`) this was found with, byte-for-byte
+verified against `wimlib-imagex extract`'s independent output for the same
+file.
+
 ## Tests
 
 ```
