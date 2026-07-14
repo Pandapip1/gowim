@@ -169,7 +169,8 @@ Everything lives in a single package, `wim`, one file per format concern:
 | `encoding.go` | UTF-16LE helpers |
 | `chunk.go` | `CompressionType`, `Header.CompressionType`, chunk-table size/count helpers shared by encode and decode |
 | `decompress.go` | `DecodeResourceData`, codec dispatch for decoding |
-| `compress.go` | `EncodeResourceData`, codec dispatch for encoding |
+| `compress.go` | `EncodeResourceData`, codec dispatch for encoding, `compressChunksParallel` (bounded-worker-pool per-chunk compression) |
+| `blob_pipeline.go` | `encodeBlobsPipeline`: bounded-worker-pool per-blob fetch+compress, drained in order by `WriteTo` |
 | `writer.go` | `WriteTo`/`Assemble`: full multi-image WIM assembly, `BlobSource`/`MapBlobSource`, `WriteOptions` |
 | `integrity_write.go` | integrity-table computation for `WriteTo` (`integrityAccumulator`), `Reader.VerifyIntegrity` |
 | `reader.go` | `Reader` over `io.ReaderAt`, incl. `Reader.ReadResource` |
@@ -188,6 +189,20 @@ Everything lives in a single package, `wim`, one file per format concern:
 | `writer_test.go` | multi-image, deduplicated-blob, all-compression-type (plus uncompressed) tests of `WriteTo`/`Assemble`, read back with `Reader` |
 | `integrity_write_test.go` | builds a WIM with `ComputeIntegrityTable` set, independently recomputes every stored hash directly over the raw output bytes, confirms `Reader.VerifyIntegrity` agrees and correctly rejects corruption inside (but not outside) the checked range, and confirms no integrity table is written by default |
 | `export_test.go` | `ExportImage`/`ExportImageAssemble`: single-image and multi-image-with-reordering exports off a hand-built 3-image WIM with a blob shared between two of the images, confirming only the exported images/blobs survive, `RefCount`s reflect only the exported images' usage, XML per-image content (including a `<WINDOWS><EDITIONID>` beyond `XMLImage`'s modeled fields) survives renumbering, and recompression to a different `CompressionType` during export |
+
+## Concurrency
+
+`EncodeResourceData`'s per-chunk compression and `WriteTo`'s per-blob
+fetch+compress are both parallelized over a `GOMAXPROCS`-bounded worker
+pool (`compressChunksParallel`, `encodeBlobsPipeline`): every WIM chunk is
+compressed completely independently by the format's own design (no shared
+Huffman table or window state crosses a chunk boundary), and every blob is
+its own independent resource, so both loops are embarrassingly parallel --
+only the final write to the output file stays single-threaded and in
+original order. Found worth doing 2026-07-14 after a real ~4-5GB WIM
+edition took several minutes to re-encode single-threaded during an
+out-of-tree nano11-style debloat run; see TODO.md's "Performance:
+concurrency opportunities" entry. Verified with `go test -race`.
 
 ## Usage
 

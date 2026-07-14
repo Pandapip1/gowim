@@ -2,7 +2,9 @@ package component
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/Pandapip1/gowim/mum"
 	"github.com/Pandapip1/gowim/pa30"
@@ -76,7 +78,7 @@ func ParseManifest(fileName string, data []byte, dict []byte) *Entry {
 // top-level directories themselves (e.g. neither exists) is. dict is the
 // shared PA30 source buffer passed to ParseManifest (see its doc comment).
 func BuildFromImage(r *wim.Reader, root *wim.DirEntry, bt *wim.BlobTable, dict []byte) (*Store, error) {
-	var entries []*Entry
+	var jobs []func() *Entry
 
 	pkgDir, err := root.ReadDir(PackagesDir)
 	if err != nil {
@@ -87,12 +89,13 @@ func BuildFromImage(r *wim.Reader, root *wim.DirEntry, bt *wim.BlobTable, dict [
 			continue
 		}
 		name := c.NameUTF8()
-		data, err := r.ReadFile(root, bt, PackagesDir+`\`+name)
-		if err != nil {
-			entries = append(entries, &Entry{Kind: KindPackage, FileName: name, Err: fmt.Errorf("component: read %s: %w", name, err)})
-			continue
-		}
-		entries = append(entries, ParseMUM(name, data))
+		jobs = append(jobs, func() *Entry {
+			data, err := r.ReadFile(root, bt, PackagesDir+`\`+name)
+			if err != nil {
+				return &Entry{Kind: KindPackage, FileName: name, Err: fmt.Errorf("component: read %s: %w", name, err)}
+			}
+			return ParseMUM(name, data)
+		})
 	}
 
 	manDir, err := root.ReadDir(ManifestsDir)
@@ -104,13 +107,58 @@ func BuildFromImage(r *wim.Reader, root *wim.DirEntry, bt *wim.BlobTable, dict [
 			continue
 		}
 		name := c.NameUTF8()
-		data, err := r.ReadFile(root, bt, ManifestsDir+`\`+name)
-		if err != nil {
-			entries = append(entries, &Entry{Kind: KindComponent, FileName: name, Err: fmt.Errorf("component: read %s: %w", name, err)})
-			continue
-		}
-		entries = append(entries, ParseManifest(name, data, dict))
+		jobs = append(jobs, func() *Entry {
+			data, err := r.ReadFile(root, bt, ManifestsDir+`\`+name)
+			if err != nil {
+				return &Entry{Kind: KindComponent, FileName: name, Err: fmt.Errorf("component: read %s: %w", name, err)}
+			}
+			return ParseManifest(name, data, dict)
+		})
 	}
 
-	return Build(entries), nil
+	return Build(runJobsParallel(jobs)), nil
+}
+
+// runJobsParallel runs each of jobs (each independent: its own file
+// read+parse, with no shared mutable state -- *wim.Reader's ReadFile goes
+// through ReadAt, safe for concurrent use the same way os.File.ReadAt is)
+// on a bounded worker pool (min(len(jobs), GOMAXPROCS)) and returns their
+// results in any order -- order doesn't matter here since Build only
+// indexes entries into a map afterward. See TODO.md's "Performance:
+// concurrency opportunities" entry for why this loop was worth
+// parallelizing (a real image's servicing\Packages + WinSxS\Manifests
+// together number in the tens of thousands of files).
+func runJobsParallel(jobs []func() *Entry) []*Entry {
+	if len(jobs) == 0 {
+		return nil
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	results := make([]*Entry, len(jobs))
+	jobIdx := make(chan int, workers*2)
+	go func() {
+		defer close(jobIdx)
+		for i := range jobs {
+			jobIdx <- i
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobIdx {
+				results[i] = jobs[i]()
+			}
+		}()
+	}
+	wg.Wait()
+	return results
 }

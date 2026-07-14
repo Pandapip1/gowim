@@ -2,6 +2,8 @@ package wim
 
 import (
 	"fmt"
+	"runtime"
+	"sync"
 
 	"github.com/Pandapip1/gowim/lzms"
 	"github.com/Pandapip1/gowim/lzx"
@@ -22,6 +24,79 @@ func compressChunk(ctype CompressionType, data []byte) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("wim: compress: unrecognized compression type %#x", ctype)
 	}
+}
+
+// compressChunksParallel compresses every chunk of data (numChunks chunks of
+// chunkSize bytes each, the last getting uncompressedSize's remainder) with
+// compressionType, applying the same per-chunk raw-storage fallback
+// EncodeResourceData documents. Each chunk is compressed completely
+// independently by the WIM chunk format's own design (no shared Huffman
+// table or window state crosses a chunk boundary -- see the lzx/lzms/xpress
+// package docs), so chunks[i] is written by exactly one goroutine and
+// needs no locking; a bounded worker pool (min(numChunks, GOMAXPROCS))
+// keeps this from spawning thousands of goroutines for a huge resource
+// while still saturating available cores. See TODO.md's "Performance:
+// concurrency opportunities" entry for why this loop specifically was
+// worth parallelizing (found slow against a real ~4GB WIM file's largest
+// resources during a nano11-style debloat run, 2026-07-14).
+func compressChunksParallel(data []byte, compressionType CompressionType, chunkSize uint32, uncompressedSize uint64, numChunks uint64) ([][]byte, error) {
+	chunks := make([][]byte, numChunks)
+
+	workers := uint64(runtime.GOMAXPROCS(0))
+	if workers > numChunks {
+		workers = numChunks
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	next := uint64(0)
+	for w := uint64(0); w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				i := next
+				next++
+				mu.Unlock()
+				if i >= numChunks {
+					return
+				}
+
+				start := i * uint64(chunkSize)
+				usize := chunkUncompressedSize(i, numChunks, uncompressedSize, chunkSize)
+				raw := data[start : start+usize]
+
+				compressed, cerr := compressChunk(compressionType, raw)
+				if cerr != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("wim: encode resource: chunk %d: %w", i, cerr)
+					}
+					mu.Unlock()
+					return
+				}
+				if uint64(len(compressed)) >= usize {
+					// Compression did not shrink this chunk; store it raw.
+					chunks[i] = raw
+				} else {
+					chunks[i] = compressed
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return chunks, nil
 }
 
 // EncodeResourceData takes a resource's full uncompressed bytes and produces
@@ -74,22 +149,9 @@ func EncodeResourceData(data []byte, compressionType CompressionType, chunkSize 
 	uncompressedSize := uint64(len(data))
 	numChunks := numChunksFor(uncompressedSize, chunkSize)
 
-	chunks := make([][]byte, numChunks)
-	for i := uint64(0); i < numChunks; i++ {
-		start := i * uint64(chunkSize)
-		usize := chunkUncompressedSize(i, numChunks, uncompressedSize, chunkSize)
-		raw := data[start : start+usize]
-
-		compressed, cerr := compressChunk(compressionType, raw)
-		if cerr != nil {
-			return nil, 0, fmt.Errorf("wim: encode resource: chunk %d: %w", i, cerr)
-		}
-		if uint64(len(compressed)) >= usize {
-			// Compression did not shrink this chunk; store it raw.
-			chunks[i] = raw
-		} else {
-			chunks[i] = compressed
-		}
+	chunks, err := compressChunksParallel(data, compressionType, chunkSize, uncompressedSize, numChunks)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	var out []byte

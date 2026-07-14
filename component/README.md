@@ -28,6 +28,15 @@ to delete one's files from an image.
 - Records per-file failures on that file's `Entry.Err` rather than
   aborting a whole build, so a `Store` can still be built from the rest of
   a real image's files even if a future edge case isn't covered.
+- `BuildFromImage` reads and parses every file concurrently over a
+  `GOMAXPROCS`-bounded worker pool (`runJobsParallel`): each file's
+  read+parse is independent of every other's, and result order never
+  mattered (`Build` only indexes entries into a map). Safe because
+  `*wim.Reader.ReadFile` goes through `ReadAt`, concurrency-safe the same
+  way `os.File.ReadAt` is. Worth doing given a real image's
+  `servicing\Packages` + `WinSxS\Manifests` together number in the tens of
+  thousands of files; see TODO.md's "Performance: concurrency
+  opportunities" entry. Verified with `go test -race`.
 - Dependency-edge resolution only follows `AssemblyIdentity`-based
   references (`Package.Parent`, `Update.Package`/`Update.Component`,
   `Dependency.DependentAssembly`) -- it does not follow

@@ -190,21 +190,23 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 	}
 
 	// Blob content, one resource per already-deduplicated blob-table entry.
+	// Fetching+compressing each blob is independent of every other blob, so
+	// it is pipelined across a bounded worker pool (see
+	// encodeBlobsPipeline); only this loop's actual file write must happen
+	// in blob-table order, which draining blobResults[i] in order preserves.
+	blobResults := encodeBlobsPipeline(bt, blobs, opts.CompressionType, chunkSize)
 	for i := range bt.Entries {
 		hash := bt.Entries[i].Hash
-		data, err := blobs.Blob(hash)
-		if err != nil {
-			return 0, wrapErr(fmt.Sprintf("blob %s", hash), err)
+		eb := <-blobResults[i]
+		if eb.err != nil {
+			return 0, wrapErr(fmt.Sprintf("blob %s", hash), eb.err)
 		}
-		payload, flags, err := EncodeResourceData(data, opts.CompressionType, chunkSize)
-		if err != nil {
-			return 0, wrapErr(fmt.Sprintf("encode blob %s", hash), err)
-		}
+		payload, flags := eb.payload, eb.flags
 		res := ResourceHeader{
 			SizeInWIM:        uint64(len(payload)),
 			Flags:            flags,
 			OffsetInWIM:      offset,
-			UncompressedSize: uint64(len(data)),
+			UncompressedSize: uint64(eb.dataLen),
 		}
 		if integ != nil {
 			integ.write(payload)
