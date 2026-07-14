@@ -218,7 +218,20 @@ func resolveValueData(hbins []byte, dataSize, dataOffset uint32) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	if len(cellData) >= 2 && string(cellData[0:2]) == string(dbMagic[:]) {
+	// A "db" (big-data) cell is only used when the value's data exceeds
+	// DBSegmentMaxSize (16344 bytes) -- see "Value data": "values larger
+	// than 16344 bytes are stored in multiple segments. Data about these
+	// segments is stored in the data block key" (libregf's "Windows NT
+	// Registry File (REGF) format specification"). Gating this only on
+	// sniffing cellData[0:2] == "db", regardless of dataSize, is a real
+	// false-positive risk: an ordinary (non-big-data) value whose first
+	// two bytes happen to be 0x64 0x62 ('d','b') would be misidentified as
+	// a data-block key and its own content misparsed as a segment-count/
+	// segment-list-offset pair, corrupting the read with a bogus huge
+	// offset. Found 2026-07-14 against a real Windows 11 25H2 COMPONENTS
+	// hive value that hit exactly this (see hive_test.go's
+	// TestResolveValueDataIgnoresCoincidentalDBSignature).
+	if dataSize > DBSegmentMaxSize && len(cellData) >= 2 && string(cellData[0:2]) == string(dbMagic[:]) {
 		db, err := parseDBCell(cellData)
 		if err != nil {
 			return nil, err

@@ -162,6 +162,26 @@ subkey reachable through an `lh` subkey list) and assert:
 plus focused tests for `BaseBlock`'s checksum/round trip and the LH hash
 algorithm.
 
+### A bug found and fixed: real-world `COMPONENTS` hive, 2026-07-14
+
+Found while testing an out-of-tree nano11-style debloat harness (not part
+of this repo) against a real, stock Windows 11 25H2 retail ISO:
+`LoadHiveSet`/`Parse` failed on the real `COMPONENTS` hive with "cell at
+offset 0x37666662 out of bounds" -- a nonsensical, wildly out-of-range
+offset. `resolveValueData` (`hive.go`) decided whether a non-inline value
+cell was a `"db"` big-data key purely by sniffing whether its first two
+bytes read `"db"`, regardless of the value's actual `dataSize`. Per
+libregf's "Windows NT Registry File (REGF) format specification" ("Value
+data": *"values larger than 16344 bytes are stored in multiple
+segments"*), the `db`-cell convention only applies once `dataSize` exceeds
+`DBSegmentMaxSize` (16344) -- a small, perfectly ordinary value in the real
+`COMPONENTS` hive happened to start with the bytes `0x64 0x62` ('d','b')
+and was misidentified as a data-block key, with the rest of its
+(much-too-short) cell misparsed as a segment-count/segment-list-offset
+pair. Fixed by gating the `"db"` check on `dataSize > DBSegmentMaxSize`
+first, matching the spec; see `hive_test.go`'s
+`TestResolveValueDataIgnoresCoincidentalDBSignature`.
+
 ## License
 
 MIT OR Apache-2.0.
