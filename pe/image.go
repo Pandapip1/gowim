@@ -171,6 +171,7 @@ func Parse(data []byte) (*Image, error) {
 // offset rather than being contiguous with the header region.
 type chunk struct {
 	offset int
+	index  int
 	data   []byte
 }
 
@@ -217,13 +218,22 @@ func (img *Image) AppendTo(dst []byte) ([]byte, error) {
 		if uint32(len(s.RawData)) != s.Header.SizeOfRawData {
 			return dst, fmt.Errorf("pe: section %d: RawData length %d does not match SizeOfRawData %d", i, len(s.RawData), s.Header.SizeOfRawData)
 		}
-		chunks = append(chunks, chunk{offset: int(s.Header.PointerToRawData), data: s.RawData})
+		chunks = append(chunks, chunk{offset: int(s.Header.PointerToRawData), index: len(chunks), data: s.RawData})
 	}
 	if secDir, ok := img.SecurityDirectory(); ok && secDir.Size > 0 {
 		certBytes := AppendCertificateTable(nil, img.Certificates)
-		chunks = append(chunks, chunk{offset: int(secDir.VirtualAddress), data: certBytes})
+		chunks = append(chunks, chunk{offset: int(secDir.VirtualAddress), index: len(chunks), data: certBytes})
 	}
-	sort.Slice(chunks, func(i, j int) bool { return chunks[i].offset < chunks[j].offset })
+	// Ties on offset (an already-malformed/overlapping layout) are broken by
+	// each chunk's original position -- sections in img.Sections order, then
+	// the certificate table -- so the result doesn't depend on sort.Slice's
+	// unspecified behavior among equal elements.
+	sort.Slice(chunks, func(i, j int) bool {
+		if chunks[i].offset != chunks[j].offset {
+			return chunks[i].offset < chunks[j].offset
+		}
+		return chunks[i].index < chunks[j].index
+	})
 
 	out := append(dst, header...)
 	pos := len(header)
