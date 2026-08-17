@@ -89,6 +89,7 @@ Everything lives in a single package, `regf`, one file per format concern:
 | `key.go` | generic `Key`/`Value` navigation: `Subkey`/`FindOrCreateSubkey`/`DeleteSubkey`, `Value`/`SetValue`/`DeleteValue`, path-based `OpenPath`/`FindOrCreatePath`/`DeletePath`, and typed `DWORD`/`SZ`/`MultiSZ` codecs (`EncodeDWORD`/`EncodeSZ`/`EncodeMultiSZ`) |
 | `subkeylist.go` | `lf`/`lh`/`li`/`ri` subkey-list cells + the LH hash algorithm |
 | `sk.go` | the opaque `sk` (security) cell |
+| `skpool.go` | `skPool`: deduplicates security descriptors across a hive during `AppendTo`, matching Windows' own sharing |
 | `bigdata.go` | `db` big-data cell + segment-list reassembly |
 | `hive.go` | `Hive`, `Parse`, `Hive.AppendTo`, and the tree-walking glue between all of the above |
 | `encoding.go` | UTF-16LE helpers |
@@ -181,6 +182,52 @@ and was misidentified as a data-block key, with the rest of its
 pair. Fixed by gating the `"db"` check on `dataSize > DBSegmentMaxSize`
 first, matching the spec; see `hive_test.go`'s
 `TestResolveValueDataIgnoresCoincidentalDBSignature`.
+
+### A second, far more serious bug found and fixed: real-world SOFTWARE hive, 2026-07-15
+
+Found via the same out-of-tree harness, but this one took a full bisection
+to isolate: a fully rebuilt image (AppX removal, servicing-package
+removal, file cleanup, WinSxS wipe, registry tweaks, service removal --
+every step) installed successfully and booted, but hung indefinitely
+(black screen, cursor blinking, CPU actively busy) at first-logon
+specialize. Systematically ruling out every debloat step one at a time
+(each still hit the same hang) eventually reached a true no-op rebuild --
+every hive loaded via `registry.LoadHiveSet` and saved back via
+`Hive.Save` with *zero* logical changes -- which still hung. That pointed
+squarely at `Hive.AppendTo` itself, not any content mutation.
+
+Root cause: `AppendTo` gave every key with a non-nil `Security` its own
+brand-new `sk` cell (a trivial one-node circular list), never
+deduplicating byte-identical descriptors -- despite `sk.go`'s own doc
+comment at the time explicitly acknowledging this as a known
+simplification. Windows shares one `sk` cell across every key with an
+identical security descriptor; a real hive's tens of thousands of keys
+typically reference only a handful of unique descriptors. Confirmed
+directly: extracting a real Windows 11 25H2 SOFTWARE hive (76.5MB) from
+the image, parsing it, and immediately re-serializing it with zero
+logical changes produced a **181MB** file -- more than double -- that
+still parsed back correctly via this package's own `Parse` (fooling every
+existing round-trip test, all of which used small synthetic hives with at
+most one security descriptor in play at a time). The bloat alone would
+justify a fix, but the real-world symptom was worse: some first-logon
+component apparently chokes enumerating tens of thousands of
+trivially-distinct one-node security lists instead of the small shared
+pool a real hive has, rather than merely being slow.
+
+Fixed by a new `skPool` (`skpool.go`) that deduplicates descriptors by
+exact byte match across the whole tree during `AppendTo`'s post-order
+walk, reproducing Windows' own sharing: the first key with a given
+descriptor allocates a new `sk` cell and links it into a real (not
+one-node) circular list; every subsequent key with the byte-identical
+descriptor reuses that same cell's offset and increments its stored
+`refCount`. The same real SOFTWARE hive now round-trips to **72MB**
+(slightly *smaller* than the original 76.5MB, since this package still
+doesn't attempt to reproduce Windows' own bin/free-space layout -- a
+separate, already-documented non-goal, not a correctness issue). See
+`skpool_test.go`'s `TestAppendToDeduplicatesSecurityDescriptors`, which
+pins the exact behavior (shared cell count, correct `refCount`, and
+correct per-key round-trip) with a small synthetic hive, since the real
+76.5MB fixture is impractical to embed as a test file.
 
 ## License
 

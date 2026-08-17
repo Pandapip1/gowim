@@ -288,13 +288,19 @@ func resolveValueData(hbins []byte, dataSize, dataOffset uint32) ([]byte, error)
 // every key's subkeys are combined into a single "lh" subkey-list cell using
 // the documented LH hash algorithm (see lhHash in subkeylist.go) -- this
 // package never needs "ri" index roots or multiple lists per key, since it
-// does not try to mimic Windows' own list-splitting thresholds. sk cells are
-// not deduplicated: every Key.Security allocates its own sk cell, formed
-// into a trivial one-node circular list (see the package doc's stated
-// non-goal on layout fidelity). This is sufficient to produce a hive that
-// Parse reads back correctly, and that (when built from bytes this package
-// itself produced) round-trips byte-for-byte; it does not reproduce an
-// arbitrary pre-existing hive's original bin/cell layout.
+// does not try to mimic Windows' own list-splitting thresholds. sk cells
+// ARE deduplicated across the whole tree (see skPool): every key with a
+// byte-identical Security descriptor shares one sk cell, linked into a
+// single circular list, matching how Windows itself shares descriptors --
+// found essential 2026-07-15, not just a size optimization: a real hive
+// resaved without this deduplication (every key given its own one-node sk
+// list) more than doubled in size and made Windows hang indefinitely
+// during first-logon specialize on the resulting image, even though the
+// hive itself still parsed back correctly. This is sufficient to produce a
+// hive that Parse reads back correctly, and that (when built from bytes
+// this package itself produced) round-trips byte-for-byte; it does not
+// reproduce an arbitrary pre-existing hive's original bin/cell layout or
+// sk-list ordering.
 func (h *Hive) AppendTo(dst []byte) ([]byte, error) {
 	if h.Root == nil {
 		return dst, wrapErr("hive", fmt.Errorf("nil root key"))
@@ -308,7 +314,8 @@ func (h *Hive) AppendTo(dst []byte) ([]byte, error) {
 	// returned by arena.alloc for the cells built below are already correct
 	// without needing a further adjustment.
 	arena := &cellArena{buf: make([]byte, HBinHeaderSize)}
-	rootOffset, err := buildKeyCell(arena, h.Root, NoCellOffset)
+	pool := newSKPool()
+	rootOffset, err := buildKeyCell(arena, h.Root, NoCellOffset, pool)
 	if err != nil {
 		return dst, wrapErr("hive", err)
 	}
@@ -355,13 +362,14 @@ func (h *Hive) AppendTo(dst []byte) ([]byte, error) {
 // caller's own nk cell if already known (it never is, since children are
 // built before their parent in this post-order walk); pass NoCellOffset and
 // buildKeyCell will patch each child's parentOffset field once this key's
-// own offset becomes known.
-func buildKeyCell(arena *cellArena, key *Key, parentOffset uint32) (uint32, error) {
+// own offset becomes known. pool deduplicates security descriptors across
+// the whole tree (see skPool's own doc comment for why this matters).
+func buildKeyCell(arena *cellArena, key *Key, parentOffset uint32, pool *skPool) (uint32, error) {
 	var largestSubkeyNameSize, largestValueNameSize, largestValueDataSize uint32
 
 	subkeyOffsets := make([]uint32, len(key.Subkeys))
 	for i, sub := range key.Subkeys {
-		off, err := buildKeyCell(arena, sub, NoCellOffset)
+		off, err := buildKeyCell(arena, sub, NoCellOffset, pool)
 		if err != nil {
 			return 0, err
 		}
@@ -410,13 +418,7 @@ func buildKeyCell(arena *cellArena, key *Key, parentOffset uint32) (uint32, erro
 
 	securityOffset := NoCellOffset
 	if key.Security != nil {
-		sk := &skCell{refCount: 1, descriptor: key.Security}
-		skOffset := arena.alloc(sk.appendTo(nil))
-		// Patch the placeholder prev/next offsets into a trivial one-node
-		// circular list now that the cell's own offset is known.
-		patchUint32(arena.buf, skOffset, 4, skOffset)
-		patchUint32(arena.buf, skOffset, 8, skOffset)
-		securityOffset = skOffset
+		securityOffset = pool.getOrCreate(arena, key.Security)
 	}
 
 	classNameOffset := NoCellOffset

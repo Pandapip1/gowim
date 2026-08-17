@@ -12,9 +12,10 @@ var skMagic = [2]byte{'s', 'k'}
 // skCell is a decoded sk cell. Windows shares sk cells (and their reference
 // counts) across keys with identical security descriptors via the
 // Previous/Next doubly-linked circular list; this package preserves those
-// fields on Parse but, per the package doc's non-goal on descriptor
-// interpretation and the allocation-strategy non-goal, does not attempt to
-// deduplicate descriptors when building a fresh hive (see hive.go).
+// fields on Parse, and reproduces the same sharing when building a fresh
+// hive (see skPool/AppendTo in hive.go) -- the descriptor bytes themselves
+// are still preserved opaquely (see the package doc's non-goal on
+// descriptor interpretation), just deduplicated by exact byte match.
 type skCell struct {
 	// unknown is the 2-byte "unknown" field at header offset 2.
 	unknown uint16
