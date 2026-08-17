@@ -78,6 +78,99 @@ func assembleSource(t *testing.T, images []*ImageMetadata, bt *BlobTable, xmlDat
 	return r
 }
 
+// TestRebuildBlobTableReclaimsUnreferencedBlobs reproduces the exact real-world
+// gap RebuildBlobTable exists to close: driver.Uninstall/appx.Remove/
+// component.Remove-style callers only ever decrement a BlobDescriptor's
+// RefCount when a file is deleted from the tree, never remove the entry
+// itself. Confirms RebuildBlobTable drops a genuinely zero-referenced blob
+// entirely (not just zeroes its count) while correctly recomputing a
+// still-shared blob's count after one of its two references is removed.
+func TestRebuildBlobTableReclaimsUnreferencedBlobs(t *testing.T) {
+	images, bt, _, _ := threeImageFixture(t)
+
+	// shared12.bin is referenced by both image1 and image2 (RefCount 2 in the
+	// fixture). Remove it from image2 only, mimicking a real removal helper:
+	// decrement RefCount by hand (as driver.Uninstall/appx.Remove/
+	// component.Remove all do) without touching the BlobTable entry itself.
+	if err := images[1].Root.Remove("shared12.bin"); err != nil {
+		t.Fatalf("Remove(shared12.bin) from image2: %v", err)
+	}
+	for i := range bt.Entries {
+		hash := Hash(sha1.Sum(bytes.Repeat([]byte("shared between image 1 and 2 "), 100)))
+		if bt.Entries[i].Hash == hash {
+			bt.Entries[i].RefCount--
+		}
+	}
+
+	// image3's c.txt blob is removed entirely from its only image, simulating
+	// a blob that should be fully reclaimed (dropped from the rebuilt table,
+	// not merely left at RefCount 0 for WriteTo to still faithfully persist).
+	if err := images[2].Root.Remove("c.txt"); err != nil {
+		t.Fatalf("Remove(c.txt) from image3: %v", err)
+	}
+	cHash := Hash(sha1.Sum([]byte("image three content")))
+	for i := range bt.Entries {
+		if bt.Entries[i].Hash == cHash {
+			bt.Entries[i].RefCount--
+		}
+	}
+
+	// Sanity: the pre-rebuild table still carries the stale, now-orphaned
+	// c.txt entry at RefCount 0 -- exactly the bug WriteTo would otherwise
+	// silently still write to disk.
+	if d, ok := bt.ByHash(cHash); !ok || d.RefCount != 0 {
+		t.Fatalf("fixture setup: expected c.txt blob present at RefCount 0 before rebuild, got %+v, ok=%v", d, ok)
+	}
+
+	rebuilt, err := RebuildBlobTable(images, bt)
+	if err != nil {
+		t.Fatalf("RebuildBlobTable: %v", err)
+	}
+
+	if _, ok := rebuilt.ByHash(cHash); ok {
+		t.Fatalf("RebuildBlobTable: orphaned c.txt blob %s should have been dropped entirely, still present", cHash)
+	}
+
+	sharedHash := Hash(sha1.Sum(bytes.Repeat([]byte("shared between image 1 and 2 "), 100)))
+	sharedDesc, ok := rebuilt.ByHash(sharedHash)
+	if !ok {
+		t.Fatalf("RebuildBlobTable: shared12.bin blob should still be present (still referenced by image1)")
+	}
+	if sharedDesc.RefCount != 1 {
+		t.Fatalf("RebuildBlobTable: shared12.bin RefCount = %d, want 1 (only image1 still references it)", sharedDesc.RefCount)
+	}
+
+	// a.txt (image1) and b.txt (image2) are untouched and must survive with
+	// RefCount 1 each.
+	for _, content := range []string{"image one content", "image two content"} {
+		hash := Hash(sha1.Sum([]byte(content)))
+		desc, ok := rebuilt.ByHash(hash)
+		if !ok {
+			t.Fatalf("RebuildBlobTable: blob for %q should still be present", content)
+		}
+		if desc.RefCount != 1 {
+			t.Fatalf("RebuildBlobTable: blob for %q RefCount = %d, want 1", content, desc.RefCount)
+		}
+	}
+
+	if got, want := len(rebuilt.Entries), 3; got != want {
+		t.Fatalf("RebuildBlobTable: got %d entries, want %d (a.txt, b.txt, shared12.bin)", got, want)
+	}
+}
+
+// TestRebuildBlobTableMissingBlobErrors confirms RebuildBlobTable fails loudly
+// (rather than silently producing an unwriteable BlobTable) if a tree
+// references a hash genuinely absent from src, mirroring ExportImage's own
+// existing validation.
+func TestRebuildBlobTableMissingBlobErrors(t *testing.T) {
+	images, bt, _, _ := threeImageFixture(t)
+	empty := &BlobTable{}
+	if _, err := RebuildBlobTable(images, empty); err == nil {
+		t.Fatalf("RebuildBlobTable: expected error for blobs missing from src, got nil")
+	}
+	_ = bt
+}
+
 func TestExportImageSingle(t *testing.T) {
 	images, bt, src, xmlData := threeImageFixture(t)
 	r := assembleSource(t, images, bt, xmlData, src)

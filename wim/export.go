@@ -115,6 +115,62 @@ func exportHashes(root *DirEntry, counts map[Hash]int, order *[]Hash) {
 	walk(root)
 }
 
+// RebuildBlobTable walks each of images' current DirEntry trees and returns a
+// fresh BlobTable containing only the blobs actually still referenced, with
+// every RefCount recomputed from scratch by counting real references in the
+// tree.
+//
+// This is the "whole-WIM-aware" reclaim step that several packages'
+// removal functions (driver.Uninstall, appx.Remove, component.Remove,
+// registry.Hive.Save) deliberately defer to a higher-level caller: those
+// functions only ever decrement an existing BlobDescriptor.RefCount (or, for
+// registry.Hive.Save, add a new one for freshly-written hive content) -- they
+// never drop a zero-refcount entry, because removing it outright would be
+// premature if some other, not-yet-processed part of the same image still
+// referenced it. Left unaddressed, WriteTo/Assemble will still faithfully
+// write every entry in the BlobTable they're given, including dead,
+// zero-refcount ones -- their payload never actually leaves the file, only
+// their DirEntry reference does. Call RebuildBlobTable once, after all tree
+// edits for every image being written are done, and pass its result (instead
+// of the BlobTable you were mutating refcounts on directly) to WriteTo -- the
+// same reclaim step DISM's own /Export-Image performs, which is why real
+// nano11/tiny11-style debloat scripts always finish with one.
+//
+// src supplies the existing blob table to validate each surviving hash
+// against (RebuildBlobTable errors if a tree references a hash genuinely
+// missing from src, the same validation ExportImage itself already
+// performed) -- but no other field of src's entries (RefCount, Resource,
+// PartNumber) carries over, since WriteTo recomputes every entry's real
+// on-disk placement from scratch anyway regardless of what BlobTable it's
+// given.
+func RebuildBlobTable(images []*ImageMetadata, src *BlobTable) (*BlobTable, error) {
+	counts := make(map[Hash]int)
+	var order []Hash
+	for _, im := range images {
+		if im == nil {
+			continue
+		}
+		exportHashes(im.Root, counts, &order)
+	}
+
+	bt := &BlobTable{Entries: make([]BlobDescriptor, 0, len(order))}
+	for _, h := range order {
+		if _, ok := src.ByHash(h); !ok {
+			return nil, fmt.Errorf("wim: RebuildBlobTable: referenced blob %s not found in source blob table", h)
+		}
+		bt.Entries = append(bt.Entries, BlobDescriptor{
+			Hash:       h,
+			RefCount:   uint32(counts[h]),
+			PartNumber: 1,
+			// Resource is intentionally left zero; WriteTo fills it in with
+			// the destination's own on-disk placement (d.Resource describes
+			// where the blob lives in the *source* file, which is
+			// meaningless in the new one).
+		})
+	}
+	return bt, nil
+}
+
 // ExportImage copies a subset of a source WIM's images -- plus only the
 // blobs those images actually reference -- into a new, standalone WIM,
 // mirroring DISM's /Export-Image. It writes the result to w (which, like
@@ -201,20 +257,9 @@ func prepareExport(src *Reader, srcBlobTable *BlobTable, srcXMLData *XMLData, im
 		exportHashes(im.Root, counts, &order)
 	}
 
-	bt := &BlobTable{Entries: make([]BlobDescriptor, 0, len(order))}
-	for _, h := range order {
-		if _, ok := srcBlobTable.ByHash(h); !ok {
-			return nil, nil, nil, fmt.Errorf("wim: ExportImage: referenced blob %s not found in source blob table", h)
-		}
-		bt.Entries = append(bt.Entries, BlobDescriptor{
-			Hash:       h,
-			RefCount:   uint32(counts[h]),
-			PartNumber: 1,
-			// Resource is intentionally left zero; WriteTo fills it in with
-			// the destination's own on-disk placement (d.Resource describes
-			// where the blob lives in the *source* file, which is
-			// meaningless in the new one).
-		})
+	bt, err := RebuildBlobTable(images, srcBlobTable)
+	if err != nil {
+		return nil, nil, nil, wrapErr("ExportImage", err)
 	}
 
 	xmlData, err := buildExportXMLData(srcXMLData, imageIndices)
