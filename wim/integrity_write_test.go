@@ -20,6 +20,7 @@ func TestWriteToComputeIntegrityTable(t *testing.T) {
 		ChunkSize:             32768,
 		ComputeIntegrityTable: true,
 		IntegrityChunkSize:    testChunkSize,
+		GUID:                  GUID{1},
 	})
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -104,6 +105,7 @@ func TestWriteToNoIntegrityTableByDefault(t *testing.T) {
 	wimBytes, err := Assemble(images, bt, xml, src, WriteOptions{
 		CompressionType: HdrFlagCompressXPRESS,
 		ChunkSize:       32768,
+		GUID:            GUID{1},
 	})
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -129,6 +131,7 @@ func TestWriteToComputeIntegrityTableDefaultChunkSize(t *testing.T) {
 		CompressionType:       HdrFlagCompressXPRESS,
 		ChunkSize:             32768,
 		ComputeIntegrityTable: true,
+		GUID:                  GUID{1},
 	})
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

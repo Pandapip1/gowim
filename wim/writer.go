@@ -1,7 +1,6 @@
 package wim
 
 import (
-	"crypto/rand"
 	"crypto/sha1"
 	"fmt"
 	"io"
@@ -55,8 +54,10 @@ type WriteOptions struct {
 	// WriteTo/Assemble designating the bootable image, or 0 if no image is
 	// bootable (matching Header.BootIndex's own convention).
 	BootIndex int
-	// GUID is stored in the header. If it is the zero GUID, a random one is
-	// generated.
+	// GUID is stored in the header. It must be explicitly set to a nonzero
+	// GUID by the caller: WriteTo/Assemble do not generate one, since doing
+	// so would make the output non-reproducible across runs on identical
+	// input.
 	GUID GUID
 	// ComputeIntegrityTable, if true, makes WriteTo compute and append an
 	// integrity table (SHA-1 digests of fixed-size chunks of the file) and
@@ -157,6 +158,9 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 	}
 	if opts.CompressionType != CompressionNone && opts.ChunkSize == 0 {
 		return 0, fmt.Errorf("wim: WriteTo: chunk size must be nonzero for compression type %#x", opts.CompressionType)
+	}
+	if opts.GUID == (GUID{}) {
+		return 0, fmt.Errorf("wim: WriteTo: WriteOptions.GUID must be set to a nonzero value")
 	}
 
 	// Reserve the header's fixed-size slot at the very start of the file;
@@ -317,11 +321,6 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 	}
 
 	guid := opts.GUID
-	if guid == (GUID{}) {
-		if _, err := rand.Read(guid[:]); err != nil {
-			return 0, wrapErr("generate GUID", err)
-		}
-	}
 
 	version := VersionDefault
 	if opts.CompressionType == HdrFlagCompressLZMS {

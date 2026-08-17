@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"math/rand"
+	"sort"
 	"testing"
 )
 
@@ -26,7 +27,13 @@ func buildTestImages(t *testing.T, filesPerImage [2]map[string][]byte) ([]*Image
 			SecurityID: SecurityIDNone,
 			Streams:    []Stream{{}},
 		}
-		for name, data := range files {
+		names := make([]string, 0, len(files))
+		for name := range files {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			data := files[name]
 			hash := Hash(sha1.Sum(data))
 			if idx, ok := seen[hash]; ok {
 				bt.Entries[idx].RefCount++
@@ -149,6 +156,7 @@ func TestWriteToMultiImageAllCompressionTypes(t *testing.T) {
 				CompressionType: tc.ctype,
 				ChunkSize:       tc.chunkSize,
 				BootIndex:       1,
+				GUID:            GUID{1},
 			})
 			if err != nil {
 				t.Fatalf("Assemble: %v", err)
@@ -241,6 +249,7 @@ func TestWriteToNoBootImage(t *testing.T) {
 		CompressionType: HdrFlagCompressXPRESS,
 		ChunkSize:       32768,
 		BootIndex:       0,
+		GUID:            GUID{1},
 	})
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -284,29 +293,32 @@ func TestWriteToValidation(t *testing.T) {
 	}
 }
 
-func TestWriteToRandomGUID(t *testing.T) {
+func TestWriteToRequiresGUID(t *testing.T) {
+	files := twoImageFixture()
+	images, bt, src := buildTestImages(t, files)
+	xml := &XMLData{Document: `<WIM><IMAGE INDEX="1"><NAME>a</NAME></IMAGE><IMAGE INDEX="2"><NAME>b</NAME></IMAGE></WIM>`}
+
+	if _, err := Assemble(images, bt, xml, src, WriteOptions{}); err == nil {
+		t.Fatalf("Assemble with zero GUID: want error, got nil")
+	}
+}
+
+func TestWriteToDeterministicGUID(t *testing.T) {
 	files := twoImageFixture()
 	images1, bt1, src1 := buildTestImages(t, files)
 	images2, bt2, src2 := buildTestImages(t, files)
 	xml := &XMLData{Document: `<WIM><IMAGE INDEX="1"><NAME>a</NAME></IMAGE><IMAGE INDEX="2"><NAME>b</NAME></IMAGE></WIM>`}
 
-	w1, err := Assemble(images1, bt1, xml, src1, WriteOptions{})
+	guid := GUID{1, 2, 3, 4}
+	w1, err := Assemble(images1, bt1, xml, src1, WriteOptions{GUID: guid})
 	if err != nil {
 		t.Fatalf("Assemble 1: %v", err)
 	}
-	w2, err := Assemble(images2, bt2, xml, src2, WriteOptions{})
+	w2, err := Assemble(images2, bt2, xml, src2, WriteOptions{GUID: guid})
 	if err != nil {
 		t.Fatalf("Assemble 2: %v", err)
 	}
-	r1, err := NewReader(bytes.NewReader(w1), int64(len(w1)))
-	if err != nil {
-		t.Fatalf("NewReader 1: %v", err)
-	}
-	r2, err := NewReader(bytes.NewReader(w2), int64(len(w2)))
-	if err != nil {
-		t.Fatalf("NewReader 2: %v", err)
-	}
-	if r1.Header().GUID == r2.Header().GUID {
-		t.Fatalf("two independently-assembled WIMs got the same random GUID")
+	if !bytes.Equal(w1, w2) {
+		t.Fatalf("two Assemble calls on identical input with the same explicit GUID produced different output")
 	}
 }

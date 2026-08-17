@@ -67,6 +67,7 @@ func assembleSource(t *testing.T, images []*ImageMetadata, bt *BlobTable, xmlDat
 	wimBytes, err := Assemble(images, bt, xmlData, src, WriteOptions{
 		CompressionType: HdrFlagCompressXPRESS,
 		ChunkSize:       32768,
+		GUID:            GUID{1},
 	})
 	if err != nil {
 		t.Fatalf("Assemble source WIM: %v", err)
@@ -189,6 +190,7 @@ func TestExportImageSingle(t *testing.T) {
 	out, err := ExportImageAssemble(r, srcBT, srcXML, []int{2}, WriteOptions{
 		CompressionType: HdrFlagCompressXPRESS,
 		ChunkSize:       32768,
+		GUID:            GUID{1},
 	})
 	if err != nil {
 		t.Fatalf("ExportImageAssemble: %v", err)
@@ -287,6 +289,7 @@ func TestExportImageMultiReorder(t *testing.T) {
 	out, err := ExportImageAssemble(r, srcBT, srcXML, []int{3, 1}, WriteOptions{
 		CompressionType: HdrFlagCompressLZX,
 		ChunkSize:       32768,
+		GUID:            GUID{1},
 	})
 	if err != nil {
 		t.Fatalf("ExportImageAssemble: %v", err)
@@ -367,6 +370,7 @@ func TestExportImageAllCompressed(t *testing.T) {
 	out, err := ExportImageAssemble(r, srcBT, srcXML, []int{1}, WriteOptions{
 		CompressionType: HdrFlagCompressLZMS,
 		ChunkSize:       131072,
+		GUID:            GUID{1},
 	})
 	if err != nil {
 		t.Fatalf("ExportImageAssemble: %v", err)

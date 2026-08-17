@@ -59,7 +59,7 @@ func buildTestImage(t *testing.T, files map[string][]byte) (*wim.Reader, *wim.Di
 	}
 	images := []*wim.ImageMetadata{{Security: &wim.SecurityData{}, Root: root}}
 
-	wimBytes, err := wim.Assemble(images, bt, &wim.XMLData{}, src, wim.WriteOptions{})
+	wimBytes, err := wim.Assemble(images, bt, &wim.XMLData{}, src, wim.WriteOptions{GUID: wim.GUID{1}})
 	if err != nil {
 		t.Fatalf("buildTestImage: Assemble: %v", err)
 	}
