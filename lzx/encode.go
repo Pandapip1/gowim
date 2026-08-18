@@ -478,76 +478,80 @@ func offsetSlot(offset uint32) int {
 
 // codewordLenToken is one symbol emitted while transmitting a run of
 // codeword lengths via the precode: a single delta value (presym 0-16), a
-// compressed run of consecutive zero-delta ("no change from prevLens")
+// compressed run of consecutive *actually unused* (codeword length 0)
 // entries using precode symbol 17 (a run of 4-19) or 18 (a run of 20-51),
-// or a short run of 4-5 consecutive *equal nonzero* deltas using precode
-// symbol 19 (sym2 carries the shared delta value, itself precode-encoded
-// from the same alphabet) -- matching wimlib's lzx_write_compressed_code /
-// LZX_PRECODE_NUM_SYMBOLS run-length convention (this package's decoder
-// already implements the read side -- see decode.go's readCodewordLens).
+// or a short run of 4-5 consecutive entries that all resolve to the same
+// *nonzero* codeword length using precode symbol 19 (sym2 carries one
+// delta value, computed only from the run's first position, itself
+// precode-encoded from the same alphabet) -- matching wimlib's real
+// lzx_compute_precode_items exactly (src/lzx_compress.c; this package's
+// decoder already implements the matching read side -- see decode.go's
+// readCodewordLens, which likewise computes/broadcasts a single resolved
+// length per run rather than recomputing per position).
+//
+// The critical, easy-to-get-backwards distinction (a real bug here, found
+// and fixed 2026-08-18 -- see gowim's own TODO.md): runs are grouped by
+// whether the ACTUAL NEW codeword length (lens[i]) is 0 or repeats, not
+// by whether the DELTA against prevLens happens to be 0 or repeats. These
+// two groupings coincide only when prevLens is uniformly zero (this
+// package's first-block/all-zero baseline), which is why grouping by
+// delta equality instead of length equality was never caught until a
+// second, non-zero, non-uniform prevLens (i.e. the second block of a
+// multi-block split) was actually exercised.
 type codewordLenToken struct {
 	presym int
 	runLen int // meaningful when presym is 17, 18, or 19
-	sym2   int // meaningful when presym is 19: the shared delta value (a plain 0-16 symbol)
+	sym2   int // meaningful when presym is 19: the delta value for the run's first position (a plain 0-16 symbol)
 }
 
-func codewordLenTokens(deltas []byte) []codewordLenToken {
+func codewordLenTokens(lens, prevLens []byte) []codewordLenToken {
 	var toks []codewordLenToken
-	i := 0
-	for i < len(deltas) {
-		if deltas[i] == 0 {
-			j := i
-			for j < len(deltas) && deltas[j] == 0 {
-				j++
-			}
-			run := j - i
-			for run >= 4 {
-				if run >= 20 {
-					l := run
-					if l > 51 {
-						l = 51
-					}
-					toks = append(toks, codewordLenToken{presym: 18, runLen: l})
-					run -= l
-				} else {
-					toks = append(toks, codewordLenToken{presym: 17, runLen: run})
-					run = 0
+	n := len(lens)
+
+	delta := func(pos int) int {
+		d := int(prevLens[pos]) - int(lens[pos])
+		if d < 0 {
+			d += 17
+		}
+		return d
+	}
+
+	runStart := 0
+	for runStart < n {
+		l := lens[runStart]
+		runEnd := runStart + 1
+		for runEnd < n && lens[runEnd] == l {
+			runEnd++
+		}
+
+		if l == 0 {
+			for runEnd-runStart >= 20 {
+				rl := runEnd - runStart
+				if rl > 51 {
+					rl = 51
 				}
+				toks = append(toks, codewordLenToken{presym: 18, runLen: rl})
+				runStart += rl
 			}
-			for k := 0; k < run; k++ {
-				toks = append(toks, codewordLenToken{presym: 0})
+			if runEnd-runStart >= 4 {
+				toks = append(toks, codewordLenToken{presym: 17, runLen: runEnd - runStart})
+				runStart = runEnd
 			}
-			i = j
-			continue
+		} else {
+			for runEnd-runStart >= 4 {
+				rl := 5
+				if runEnd-runStart < 5 {
+					rl = 4
+				}
+				toks = append(toks, codewordLenToken{presym: 19, runLen: rl, sym2: delta(runStart)})
+				runStart += rl
+			}
 		}
 
-		// A run of 4-5 consecutive equal *nonzero* deltas collapses into 2
-		// symbols (19 plus the shared delta) instead of 4-5 individual
-		// symbols. Valid here specifically because this package's encoder
-		// always transmits codeword lengths against an all-zero "previous
-		// block" baseline (see writeCodewordLens' prevLens argument being
-		// all-zero at every call site in compress()), so a run of equal
-		// deltas is exactly a run of equal actual codeword lengths, which
-		// is what symbol 19's decode side (decode.go's readCodewordLens,
-		// case 19) assumes when it applies the same resolved length to
-		// every position in the run.
-		j := i
-		for j < len(deltas) && deltas[j] == deltas[i] {
-			j++
+		for runStart < runEnd {
+			toks = append(toks, codewordLenToken{presym: delta(runStart)})
+			runStart++
 		}
-		run := j - i
-		if run >= 4 {
-			rl := 5
-			if run < 5 {
-				rl = 4
-			}
-			toks = append(toks, codewordLenToken{presym: 19, runLen: rl, sym2: int(deltas[i])})
-			i += rl
-			continue
-		}
-
-		toks = append(toks, codewordLenToken{presym: int(deltas[i])})
-		i++
 	}
 	return toks
 }
@@ -561,16 +565,7 @@ func codewordLenTokens(deltas []byte) []codewordLenToken {
 // saving for such chunks; see gowim's own TODO.md for the ground-truthed
 // comparison against wimlib that found this).
 func writeCodewordLens(w *bitWriter, lens, prevLens []byte) {
-	deltas := make([]byte, len(lens))
-	for i, l := range lens {
-		d := int(prevLens[i]) - int(l)
-		if d < 0 {
-			d += 17
-		}
-		deltas[i] = byte(d)
-	}
-
-	toks := codewordLenTokens(deltas)
+	toks := codewordLenTokens(lens, prevLens)
 
 	freqs := make([]uint32, precodeNumSymbols)
 	for _, t := range toks {

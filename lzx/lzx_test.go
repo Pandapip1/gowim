@@ -468,15 +468,21 @@ func TestFindMatchesBSTFindsGlobalBestWithinSmallBuffer(t *testing.T) {
 }
 
 // TestCodewordLenTokensUsesSymbol19 guards the precode symbol 19 support
-// added to codewordLenTokens (2026-08-18, see gowim's own TODO.md): a run
-// of 4-5 consecutive equal nonzero deltas should collapse into one symbol
-// 19 token (plus its shared delta value) instead of 4-5 individual symbols.
+// in codewordLenTokens (2026-08-18, see gowim's own TODO.md): a run of
+// 4-5 consecutive entries that resolve to the same *nonzero* codeword
+// length should collapse into one symbol 19 token (plus a delta value
+// computed from the run's first position) instead of 4-5 individual
+// symbols. Grouped by the actual new length (lens[i]) being equal, not by
+// delta equality -- see codewordLenTokens' own doc for why that
+// distinction matters (a real bug once grouped by delta instead).
 func TestCodewordLenTokensUsesSymbol19(t *testing.T) {
-	deltas := make([]byte, 100)
+	lens := make([]byte, 100)
+	prevLens := make([]byte, 100)
 	for i := 10; i < 15; i++ {
-		deltas[i] = 5
+		lens[i] = 12 // an arbitrary nonzero length, repeated
 	}
-	toks := codewordLenTokens(deltas)
+	// prevLens[10..14] stay 0, so delta(10) = (0 - 12) mod 17 = 5.
+	toks := codewordLenTokens(lens, prevLens)
 	found19 := false
 	for _, tok := range toks {
 		if tok.presym == 19 {
@@ -776,4 +782,48 @@ func TestTrySplitChunkStatsRoundTripsThroughCompress(t *testing.T) {
 	r.Read(second)
 	data := append(append([]byte{}, first...), second...)
 	roundTrip(t, "split-chunk-stats sharp content shift", data)
+}
+
+// TestCodewordLenTokensGroupsByLengthNotDelta directly guards the real
+// bug found and fixed 2026-08-18 (see gowim's own TODO.md): codewordLenTokens
+// must group precode runs by whether the ACTUAL NEW codeword length is
+// equal (matching wimlib's own lzx_compute_precode_items), not by whether
+// the DELTA against prevLens happens to be equal. This test constructs
+// lens that are all equal (and nonzero) but prevLens that are NOT
+// uniform, so every position's individual delta differs -- a case where
+// the two groupings genuinely diverge, unlike an all-zero-prevLens
+// baseline where they coincide. Verifies both that codewordLenTokens
+// still collapses this into a single symbol-19 run, and that the full
+// write/read round trip recovers the original lens exactly.
+func TestCodewordLenTokensGroupsByLengthNotDelta(t *testing.T) {
+	lens := []byte{8, 8, 8, 8}
+	prevLens := []byte{8, 3, 15, 0} // deliberately non-uniform, so per-position deltas (0, 12, 7, 9) are all different
+
+	toks := codewordLenTokens(lens, prevLens)
+	found19 := false
+	for _, tok := range toks {
+		if tok.presym == 19 {
+			found19 = true
+			if tok.runLen != 4 {
+				t.Fatalf("expected symbol19 runLen 4, got %+v", tok)
+			}
+		}
+	}
+	if !found19 {
+		t.Fatalf("expected lens=%v (all equal, nonzero) to collapse into a symbol19 token despite non-uniform prevLens=%v; tokens=%+v", lens, prevLens, toks)
+	}
+
+	w := newBitWriter()
+	writeCodewordLens(w, lens, prevLens)
+	buf := w.flush()
+
+	rd := newBitReader(buf)
+	got := make([]byte, len(lens))
+	copy(got, prevLens) // reader is primed with the previous block's real lengths, same as decompress() does
+	if err := readCodewordLens(rd, got); err != nil {
+		t.Fatalf("readCodewordLens: %v", err)
+	}
+	if !bytes.Equal(got, lens) {
+		t.Fatalf("round trip mismatch: got %v, want %v", got, lens)
+	}
 }

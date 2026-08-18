@@ -821,6 +821,152 @@ any compressed output at all.
       match-finder actually finds vs. gowim's, to check whether the
       remaining ~1.06% gap is now more a match-*discovery* problem than a
       match-*selection* or block-*layout* problem -- still not attempted.
+
+      **Item 14 (2026-08-18): the match-discovery comparison above was
+      finally done for real, against wimlib's own compiled matchfinder --
+      and it surfaced a serious, real, pre-existing decoder bug that had
+      nothing to do with match discovery at all.**
+
+      **Part A -- the actual match-discovery comparison.** Built a
+      standalone C driver (`/tmp/claude/mfcompare`, not part of this repo)
+      against wimlib's real `include/wimlib/bt_matchfinder.h` directly
+      (self-contained enough to compile with just `-Iinclude`; no need to
+      build all of wimlib), configured with the exact level-100 parameters
+      read from `src/lzx_compress.c` (`max_search_depth=48,
+      nice_match_length=96`, plus `BT_MATCHFINDER_HASH2_ORDER=12`, which
+      wimlib defines before including the header to enable length-2 match
+      detection). Ran it against a real 32768-byte chunk of the same
+      `ntoskrnl.exe` used throughout this investigation, and separately
+      dumped gowim's own per-position best match via a temporary test-only
+      port of `findMatches`' exact hash+BST logic. Comparing the two
+      position-by-position across all 32768 positions:
+        - 0 positions where wimlib's best match was strictly longer than
+          gowim's own (whenever gowim found anything at or above its own
+          minMatch=3 floor).
+        - 523 positions where gowim's match was strictly longer than
+          wimlib's.
+        - 25,760 positions (78.6%) where both found the exact same length.
+        - The entire remaining gap -- 3,470 positions (10.6%) where
+          wimlib found a match gowim didn't -- was **100% attributable to
+          matches of length exactly 2**, which gowim's fresh-match finder
+          cannot find at all: its hash reads 3 bytes (`minMatch=3`), so a
+          position whose only match with an earlier position is 2 bytes
+          long never lands in the same hash bucket as that earlier
+          position in the first place. wimlib's separate `hash2_tab`
+          (single-slot-per-bucket, no tree -- only the most recent
+          occurrence of a 2-byte prefix ever matters, since for equal
+          length a closer offset is never worse) exists specifically to
+          catch this.
+
+        Conclusion: gowim's own match discovery is not the bottleneck --
+        if anything it's *better* than wimlib's real matcher at every
+        length wimlib can find. The one real, confirmed, structural gap is
+        length-2 fresh matches.
+
+      **Part B -- implementing the length-2 fix surfaced a real, separate,
+      serious bug.** Added a `hash2`-equivalent (single-slot 12-bit table,
+      matching wimlib's `BT_MATCHFINDER_HASH2_ORDER`) to `findMatches`, and
+      a round-trip test (`TestTrySplitChunkStatsProducesValidSplit`, using
+      pseudo-ASCII text shifting into random bytes -- chosen because a
+      *repeated* phrase collapses into too few actual match-finder
+      "observations" to exercise anything, a lesson from item 13's own
+      test design) started failing with `bad main symbol`. Bisecting this
+      down (real-match/coverage check on tokens -- passed; a decode-trace
+      hook comparing the decoder's exact event sequence against the
+      encoder's token list, the same technique used in item 8's earlier
+      debugging saga -- found the actual divergence) led to a genuine,
+      pre-existing, **production-impacting decoder bug**, unrelated to
+      hash2 itself and merely surfaced by its changed token statistics:
+
+      `codewordLenTokens` (`encode.go`), which decides when to collapse a
+      run of codeword-length entries into precode symbols 17/18 (a run of
+      *unused*, i.e. actual-length-0, symbols) or 19 (a run of entries
+      that resolve to the same *nonzero* length), was grouping runs by
+      whether the *transmitted delta* (against `prevLens`) was equal
+      across the run -- not by whether the *actual new codeword length*
+      was equal, which is what the real LZX format (and `decode.go`'s own
+      `readCodewordLens`, matching wimlib's real decoder exactly, which
+      broadcasts a single resolved length across the whole run rather than
+      recomputing per position) actually requires. These two groupings
+      coincide only when `prevLens` is uniformly zero -- exactly this
+      package's original one-block-per-chunk baseline -- which is why
+      this was never caught by items 7's or 13's own tests: real
+      multi-block content only occasionally produces a run of 4+ entries
+      that are actually-equal-and-nonzero while their prevLens-relative
+      deltas differ, and neither item's specific test data happened to
+      hit it. Verified directly against wimlib's own real source
+      (`src/lzx_compress.c`'s `lzx_compute_precode_items`, read line by
+      line rather than re-derived from assumption after an initial wrong
+      attempt at a decode-side fix was itself checked against wimlib's
+      real decoder and found backwards): wimlib's own encoder groups by
+      `lens[run_start] == lens[i]` (the actual length), computing the
+      transmitted delta only from the run's first position, exactly
+      matching what `decode.go` already did on the read side. Fixed
+      `codewordLenTokens` to take `lens`/`prevLens` directly and group by
+      actual length equality, matching wimlib exactly; `decode.go` needed
+      no changes at all (it was already correct -- confirmed against
+      wimlib's real decoder source, not just re-tested). Added
+      `TestCodewordLenTokensGroupsByLengthNotDelta`, a direct, minimal,
+      deterministic regression test (uniform nonzero `lens` with
+      deliberately non-uniform `prevLens`, so per-position deltas all
+      differ) guarding this exact distinction going forward.
+
+      **Real-world severity, discovered by finally checking round-trip
+      correctness on the real benchmark file instead of only compressed
+      size (a real methodology gap in this whole investigation up to this
+      point -- the benchmark harness used throughout items 7-13 only ever
+      measured output *size*, never decoded it):** re-running the real
+      398-chunk/12.4MB `ntoskrnl.exe` benchmark with the *pre-fix* code
+      (commit `25613ff`, item 13's committed state) and actually decoding
+      every chunk's output found **20 of 398 chunks (5%) were silently
+      corrupted** -- `bad main symbol`, `bad length symbol`, and `match
+      offset out of range` decode errors, meaning item 13's previously-
+      reported "6,729,686 bytes" figure included real, broken output that
+      would have failed in any real decoder (including wimlib's own).
+      This means items 7 and 13's reported compression-ratio numbers in
+      this file were measured on a benchmark that could not have detected
+      this corruption, since it never checked for it.
+
+      With the fix applied (and the length-2/hash2 addition from Part A
+      reverted -- see below): **6,728,890 bytes, 0 corrupted chunks
+      (verified: every one of the 398 chunks decodes back to its exact
+      original bytes)**, narrowing the gap to wimlib's LZX:100 reference
+      (6,659,122 bytes) to **+1.05%**. This is the new, trustworthy
+      baseline; the previous "+1.06%" figure is superseded, both because
+      it was measured on partially-corrupted output and because the fix
+      itself changed which encoding several chunks actually use.
+
+      **The length-2/hash2 addition from Part A was itself reverted after
+      being measured, separately from the bug it surfaced.** Once the
+      precode bug no longer masked the real comparison: hash2 support
+      alone, gated to only the real-cost-model (pass 2) parse (an
+      un-gated version, active during the flat-cost pass 1 too, measured
+      even worse -- 6,736,146 bytes -- since pass 1's flat 8-bit-per-
+      symbol cost estimate systematically overvalues marginal length-2
+      matches whose *real* codeword would end up long, being a rare,
+      newly-introduced main-alphabet symbol), still measured **6,733,878
+      bytes -- 4,988 bytes *worse* than the corrected no-hash2 baseline**,
+      despite Part A's own analysis showing gowim's match discovery is
+      never worse than wimlib's at any length wimlib can find. This is the
+      same shape of result as items 10 and 12: a real, genuine, verified
+      capability (finding real length-2 match opportunities that
+      genuinely exist in the data) makes gowim's own two-pass token-
+      frequency-rebuild architecture produce *worse* final output, because
+      introducing new, low-frequency main-alphabet symbols for marginal
+      matches measurably degrades the Huffman table's efficiency for
+      everything else more than those matches individually save -- an
+      interaction this package's simpler joint parse/code approximation
+      doesn't handle as gracefully as wimlib's own more elaborate,
+      frequency-calibrated, multi-pass cost model. Reverted; not kept
+      behind a flag, since there is no measured case where it wins here.
+
+      **Standing methodology lesson, recorded so it isn't repeated:** any
+      future benchmark change to this encoder must verify round-trip
+      correctness on the real test file (decode every chunk, compare
+      against the original bytes), not just compare compressed sizes --
+      this investigation's own tooling didn't do that for 7 items' worth
+      of history, and it took a match-discovery side investigation to
+      notice.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.
