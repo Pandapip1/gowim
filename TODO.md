@@ -703,6 +703,55 @@ any compressed output at all.
       one actually kept; the same fix was not needed in
       `findMatchesOptimal`, which already used real per-literal costs via
       its own `literalCost` closure.
+
+      **Item 12 (2026-08-18): more refinement passes alone, tried and
+      reverted -- isolates a variable item 10 had conflated with others.**
+      Item 10's regression combined three changes at once (exhaustive
+      lengths, inline aligned costs, an extra DP pass); this tested "just
+      more passes" alone, on `compressLookahead` specifically, with
+      nothing else changed: after the existing 2-pass parse, up to 6
+      additional passes were run, each re-parsing using the *previous*
+      pass's own real Huffman lengths as its cost model (mirroring
+      wimlib's `lzx_optimize_and_flush_block`, which does up to 4 total
+      passes at compression level 100). Measured on the same real
+      398-chunk/12.4MB `ntoskrnl.exe` benchmark, starting from
+      6,730,928 bytes (post-item-11):
+        - +2 extra passes (4 total): 6,730,902 bytes -- a 26-byte
+          "improvement," statistically noise on a 6.7-million-byte total.
+        - +6 extra passes (8 total): 6,730,730 bytes -- 198 bytes better
+          than baseline (0.003%), for a real ~19% time increase (9.8s to
+          11.7s on this benchmark).
+
+      So: not a regression like item 10, but not a real lever either --
+      the token-frequency-based cost model this package uses converges to
+      essentially the same result within 1-2 passes, and pushing further
+      buys only fractions of a byte per chunk at real added cost. This
+      narrows down *why* wimlib's own multi-pass refinement helps more for
+      wimlib than for this package: it's likely not the pass *count*
+      itself, but something else combined with it in wimlib's design (the
+      fractional-bit, frequency-calibrated initial cost model described in
+      item 8/9's write-up, its real per-position aligned-cost weighting,
+      or its different match-finder/candidate set) -- none of which this
+      isolated test changed. Reverted back to the committed 2-pass
+      baseline; not kept even as a flag, since there's no measured case
+      where it's worth its cost here.
+
+      **Where this leaves the remaining ~1.08% gap:** every wimlib-
+      inspired hypothesis tested so far in this investigation -- queue-
+      state trajectory count (item 9's correction), per-length
+      exhaustiveness, inline aligned costs, extra refinement passes (this
+      item) -- has come back negative or negligible when isolated and
+      measured on real data, not just assumed. What has NOT been tried:
+      (1) wimlib's real block-splitting heuristic (`lzx_init_block_split_
+      stats`), a genuinely different, statistics-driven approach vs. this
+      package's single bounded-midpoint split attempt; (2) a direct,
+      position-by-position comparison of which matches wimlib's own
+      match-finder actually finds vs. gowim's, to check whether the
+      remaining gap is a match-*discovery* problem (hash quality, tie-
+      breaking) rather than a match-*selection* problem (cost model,
+      parse strategy) -- everything tested in this investigation so far
+      has been the latter. Neither has been attempted; both are real,
+      specific, checkable next steps, not vague future work.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.
