@@ -308,6 +308,47 @@ any compressed output at all.
          of one combined chain walk -- still fast enough in absolute terms
          (13MB in ~3.3s) for this project's offline debloat-tool use case,
          but a real tradeoff worth knowing about, not a free win.
+      5. **[x] Bounded lookahead beyond one-step lazy matching -- scoped
+         down from "full optimal/DP parse" deliberately.** A real
+         optimal/DP parse (wimlib's `lzx_compress_near_optimal`) needs to
+         explore the combinatorics of every repeat-offset-queue state
+         reachable at every position in the chunk -- genuinely complex, and
+         risky to get right given how easy it already proved to introduce a
+         real self-match bug in a much simpler change (cause 4's
+         `TestFindMatchesNeverSelfMatchesAtPositionZero`). Given the
+         diminishing returns already measured on similar-effort steps above
+         (item 4: 0.10% for a 65% time increase), attempting a full DP was
+         judged not worth the risk without first checking whether a much
+         cheaper, bounded generalization of lazy matching captured most of
+         the value.
+
+         Implemented instead: `findMatches` now evaluates three options at
+         every position -- the best repeat-offset candidate, the best
+         fresh-offset candidate, and "emit a literal" -- each combined with
+         its own single, non-recursive 1-step continuation value (not a
+         further nested lookahead, so this stays a fixed depth-2
+         evaluation, never a whole-chunk search), and commits whichever
+         totals highest. This generalizes one-step lazy matching (which
+         only ever compared a single pre-picked best candidate against
+         "literal, then re-decide") to comparing each *kind* of candidate's
+         own continuation independently -- catching cases where taking the
+         repeat candidate now, even at a lower immediate value than the
+         fresh candidate, sets up a better continuation that a single
+         best-of-both comparison would never consider.
+
+         Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+         combined with items 1-5, total dropped from 6,843,596 to
+         6,818,710 bytes (a further 0.36% reduction -- notably a better
+         size-per-time-cost ratio than item 4's binary-tree change),
+         narrowing the gap to wimlib's level-100 output from +2.80% to
+         +2.43%. Real cost: whole-file encode time increased only
+         modestly, ~3.3s to ~3.67s (~11%), much less than the naive
+         worst-case estimate (evaluating 3 options x their own
+         sub-searches could have cost far more) -- the bounded scope-down
+         from a full DP paid off in practice, not just in reduced risk.
+         A full optimal/DP parse with real repeat-offset-state exploration
+         remains unimplemented; this bounded lookahead is presented
+         honestly as a partial step, not a substitute for it.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.

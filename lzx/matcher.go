@@ -97,24 +97,25 @@ type candidateMatch struct {
 	value  int // costModel.matchValue of this candidate; only valid if found
 }
 
-// findMatches runs a lazy LZ77 parse over data using a bounded binary-tree
-// match finder for fresh offsets, plus a direct check of the LZX
-// repeat-offset LRU queue (the three most recently used match offsets) at
-// every position. Per this package's documented encoder scope (see lzx.go
-// and compress() in encode.go), this is a one-step lazy parse, not a full
-// optimal/DP parse: at each position it finds the best-value match (using
-// model to weigh repeat-offset matches, which cost no extra offset bits,
-// against fresh-offset matches of different lengths and offset slots --
-// see costModel above, which replaces a simpler earlier version of this
-// package that used a flat "repeat must be within N bytes of fresh" bonus
-// instead of an actual, if approximate, bit-cost comparison), then checks
-// whether a higher-value match exists starting one byte later using the
-// *same* repeat-offset queue state (valid because emitting a literal never
-// changes the queue) -- if so, it emits a literal now and takes the better
-// match next iteration, the classic "lazy matching" technique (as used by,
-// e.g., zlib's deflate and wimlib's own non-near-optimal compression
-// levels), rather than a full iterative bit-cost model over the whole
-// chunk.
+// findMatches runs a bounded 3-way lookahead LZ77 parse over data using a
+// binary-tree match finder for fresh offsets, plus a direct check of the
+// LZX repeat-offset LRU queue (the three most recently used match offsets)
+// at every position. Per this package's documented encoder scope (see
+// lzx.go and compress() in encode.go), this is a fixed depth-2 lookahead
+// (see the "Bounded 3-way lookahead" comment below), not a full optimal/DP
+// parse over the whole chunk: at each position it evaluates the best
+// repeat-offset candidate, the best fresh-offset candidate, and "emit a
+// literal instead", each combined with a single non-recursive 1-step
+// continuation value, and commits whichever totals highest. Candidate
+// values come from costModel (see above), which replaces a simpler earlier
+// version of this package that used a flat "repeat must be within N bytes
+// of fresh" bonus instead of an actual, if approximate, bit-cost
+// comparison. This generalizes the classic one-step "lazy matching"
+// technique (as used by, e.g., zlib's deflate and wimlib's own
+// non-near-optimal compression levels) from "compare a single pre-picked
+// best candidate against literal-then-next-best" to "compare each kind of
+// candidate's own continuation independently" -- still a fixed, bounded
+// lookahead, not an iterative whole-chunk bit-cost model.
 //
 // The repeat-offset queue is tracked exactly as the decoder maintains it
 // (see decode.go's recentOffsets handling, itself ported from wimlib's
@@ -275,12 +276,12 @@ func findMatches(data []byte, model costModel) []token {
 	// references data[i-off:], which is only valid when off <= i.
 	var queue [numRecentOffsets]int32 = [numRecentOffsets]int32{1, 1, 1}
 
-	// chooseMatch finds the best-value match at position i given the
-	// current queue, without mutating any state (hash table, chain, or
-	// queue), so it is safe to call speculatively for a lazy-matching peek.
-	chooseMatch := func(i int, queue [numRecentOffsets]int32) candidateMatch {
+	// bestRepeatCandidate and bestFreshCandidate each find the single best
+	// candidate of their kind at position i given queue, without mutating
+	// any state (hash table, tree, or queue), so both are safe to call
+	// speculatively for the bounded lookahead below.
+	bestRepeatCandidate := func(i int, queue [numRecentOffsets]int32) candidateMatch {
 		var best candidateMatch
-
 		for k := 0; k < numRecentOffsets; k++ {
 			l := repeatLenAt(i, queue[k])
 			if l < minMatchLen {
@@ -291,35 +292,51 @@ func findMatches(data []byte, model costModel) []token {
 				best = candidateMatch{found: true, offset: int(queue[k]), length: l, repeat: k, value: v}
 			}
 		}
+		return best
+	}
 
+	bestFreshCandidate := func(i int) candidateMatch {
 		bestLen, bestOff := bstSearch(i)
-		if bestLen >= minMatch {
-			slot := offsetSlot(uint32(bestOff))
-			extraBits := int(lzxExtraOffsetBits[slot])
-			v := model.matchValue(slot, bestLen, extraBits)
-			if !best.found || v > best.value {
-				best = candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: v}
-			}
+		if bestLen < minMatch {
+			return candidateMatch{}
 		}
+		slot := offsetSlot(uint32(bestOff))
+		extraBits := int(lzxExtraOffsetBits[slot])
+		return candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: model.matchValue(slot, bestLen, extraBits)}
+	}
 
+	// chooseMatch finds the single best-value candidate (repeat or fresh)
+	// at position i, or the zero value if neither is worth using over a
+	// literal.
+	chooseMatch := func(i int, queue [numRecentOffsets]int32) candidateMatch {
+		best := bestRepeatCandidate(i, queue)
+		if fresh := bestFreshCandidate(i); fresh.found && (!best.found || fresh.value > best.value) {
+			best = fresh
+		}
 		if best.found && best.value <= 0 {
 			return candidateMatch{}
 		}
 		return best
 	}
 
-	advanceQueue := func(m candidateMatch) {
+	// applyMatch returns the recent-offsets queue that results from
+	// choosing m, without mutating q (queue is a fixed-size array, an
+	// ordinary Go value type, so this returns an independent copy) --
+	// used by the bounded lookahead below to evaluate a candidate's
+	// continuation without committing to it.
+	applyMatch := func(q [numRecentOffsets]int32, m candidateMatch) [numRecentOffsets]int32 {
 		if m.repeat >= 0 {
 			if m.repeat != 0 {
-				used := queue[m.repeat]
-				queue[m.repeat] = queue[0]
-				queue[0] = used
+				used := q[m.repeat]
+				q[m.repeat] = q[0]
+				q[0] = used
 			}
-			return
+			return q
 		}
-		queue[2] = queue[1]
-		queue[1] = queue[0]
-		queue[0] = int32(m.offset)
+		q[2] = q[1]
+		q[1] = q[0]
+		q[0] = int32(m.offset)
+		return q
 	}
 
 	insertRange := func(start, end int) {
@@ -328,30 +345,75 @@ func findMatches(data []byte, model costModel) []token {
 		}
 	}
 
+	// continuationValue returns chooseMatch(pos, q).value, or 0 if pos is
+	// past the end of data or no match is found there -- used to score a
+	// candidate's 1-step continuation below.
+	continuationValue := func(pos int, q [numRecentOffsets]int32) int {
+		if pos >= n {
+			return 0
+		}
+		return chooseMatch(pos, q).value
+	}
+
+	// Bounded 3-way lookahead: at each position, evaluate the best repeat
+	// candidate, the best fresh candidate, and "emit a literal", each
+	// combined with its own 1-step continuation value (continuationValue
+	// above, itself a single non-recursive chooseMatch call, so this stays
+	// a fixed depth-2 evaluation, never a full whole-chunk search) --
+	// then commit whichever option has the highest 2-step total. This is
+	// a deliberately bounded generalization of one-step lazy matching
+	// (which only ever compared a single pre-selected best candidate
+	// against "literal, then re-decide"): here, taking the repeat
+	// candidate now (even if its own immediate value is lower than the
+	// fresh candidate's) can be the better overall choice if it sets up a
+	// much better continuation, which a single best-of-both comparison
+	// would never consider. This is NOT a full optimal/DP parse over the
+	// whole chunk -- a real DP would need to explore the combinatorics of
+	// every possible repeat-offset-queue state reachable at every
+	// position, which this package does not attempt (see gowim's own
+	// TODO.md for why: the added complexity and risk was judged not
+	// worthwhile given the modest, measured returns from similar steps
+	// here).
+	type lookaheadOption struct {
+		cand  candidateMatch // zero value means "emit a literal instead"
+		total int
+	}
+
 	i := 0
 	for i < n {
-		// chooseMatch must run before bstInsert(i): inserting i's own hash
-		// entry first would let it match against itself at offset 0.
-		m := chooseMatch(i, queue)
+		rep := bestRepeatCandidate(i, queue)
+		fresh := bestFreshCandidate(i)
+		// bestFreshCandidate (via bstSearch) must run before bstInsert(i):
+		// inserting i's own tree entry first would let it match against
+		// itself at offset 0.
 		bstInsert(i)
 
-		if m.found && i+1 < n {
-			peek := chooseMatch(i+1, queue)
-			if peek.found && peek.value > m.value {
-				toks = append(toks, token{literal: data[i], repeat: -1})
-				i++
-				continue
+		var best lookaheadOption
+		have := false
+		consider := func(o lookaheadOption) {
+			if !have || o.total > best.total {
+				best = o
+				have = true
 			}
 		}
 
-		if !m.found {
+		consider(lookaheadOption{total: continuationValue(i+1, queue)}) // literal now
+		if rep.found && rep.value > 0 {
+			consider(lookaheadOption{cand: rep, total: rep.value + continuationValue(i+rep.length, applyMatch(queue, rep))})
+		}
+		if fresh.found && fresh.value > 0 {
+			consider(lookaheadOption{cand: fresh, total: fresh.value + continuationValue(i+fresh.length, applyMatch(queue, fresh))})
+		}
+
+		if !best.cand.found {
 			toks = append(toks, token{literal: data[i], repeat: -1})
 			i++
 			continue
 		}
 
+		m := best.cand
 		toks = append(toks, token{isMatch: true, offset: m.offset, length: m.length, repeat: m.repeat})
-		advanceQueue(m)
+		queue = applyMatch(queue, m)
 		insertRange(i, i+m.length)
 		i += m.length
 	}
