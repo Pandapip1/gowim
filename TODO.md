@@ -967,6 +967,66 @@ any compressed output at all.
       this investigation's own tooling didn't do that for 7 items' worth
       of history, and it took a match-discovery side investigation to
       notice.
+- [x] **Re-attempted hash2 with a progressive, real-table-rebuild greedy
+      pass instead of a single static cost model (2026-08-18)**, following
+      up on the reverted attempt above: the earlier hash2 regression was
+      diagnosed as the two-pass encoder scoring every hash2 candidate
+      against one Huffman table that never reflected any hash2 usage at
+      all, so a genuinely-zero-frequency main symbol always looked
+      artificially expensive (or literally unusable, codeword length 0) --
+      a real Kraft-inequality effect, not a modeling bug. Implemented
+      `greedyApplyHash2` (`lzx/hash2greedy.go`): finds every pair of
+      consecutive literal tokens whose 2-byte value already occurred
+      earlier in the chunk (via an exact 65536-entry "most recent
+      occurrence" table, not a lossy hash), then greedily accepts
+      candidates one at a time, rebuilding the *real* main Huffman table
+      from the actual frequency counts after every acceptance and scoring
+      remaining candidates against that up-to-date table -- so each
+      accepted candidate's real cost (including any knock-on lengthening
+      of unrelated codewords from adding a previously-unused symbol) is
+      reflected before the next decision, not just the initial static
+      estimate the old attempt used. Stops as soon as the best remaining
+      candidate's value is <= 0 (the "MC > MB" stopping rule).
+
+      Found and fixed a second, real, serious bug while building this,
+      analogous in spirit to the precode bug above: splicing a new match
+      token into the middle of an existing token stream perturbs the
+      repeat-offset LRU queue's contents at every later position (every
+      match, fresh or repeat-offset, updates the queue -- see matcher.go's
+      `applyMatch`), so a later token's `repeat` field, chosen by the
+      original parse against the *original* queue trajectory, can
+      silently reference the wrong offset once the queue has drifted.
+      This produced real corruption (2 of 398 real ntoskrnl.exe chunks
+      decoded without error to the *wrong* bytes) before being caught by
+      the verified benchmark (see the standing methodology lesson just
+      above -- this is exactly the class of bug that a size-only
+      benchmark would have missed). Fixed with `fixupQueueState`, which
+      re-derives every match token's `repeat` field from the actual
+      resulting queue trajectory (reusing matcher.go's own `applyMatch`)
+      rather than trusting the original parse's now-stale classification;
+      wired in unconditionally as a correctness step, not an optional
+      pass. Added `TestGreedyHash2RoundTrips`
+      (testdata/hash2_greedy_chunk1.bin, the actual real chunk this was
+      found on) as a permanent regression fixture, confirmed to fail
+      without `fixupQueueState` and pass with it.
+
+      Wired into `compressLookahead` as a fifth candidate encoding,
+      alongside VERBATIM/ALIGNED/split/splitStats, kept only if it
+      measures smaller -- consistent with this encoder's established
+      "try both, keep smaller" pattern, so this can never regress output
+      even in some unmeasured edge case. Verified via the same real
+      398-chunk/12.4MB `ntoskrnl.exe` test, decoding every chunk: **0
+      corrupted chunks, 6,728,832 bytes**, a real (if modest) 58-byte
+      improvement over the 6,728,890-byte baseline above -- unlike the
+      first hash2 attempt's 4,988-byte regression, this one is a genuine,
+      verified (if small) win, confirming the progressive-rebuild
+      approach avoids the earlier failure mode. The gain is small because
+      the greedy loop's per-round *selection* still scores remaining
+      candidates against the table as of the last acceptance rather than
+      a full hypothetical rebuild per remaining candidate (which would
+      cost O(candidates^2) instead of O(candidates) and wasn't judged
+      worth it here); see `greedyApplyHash2`'s own doc for the precise
+      scope of what is and isn't exactly measured.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.

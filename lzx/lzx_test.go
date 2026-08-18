@@ -3,6 +3,7 @@ package lzx
 import (
 	"bytes"
 	"math/rand"
+	"os"
 	"testing"
 )
 
@@ -690,6 +691,44 @@ func TestCompressExceedsMaxWindow(t *testing.T) {
 // reasonable buffer size), this has little enough redundancy that most
 // bytes become individual literal observations, closer to real English
 // text's own token density.
+// TestGreedyHash2RoundTrips guards a real corruption bug found and fixed
+// while building greedyApplyHash2 (hash2greedy.go, 2026-08-18): splicing a
+// new length-2 match token into the middle of an existing token stream
+// shifts the repeat-offset LRU queue's contents at every later position
+// (every match, fresh or repeat, updates the queue -- see matcher.go's
+// applyMatch), so a later token's `repeat` field, chosen by the original
+// parse against the *original* queue trajectory, can silently reference
+// the wrong offset once perturbed by an inserted hash2 match. This first
+// showed up as 2 of 398 real-world 32768-byte chunks (from a real
+// ntoskrnl.exe) decoding without error to the *wrong* bytes -- exactly the
+// kind of silent corruption a compressed-size-only benchmark can't catch
+// (see gowim's own TODO.md's standing methodology lesson on this). Fixed
+// by fixupQueueState, which re-derives every match's repeat field from the
+// actual resulting queue trajectory rather than trusting the original
+// parse's classification.
+//
+// testdata/hash2_greedy_chunk1.bin is the actual real-world chunk this bug
+// was found on: byte offset 6455296 (chunk 197 of 398) of a real 12.4MB
+// ntoskrnl.exe extracted from a real boot.wim during this package's
+// wimlib-comparison investigation (see gowim's own TODO.md) -- confirmed to
+// round-trip incorrectly (no decode error, just wrong output bytes)
+// without fixupQueueState, and correctly with it, so this is a genuine
+// regression fixture, not a synthetic guess at the failure mode.
+func TestGreedyHash2RoundTrips(t *testing.T) {
+	data, err := os.ReadFile("testdata/hash2_greedy_chunk1.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := compress(data)
+	got, err := decompress(out, len(data))
+	if err != nil {
+		t.Fatalf("decompress: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("round trip mismatch")
+	}
+}
+
 func pseudoASCIIText(n int, seed int64) []byte {
 	const letters = "abcdefghijklmnopqrstuvwxyz "
 	r := rand.New(rand.NewSource(seed))

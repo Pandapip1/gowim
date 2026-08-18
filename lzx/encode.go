@@ -113,9 +113,9 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 	// see trySplitChunk, itself further parallelized internally), so it's
 	// the one most worth overlapping with the other two's cheaper,
 	// already-built-table encodeBlock calls.
-	var verbatim, aligned, split, splitStats []byte
+	var verbatim, aligned, split, splitStats, hash2 []byte
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		verbatim = encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
@@ -158,6 +158,29 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 		// changes.
 		splitStats = trySplitChunkStats(data, order, nMainSyms, toks)
 	}()
+	go func() {
+		defer wg.Done()
+		// Also try greedily substituting hash2 (length-2 fresh-offset)
+		// matches into toks (hash2greedy.go), scoring each candidate
+		// against a main Huffman table rebuilt after every prior
+		// acceptance -- unlike the flat/stale pass1Model estimate the
+		// main parse above used, this reflects each candidate's real
+		// effect (including Kraft-inequality knock-on lengthening of
+		// other codewords) before deciding the next one. See
+		// hash2greedy.go's own doc for why this is expected to avoid
+		// the earlier, static-table hash2 attempt's measured regression
+		// (see gowim's own TODO.md), and why the result is still only
+		// kept here if it measures smaller than every other candidate,
+		// not trusted on the strength of its own scoring alone.
+		hash2Toks := greedyApplyHash2(data, toks, nMainSyms)
+		if len(hash2Toks) == len(toks) {
+			return // no candidate was accepted; identical to verbatim
+		}
+		hash2MainLens, hash2LenLens := buildTables(hash2Toks, nMainSyms)
+		hash2MainCodes := canonicalCodewords(hash2MainLens, maxMainCodewordLen)
+		hash2LenCodes := canonicalCodewords(hash2LenLens, maxLenCodewordLen)
+		hash2 = encodeBlock(data, order, hash2Toks, hash2MainLens, hash2LenLens, hash2MainCodes, hash2LenCodes, nil, nil)
+	}()
 	wg.Wait()
 
 	best := verbatim
@@ -169,6 +192,9 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 	}
 	if splitStats != nil && len(splitStats) < len(best) {
 		best = splitStats
+	}
+	if hash2 != nil && len(hash2) < len(best) {
+		best = hash2
 	}
 	return best
 }
@@ -437,8 +463,18 @@ func buildAlignedTable(toks []token) (lens []byte, codes []uint16) {
 // buildTables computes main/length Huffman codeword lengths from toks'
 // symbol frequencies, per the LZX main/length code alphabets.
 func buildTables(toks []token, nMainSyms int) (mainLens, lenLens []byte) {
-	mainFreqs := make([]uint32, nMainSyms)
-	lenFreqs := make([]uint32, lenCodeNumSymbols)
+	mainFreqs, lenFreqs := tokenFreqs(toks, nMainSyms)
+	return buildLengths(mainFreqs, maxMainCodewordLen), buildLengths(lenFreqs, maxLenCodewordLen)
+}
+
+// tokenFreqs computes the raw main/length symbol frequency counts toks
+// would produce, per the LZX main/length code alphabets -- the shared
+// counting logic behind buildTables, also used by greedyApplyHash2
+// (hash2greedy.go), which needs to mutate these counts incrementally
+// rather than only ever consuming a finished Huffman table built from them.
+func tokenFreqs(toks []token, nMainSyms int) (mainFreqs, lenFreqs []uint32) {
+	mainFreqs = make([]uint32, nMainSyms)
+	lenFreqs = make([]uint32, lenCodeNumSymbols)
 	for _, t := range toks {
 		if t.isMatch {
 			slot := t.repeat
@@ -458,7 +494,7 @@ func buildTables(toks []token, nMainSyms int) (mainLens, lenLens []byte) {
 			mainFreqs[t.literal]++
 		}
 	}
-	return buildLengths(mainFreqs, maxMainCodewordLen), buildLengths(lenFreqs, maxLenCodewordLen)
+	return mainFreqs, lenFreqs
 }
 
 // offsetSlot returns the offset slot (>= 3) whose range
