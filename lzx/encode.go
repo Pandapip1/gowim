@@ -107,47 +107,69 @@ func compress(input []byte) []byte {
 // that checked).
 const maxRefineIters = 4
 
-// refineParse runs findMatches' bounded-lookahead parse repeatedly,
-// feeding each round's own resulting real Huffman table back in as the
-// next round's cost model -- generalizing this package's existing
-// "pass 1 (flat cost) -> pass 2 (real cost from pass 1's table)" two-pass
-// technique into a fixed-point iteration: pass 2's real table informs a
-// pass 3 re-parse, pass 3's table informs pass 4, and so on, each round
-// asking the same match-finder to re-decide every literal/match choice
-// against a progressively more self-consistent table, rather than
-// stopping after one refinement.
-//
-// This is the natural generalization of the hash2 greedy pass's
-// "rebuild the real table, don't trust a stale one" lesson to *all*
-// matches, not just length-2 ones: unlike hash2Greedy's candidate splice
-// (safe to do incrementally because a hash2 substitution never overlaps
-// an existing match's byte range), a general match candidate can overlap
-// arbitrarily with its neighbors, so there is no cheap local "accept one
-// candidate, keep the rest" step here -- each round instead re-derives
-// the *entire* parse fresh against the latest table, the same shape as
-// this package's original pass1->pass2 step, just iterated instead of
-// stopping at one. Each round's real encoded byte count is measured
-// directly (encodeBlock, not the token-implied estimate), and iteration
-// stops as soon as a round fails to beat the previous best -- both
-// because further rounds rarely help once the table has converged, and
-// because this keeps the same "try both, keep smaller" safety property
-// as everywhere else in this encoder: a round that doesn't measurably
-// help is simply discarded, never trusted on the strength of its own
-// re-parse alone.
+// refineParse runs findMatches through refineParseWith below -- see that
+// function's doc for the actual iteration logic. Factored out from
+// refineParseWith only so callers that always want findMatches don't need
+// to name it explicitly.
 func refineParse(data []byte, order, nMainSyms int, initial costModel) (toks []token, mainLens, lenLens []byte, encoded []byte) {
-	bestToks := findMatches(data, initial)
+	return refineParseWith(data, order, nMainSyms, initial, findMatches)
+}
+
+// refineParseWith runs the given parse function (findMatches' bounded
+// lookahead, or findMatchesOptimal's beam DP -- both share the
+// `func([]byte, costModel) []token` shape) repeatedly, feeding each
+// round's own resulting real Huffman table back in as the next round's
+// cost model -- generalizing this package's existing "pass 1 (flat cost)
+// -> pass 2 (real cost from pass 1's table)" two-pass technique into a
+// fixed-point iteration: pass 2's real table informs a pass 3 re-parse,
+// pass 3's table informs pass 4, and so on, each round asking the same
+// parser to re-decide every literal/match choice against a progressively
+// more self-consistent table, rather than stopping after one refinement.
+//
+// Originally this only wrapped findMatches (see gowim's own TODO.md for
+// why: the "rebuild the real table, don't trust a stale one" lesson from
+// hash2greedy.go's greedy splice generalizes to full matches via iterated
+// re-parsing rather than a local candidate-accept step, since general
+// match candidates overlap their neighbors arbitrarily). It was widened
+// to take the parse function as a parameter after measuring, on the real
+// 398-chunk ntoskrnl.exe benchmark, that findMatchesOptimal's DP actually
+// wins (produces the smaller encoding) on 346 of 398 chunks -- i.e. most
+// of this encoder's real-world output was coming from the *unrefined*
+// single-pass DP the whole time, which had never received any of this
+// package's cost-model refinements at all. See compressOptimal for where
+// this is now applied to the DP path too.
+//
+// alignedLens, rebuilt from each round's own tokens and fed into the next
+// round's cost model (see costModel.offsetExtraCost), lets the *parse
+// itself* -- not just the final post-hoc VERBATIM-vs-ALIGNED choice
+// encodeBlock's caller already makes -- account for an offset's low bits
+// potentially being cheaper under ALIGNED encoding, mirroring a real,
+// verified difference against wimlib's own near-optimal parser
+// (CONSIDER_ALIGNED_COSTS in its src/lzx_compress.c).
+//
+// Each round's real encoded byte count is measured directly (encodeBlock,
+// not the token-implied estimate), and iteration stops as soon as a round
+// fails to beat the previous best -- both because further rounds rarely
+// help once the table has converged, and because this keeps the same
+// "try both, keep smaller" safety property as everywhere else in this
+// encoder: a round that doesn't measurably help is simply discarded,
+// never trusted on the strength of its own re-parse alone.
+func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse func([]byte, costModel) []token) (toks []token, mainLens, lenLens []byte, encoded []byte) {
+	bestToks := parse(data, initial)
 	bestMainLens, bestLenLens := buildTables(bestToks, nMainSyms)
 	bestEncoded := encodeBlock(data, order, bestToks, bestMainLens, bestLenLens,
 		canonicalCodewords(bestMainLens, maxMainCodewordLen), canonicalCodewords(bestLenLens, maxLenCodewordLen), nil, nil)
 
-	model := costModel{mainLens: bestMainLens, lenLens: bestLenLens}
+	alignedLens, _ := buildAlignedTable(bestToks)
+	model := costModel{mainLens: bestMainLens, lenLens: bestLenLens, alignedLens: alignedLens}
 	for i := 0; i < maxRefineIters; i++ {
-		nt := findMatches(data, model)
+		nt := parse(data, model)
 		nMainLens, nLenLens := buildTables(nt, nMainSyms)
 		enc := encodeBlock(data, order, nt, nMainLens, nLenLens,
 			canonicalCodewords(nMainLens, maxMainCodewordLen), canonicalCodewords(nLenLens, maxLenCodewordLen), nil, nil)
 
-		model = costModel{mainLens: nMainLens, lenLens: nLenLens}
+		nAlignedLens, _ := buildAlignedTable(nt)
+		model = costModel{mainLens: nMainLens, lenLens: nLenLens, alignedLens: nAlignedLens}
 		if len(enc) >= len(bestEncoded) {
 			break // this round's re-parse didn't measurably help; converged (or diverging) -- stop.
 		}
@@ -267,11 +289,24 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 // compress() keeps whichever of the two is actually smaller rather than
 // assuming this one wins.
 func compressOptimal(data []byte, order, nMainSyms int, pass1Model costModel) []byte {
-	optToks := findMatchesOptimal(data, pass1Model)
-	optMainLens, optLenLens := buildTables(optToks, nMainSyms)
-	optMainCodes := canonicalCodewords(optMainLens, maxMainCodewordLen)
-	optLenCodes := canonicalCodewords(optLenLens, maxLenCodewordLen)
-	return encodeBlock(data, order, optToks, optMainLens, optLenLens, optMainCodes, optLenCodes, nil, nil)
+	optToks, _, _, best := refineParseWith(data, order, nMainSyms, pass1Model, findMatchesOptimal)
+
+	// Also try greedily splicing hash2 matches into the DP's own tokens
+	// (see hash2greedy.go): this was previously only ever applied to the
+	// bounded-lookahead path's tokens, but measuring found the DP path
+	// actually produces the smaller encoding on the large majority of
+	// real chunks (see refineParseWith's own doc), meaning hash2 was
+	// missing from where most of this encoder's real output comes from.
+	hash2Toks := greedyApplyHash2(data, optToks, nMainSyms)
+	if len(hash2Toks) != len(optToks) {
+		hash2MainLens, hash2LenLens := buildTables(hash2Toks, nMainSyms)
+		hash2Encoded := encodeBlock(data, order, hash2Toks, hash2MainLens, hash2LenLens,
+			canonicalCodewords(hash2MainLens, maxMainCodewordLen), canonicalCodewords(hash2LenLens, maxLenCodewordLen), nil, nil)
+		if len(hash2Encoded) < len(best) {
+			best = hash2Encoded
+		}
+	}
+	return best
 }
 
 // tokensByteLen returns the total uncompressed byte length covered by toks.

@@ -284,7 +284,7 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 
 			for _, cand := range freshCands {
 				slot := offsetSlot(uint32(cand.offset))
-				extraBits := int(lzxExtraOffsetBits[slot])
+				extraBits := model.offsetExtraCost(slot, cand.offset)
 				c := model.matchCost(slot, cand.length) + extraBits
 				nq := applyMatch(s.queue, -1, cand.offset)
 				mergeState(i+cand.length, s.cost+c, nq, dpEdge{isMatch: true, offset: cand.offset, length: cand.length, repeat: -1, from: i, fromState: si})

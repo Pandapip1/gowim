@@ -49,8 +49,9 @@ const (
 // match cost captures the great majority of the benefit for much less
 // complexity.
 type costModel struct {
-	mainLens []byte // nil => flatMainBits/flatLenBits estimates
-	lenLens  []byte
+	mainLens    []byte // nil => flatMainBits/flatLenBits estimates
+	lenLens     []byte
+	alignedLens []byte // nil => extra offset bits costed as raw bits (see offsetExtraCost)
 }
 
 // matchCost returns the estimated bit cost of a match's main-code symbol
@@ -93,6 +94,35 @@ func (m costModel) literalCost(b byte) int {
 		}
 	}
 	return flatLiteralBits
+}
+
+// offsetExtraCost estimates the bit cost of a fresh match's extra offset
+// bits at the given slot/offset: the plain raw-bit count if the model has
+// no aligned-code table yet, or -- once one is known (see refineParse in
+// encode.go, which rebuilds this every round from the previous round's own
+// chosen tokens) -- the real Huffman cost of the low numAlignedOffsetBits
+// bits via that table plus the remaining raw bits, matching what an
+// ALIGNED block would actually spend on this exact offset.
+//
+// This mirrors wimlib's own real near-optimal parser: found by reading its
+// source (src/lzx_compress.c, CONSIDER_ALIGNED_COSTS) that it folds an
+// aligned-cost estimate into match costs *during* the parse itself, not
+// only when choosing VERBATIM vs ALIGNED after the fact (which this
+// package's encodeBlock fan-out in encode.go still also does, unchanged,
+// as the final correctness-preserving measurement) -- see gowim's own
+// TODO.md for the investigation that found this gap. Without this, the
+// parse's own match/offset choices are blind to the possibility that an
+// ALIGNED block would end up cheaper for a given offset's low bits, which
+// can steer it toward a different, non-aligned-friendly offset than the
+// one that would actually encode smallest.
+func (m costModel) offsetExtraCost(slot, offset int) int {
+	extraBits := int(lzxExtraOffsetBits[slot])
+	if m.alignedLens == nil || slot < minAlignedOffsetSlot {
+		return extraBits
+	}
+	extra := uint32(offset) - uint32(lzxOffsetSlotBase[slot])
+	asym := extra & (alignedCodeNumSymbols - 1)
+	return (extraBits - numAlignedOffsetBits) + int(m.alignedLens[asym])
 }
 
 // matchValue estimates how many bits a match of the given slot/length/
@@ -343,7 +373,7 @@ func findMatches(data []byte, model costModel) []token {
 			return candidateMatch{}
 		}
 		slot := offsetSlot(uint32(bestOff))
-		extraBits := int(lzxExtraOffsetBits[slot])
+		extraBits := model.offsetExtraCost(slot, bestOff)
 		return candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: model.matchValue(slot, bestLen, extraBits, litPrefix[i+bestLen]-litPrefix[i])}
 	}
 

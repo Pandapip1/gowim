@@ -1060,6 +1060,75 @@ any compressed output at all.
       `compressLookahead`'s own real-world wall time on the full
       benchmark (11.5s -> 24.0s for all 398 chunks) since even a
       non-improving chunk pays for the one round that checked.
+- [x] **Investigated why gowim still trailed wimlib by ~1% despite the
+      above (2026-08-18), at the user's explicit request to find the real
+      cause rather than assume feasibility.** Read wimlib's actual
+      near-optimal parser source (`lzx_compress_near_optimal`/
+      `lzx_find_min_cost_path` in `src/lzx_compress.c`, v1.14.5) directly
+      rather than recall/guess, confirming with file:line citations:
+      - wimlib's repeat-offset queue is genuinely **not** a DP state
+        dimension -- its own doc comment on `lzx_find_min_cost_path`
+        states plainly that tracking it is "actually only an
+        approximation" and "the algorithm does not solve this problem in
+        general; it only looks one step ahead" (its one concession being
+        a narrow, hand-coded 2-step "gap match" special case). gowim's own
+        `findMatchesOptimal` beam DP (optimal.go), which tracks up to 4
+        distinct queue-state hypotheses per position, already goes
+        *beyond* this, not behind it -- ruling out queue-state handling as
+        the explanation.
+      - wimlib folds an aligned-offset cost estimate into match costs
+        *during* the parse itself (`CONSIDER_ALIGNED_COSTS`), not only when
+        choosing VERBATIM vs ALIGNED after the fact. gowim's cost model had
+        no equivalent. Implemented one (`costModel.offsetExtraCost` in
+        matcher.go, fed by a per-round-rebuilt `alignedLens` table in
+        `refineParseWith`) -- measured only a **10-byte** improvement
+        (6,727,462 -> 6,727,452) on the full benchmark, real but far too
+        small to be the dominant cause.
+      - Checked whether excess block-splitting overhead explained the gap:
+        only 25 of 398 chunks (6.3%) actually split into more than one
+        block, and the ~150-200-byte/chunk gap was already showing up
+        uniformly even in single-block chunks -- not a block-layout issue.
+
+      **The actual dominant cause, found by instrumenting which of
+      `compress()`'s two concurrent parses (`compressLookahead`'s bounded
+      lookahead vs `compressOptimal`'s beam DP) wins per chunk:
+      `compressOptimal`'s DP won 346 of 398 real chunks (87%), by 57,360
+      bytes total.** Every refinement built earlier today (`refineParse`'s
+      iterative real-cost-model re-parsing, the aligned-cost folding
+      above, and `greedyApplyHash2`) had only ever been wired into
+      `compressLookahead` -- meaning the large majority of this encoder's
+      real-world output was coming from a single-pass, un-refined DP
+      parse against only the flat pass-1 cost model, untouched by any of
+      the improvements made under the (false) assumption that the
+      lookahead path was the one that mattered. Generalized `refineParse`
+      into `refineParseWith(data, order, nMainSyms, initial, parse)`,
+      parameterized over which parser to iterate (`findMatches` or
+      `findMatchesOptimal` -- both share the same `func([]byte,
+      costModel) []token` shape), and wired `compressOptimal` to use it
+      plus a `greedyApplyHash2` pass on the DP's own resulting tokens,
+      exactly mirroring what `compressLookahead` already had.
+
+      Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test,
+      decoding every chunk: **0 corrupted chunks, 6,715,522 bytes** -- an
+      11,930-byte improvement, roughly 8x every other improvement made
+      today combined, narrowing the gap to wimlib's LZX:100 reference to
+      **~0.88%**, down from ~1.05% (measured directly against the same
+      installed `libwim.so.15` used throughout this investigation:
+      6,657,082 bytes -- close to but not identical to the 6,659,122
+      figure recorded earlier in this file for the same comparison; not
+      re-investigated, treat 6,657,082 as the more current figure). Cost:
+      the DP path is more expensive per round than the lookahead path, so
+      iterating it roughly doubled `compressOptimal`'s own time cost on
+      top of the lookahead path's own earlier doubling (full-benchmark
+      wall time: 24.0s -> 57.4s for all 398 chunks).
+
+      **Standing lesson:** before spending further effort on cost-model
+      precision (the aligned-cost and iteration ideas that motivated this
+      investigation), it's worth first checking *which code path the
+      improvement actually reaches* -- an objectively correct, well-
+      reasoned improvement applied to the wrong (already-losing) parse
+      path measures as nearly a no-op, exactly what happened here for
+      most of today's earlier work before this was found.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.
