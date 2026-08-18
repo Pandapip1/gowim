@@ -79,12 +79,30 @@ func (m costModel) matchCost(slot, length int) int {
 	return mainBits + lenBits
 }
 
+// literalCost returns the estimated bit cost of literal byte b: its real
+// Huffman codeword length if the model has one, else the flat estimate.
+// Real per-byte costs in typical binary data vary far more than a flat
+// guess suggests -- e.g. a common padding byte can cost under 3 bits while
+// a rare byte costs upwards of 12-15 bits in the same chunk -- so using
+// the real length here (once known, from a first pass) measurably changes
+// whether a match is worth its cost relative to the literals it replaces.
+func (m costModel) literalCost(b byte) int {
+	if m.mainLens != nil {
+		if c := int(m.mainLens[b]); c > 0 {
+			return c
+		}
+	}
+	return flatLiteralBits
+}
+
 // matchValue estimates how many bits a match of the given slot/length/
-// extraBits saves versus emitting length literals instead, using
-// flatLiteralBits per literal. Higher is better; a value <= 0 means the
+// extraBits saves versus emitting its length literals instead, given
+// litCost (the real summed literalCost of those specific length bytes,
+// not a flat length*flatLiteralBits guess -- see literalCost above for
+// why that distinction matters). Higher is better; a value <= 0 means the
 // match is not worth using at all.
-func (m costModel) matchValue(slot, length, extraBits int) int {
-	return length*flatLiteralBits - m.matchCost(slot, length) - extraBits
+func (m costModel) matchValue(slot, length, extraBits, litCost int) int {
+	return litCost - m.matchCost(slot, length) - extraBits
 }
 
 // candidateMatch is the single best match (repeat-offset or fresh) found at
@@ -297,6 +315,16 @@ func findMatches(data []byte, model costModel) []token {
 	// references data[i-off:], which is only valid when off <= i.
 	var queue [numRecentOffsets]int32 = [numRecentOffsets]int32{1, 1, 1}
 
+	// litPrefix[j] is the total literalCost of data[0:j], so the real
+	// summed literal cost of any range data[i:i+l] is litPrefix[i+l] -
+	// litPrefix[i] in O(1) -- used by matchValue's litCost argument
+	// instead of a flat length*flatLiteralBits guess (see literalCost's
+	// own doc for why the flat guess is a meaningfully worse estimate).
+	litPrefix := make([]int, n+1)
+	for i := 0; i < n; i++ {
+		litPrefix[i+1] = litPrefix[i] + model.literalCost(data[i])
+	}
+
 	// bestRepeatCandidate and bestFreshCandidate each find the single best
 	// candidate of their kind at position i given queue, without mutating
 	// any state (hash table, tree, or queue), so both are safe to call
@@ -308,7 +336,7 @@ func findMatches(data []byte, model costModel) []token {
 			if l < minMatchLen {
 				continue
 			}
-			v := model.matchValue(k, l, 0)
+			v := model.matchValue(k, l, 0, litPrefix[i+l]-litPrefix[i])
 			if !best.found || v > best.value {
 				best = candidateMatch{found: true, offset: int(queue[k]), length: l, repeat: k, value: v}
 			}
@@ -323,7 +351,7 @@ func findMatches(data []byte, model costModel) []token {
 		}
 		slot := offsetSlot(uint32(bestOff))
 		extraBits := int(lzxExtraOffsetBits[slot])
-		return candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: model.matchValue(slot, bestLen, extraBits)}
+		return candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: model.matchValue(slot, bestLen, extraBits, litPrefix[i+bestLen]-litPrefix[i])}
 	}
 
 	// chooseMatch finds the single best-value candidate (repeat or fresh)

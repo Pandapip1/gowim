@@ -7,27 +7,37 @@ import "sort"
 // as an attempt at a genuinely more "optimal" parse than the bounded 3-way
 // lookahead there.
 //
-// # Honest scope: a bounded multi-state beam, not wimlib's full parser
+// # Honest scope: a bounded multi-state beam, going beyond wimlib's own
+// # single-trajectory parser in one specific way
 //
-// A fully faithful optimal parse with LZX's repeat-offset queue needs to
-// explore the combinatorics of every distinct queue *state* (which of the
-// three most-recently-used offsets is which) reachable at every position,
-// since a higher-cost path to some position might carry a queue state that
-// enables much cheaper matches later -- e.g. wimlib's
-// lzx_compress_near_optimal tracks multiple live queue-state hypotheses
-// per position for exactly this reason.
+// Earlier versions of this comment claimed wimlib's own near-optimal
+// parser (`lzx_find_min_cost_path` in wimlib's src/lzx_compress.c) tracks
+// multiple live repeat-offset-queue-state hypotheses per position. That
+// claim was never actually checked against wimlib's source and turned out
+// to be wrong: wimlib's own doc comment on that function says plainly
+// that its handling of the adaptive queue state "is actually only an
+// approximation" and that "the algorithm does not solve this problem in
+// general; it only looks one step ahead" -- i.e. wimlib itself tracks a
+// SINGLE queue trajectory per position, the same simplification this
+// package's earlier (pre-beam) revision used. See gowim's own TODO.md for
+// the correction and the experiment that led to finding it.
 //
-// This function now does the same in spirit, but bounded: at each position
-// it keeps up to beamWidth distinct (cost, queue-state) hypotheses (a beam
-// search over queue states, not just the single cheapest arrival). A
-// higher-cost path that carries a different, more useful queue state is no
-// longer thrown away outright -- it survives as long as it's one of the
-// beamWidth cheapest distinct-queue hypotheses at that position. This is
-// still not wimlib's approach: wimlib's near-optimal parser is not beam
-// limited in the same way and additionally considers a much larger edge
-// set per position (near-exhaustive length/offset exploration plus
-// multiple forward passes). What follows is a genuine, bounded
-// approximation of the same idea, not a full reimplementation.
+// This function's beam (below) genuinely goes beyond that single-
+// trajectory baseline: at each position it keeps up to beamWidth distinct
+// (cost, queue-state) hypotheses instead of collapsing to the single
+// cheapest arrival. A higher-cost path that carries a different, more
+// useful queue state is not thrown away outright, as long as it's one of
+// the beamWidth cheapest distinct-queue hypotheses at that position.
+//
+// What this function still does NOT do, unlike wimlib's real algorithm:
+// relax every possible match length (it samples a bounded subset instead
+// -- see repeatLengthSamples/maxFreshCandidates below), fold ALIGNED-block
+// costs into the cost model inline, or run more than the two refinement
+// passes compress() already performs. A real attempt was made at all
+// three (2026-08-18) and measured to make real output *worse*, not
+// better, on gowim's own real-file benchmark -- see gowim's own TODO.md
+// for the measured numbers and the (plausible, not fully proven)
+// explanation, and for why they were reverted rather than kept.
 //
 // # Bounded edge and state counts
 //

@@ -323,8 +323,8 @@ func TestCostModelPrefersCheaperOffset(t *testing.T) {
 	cheapSlot := 4   // lzxExtraOffsetBits[4] == 1
 	costlySlot := 34 // lzxExtraOffsetBits[34] == 16
 	const length = 10
-	cheapValue := m.matchValue(cheapSlot, length, int(lzxExtraOffsetBits[cheapSlot]))
-	costlyValue := m.matchValue(costlySlot, length, int(lzxExtraOffsetBits[costlySlot]))
+	cheapValue := m.matchValue(cheapSlot, length, int(lzxExtraOffsetBits[cheapSlot]), length*flatLiteralBits)
+	costlyValue := m.matchValue(costlySlot, length, int(lzxExtraOffsetBits[costlySlot]), length*flatLiteralBits)
 	if cheapValue <= costlyValue {
 		t.Fatalf("expected cheap-offset match to have higher value at equal length: cheap=%d costly=%d", cheapValue, costlyValue)
 	}
@@ -332,7 +332,7 @@ func TestCostModelPrefersCheaperOffset(t *testing.T) {
 	// A length-10 match at a cheap offset should also beat a slightly
 	// longer (length-11) match at the costly offset, since the extra-bit
 	// cost difference (15 bits) dwarfs one byte's worth of length (8 bits).
-	costlyLonger := m.matchValue(costlySlot, length+1, int(lzxExtraOffsetBits[costlySlot]))
+	costlyLonger := m.matchValue(costlySlot, length+1, int(lzxExtraOffsetBits[costlySlot]), (length+1)*flatLiteralBits)
 	if cheapValue <= costlyLonger {
 		t.Fatalf("expected cheap-offset match to beat a slightly longer costly-offset match: cheap=%d costlyLonger=%d", cheapValue, costlyLonger)
 	}

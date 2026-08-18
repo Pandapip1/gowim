@@ -578,6 +578,131 @@ any compressed output at all.
       small further slice is still genuinely unknown, for the same reason
       as before -- it has not been attempted, only approximated at
       increasing (and increasingly expensive) levels of fidelity.
+
+      **Correction (2026-08-18) to items 8/9's characterization of
+      wimlib's algorithm, found by actually reading wimlib's source
+      (`src/lzx_compress.c`, cached at `/tmp/claude/repos/wimlib`) rather
+      than continuing to assume:** wimlib's `lzx_find_min_cost_path` does
+      **not** explore multiple repeat-offset-queue-state hypotheses. It
+      tracks a single queue trajectory per position, exactly like item
+      8's original (pre-beam) approach -- its own doc comment says so
+      explicitly: "the way the algorithm handles this adaptive state... is
+      actually only an approximation... The algorithm does not solve this
+      problem in general; it only looks one step ahead." Items 8 and 9's
+      write-ups above, and `optimal.go`'s doc comments at the time, wrongly
+      asserted wimlib explores every reachable queue state -- that was
+      never verified against the real source before being written, which
+      is exactly the kind of unverified claim this project's own standing
+      discipline says not to make. It has been corrected here and in
+      `optimal.go`'s doc comment. What wimlib actually does differently
+      from item 8's original single-trajectory version: relaxes *every*
+      match length (not a sampled subset) for both repeat-offset and
+      fresh-offset candidates, since each extra length is an O(1) cost
+      lookup once a match is confirmed; folds ALIGNED-block cost estimates
+      directly into the per-position cost model (`CONSIDER_ALIGNED_COSTS`)
+      instead of only comparing finished encodings after the fact; and
+      runs multiple full refinement passes per block (up to 4 at
+      compression level 100, each re-deriving costs from the previous
+      pass's actual chosen path), not just 2.
+
+      **Item 10 (2026-08-18): implemented all three of those real
+      differences, measured them, and reverted all three after the real
+      398-chunk/12.4MB `ntoskrnl.exe` test showed each one made total
+      output *larger*, not smaller** -- a genuine, reproducible, measured
+      regression, not noise (verified by isolating each change in its own
+      run rather than changing all three at once):
+        - Baseline (item 9, sampled lengths, no inline aligned cost, 1
+          pass): 6,731,684 bytes.
+        - + exhaustive per-length relaxation only: 6,734,060 bytes (worse).
+        - + inline aligned-cost model on top of that: 6,735,646 bytes
+          (worse again).
+        - + a second refinement pass on top of both: 6,742,596 bytes
+          (worse again).
+
+        Each addition made the measured result monotonically worse, in
+        the same direction, across three independent runs -- not a
+        one-off fluke. The likely reason (plausible, not fully proven):
+        the DP's cost model is only ever an *estimate* (from a previous
+        pass's Huffman lengths), and the final real size depends on the
+        actual Huffman table built from whatever tokens the DP ends up
+        choosing. Giving the DP more freedom to chase small estimated
+        savings can shift the chosen token distribution in ways that make
+        the *final, real* Huffman code measurably less efficient overall,
+        even though every individual relaxation was "cheaper" under the
+        (imperfect) model it was evaluated against. This is a real
+        illustration of why wimlib's own comment above calls its result
+        "not guaranteed to be the true minimum cost path" -- greedily
+        trusting a cost estimate further does not necessarily help once
+        that estimate feeds back into what code gets built from it. All
+        three changes were reverted (`git checkout -- lzx/encode.go
+        lzx/matcher.go lzx/optimal.go`, back to item 9's committed state,
+        `d657f3a`) rather than kept as a net-worse "closer to wimlib"
+        change; gowim's own measured, working 6,731,684-byte result
+        remains the current best.
+
+        One genuinely interesting side effect surfaced during this
+        experiment, worth recording even though the code that produced it
+        was reverted: with exhaustive-length relaxation active, the
+        existing `TestCompressAllZerosMatchesWimlibSize` regression guard
+        *failed* -- not because the output was wrong, but because it
+        dropped to 76 compressed bytes for the all-zero 32768-byte test
+        chunk, 2 bytes *smaller* than wimlib's own real 78-byte output for
+        the same input, and it still round-tripped correctly (verified
+        directly against `Decompress`). So gowim's encoder is not
+        strictly bounded above by wimlib's own output even today, on at
+        least this one synthetic input -- interesting, but not something
+        to chase further without a concrete real-world case motivating it,
+        since generalizing from a single synthetic all-zero chunk to a
+        real-world size claim would itself be the kind of unverified
+        extrapolation this project avoids.
+
+        What remains unclosed, same as items 8/9: whether a *properly
+        converging* multi-pass refinement (wimlib manages 4 passes at
+        level 100 without regressing, so a well-behaved version of this
+        must be possible) would help once implemented correctly, versus
+        this session's single extra pass which measurably did not. That
+        would require understanding why wimlib's iteration converges and
+        this session's naive one-shot rebuild didn't -- a real, specific
+        follow-up question, not yet investigated.
+
+      **Item 11 (2026-08-18): real per-literal costs in `findMatches`'
+      match-value comparison, replacing a flat 8-bits-per-literal guess
+      that this package's own doc comment had (wrongly, it turns out)
+      called a safe simplification.** Checking real byte-frequency data
+      from the same `ntoskrnl.exe` test file (a representative 32768-byte
+      chunk) showed a common padding byte at ~20% frequency (~2.3 bits of
+      real entropy) alongside rare bytes at ~0.003% (~15 bits) in the same
+      chunk -- not "little variation," directly contradicting
+      `matcher.go`'s prior doc comment justifying the flat estimate.
+      `costModel.matchValue` (used by `findMatches`, the bounded-lookahead
+      parser) was always comparing a match's cost against
+      `length*flatLiteralBits` for the literals it would replace,
+      regardless of whether real Huffman lengths were already known from
+      pass 1 -- so a match's real value was systematically mispriced by
+      however far the true literal costs in its range departed from a
+      flat 8 bits. Fixed by adding `costModel.literalCost(b)` (real
+      Huffman length when known, else the flat estimate -- the same
+      pattern `findMatchesOptimal` already used correctly) and a
+      `litPrefix` running-sum array so any match's real summed literal
+      cost is an O(1) lookup, then threading that through `matchValue` as
+      an explicit `litCost` argument instead of computing
+      `length*flatLiteralBits` internally.
+
+      This is a different kind of change from item 10's regression: it
+      does not add any new edges or exploration (same candidates
+      considered, same number of passes) -- it only corrects the accuracy
+      of an existing comparison already being made, so it does not carry
+      item 10's "more freedom under an approximate model can backfire"
+      risk. Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe`
+      test: 6,731,684 -> 6,730,928 bytes, a small but real 756-byte (0.011%)
+      further reduction, with no measurable time cost (unchanged ~14s,
+      since no extra passes or edges were added) -- narrowing the gap to
+      wimlib's fresh LZX:100 reference (6,659,122 bytes) from +1.09% to
+      **+1.08%**. Modest, as expected, since `findMatches` is only one of
+      several candidates `compress()` tries per chunk and is often not the
+      one actually kept; the same fix was not needed in
+      `findMatchesOptimal`, which already used real per-literal costs via
+      its own `literalCost` closure.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.
