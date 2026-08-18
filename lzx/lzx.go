@@ -78,16 +78,19 @@
 //     filter enable bit, or LZX DELTA's reference-data extensions -- none
 //     of these are used by WIM.
 //   - Compression-ratio or match-finding optimality. The encoder uses a
-//     one-step lazy LZ77 match finder (binary-tree based, bounded search
-//     depth, plus a direct check of the repeat-offset LRU queue -- see
-//     lzx/matcher.go) and always emits exactly one block per call, either
-//     LZX_BLOCKTYPE_VERBATIM or LZX_BLOCKTYPE_ALIGNED (whichever a same-
-//     tokens trial encoding of each comes out smaller as -- see encode.go's
-//     encodeBlock/buildAlignedTable) -- it never emits an uncompressed
-//     block, nor does it use a full optimal/DP parse or an iterative
-//     bit-cost model (beyond the two-pass Huffman-informed re-parse in
-//     compress(), which is not the same as a full iterative optimizer).
-//     This is a valid, spec-compliant subset (block
+//     bounded 3-way-lookahead LZ77 match finder (binary-tree based, bounded
+//     search depth, plus a direct check of the repeat-offset LRU queue --
+//     see lzx/matcher.go) and emits either 1 or 2 blocks per call
+//     (compress() tries a 2-block split at the token boundary closest to
+//     the midpoint and keeps it only if smaller -- see encode.go's
+//     trySplitChunk -- never more than 2, i.e. not a general multi-way
+//     block-split search), each block independently VERBATIM or ALIGNED
+//     (whichever a same-tokens trial encoding of each comes out smaller as
+//     -- see encode.go's encodeBlock/writeBlockInto/buildAlignedTable) --
+//     it never emits an uncompressed block, nor does it use a full
+//     optimal/DP parse or an iterative bit-cost model (beyond the two-pass
+//     Huffman-informed re-parse in compress(), which is not the same as a
+//     full iterative optimizer). This is a valid, spec-compliant subset (block
 //     type is signaled per-block, and wimlib's own compressor already
 //     demonstrates that a real decoder must accept an all-verbatim stream)
 //     that a compliant decoder, including wimlib, must decode correctly;

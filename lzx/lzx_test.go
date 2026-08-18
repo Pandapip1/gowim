@@ -504,6 +504,60 @@ func TestRoundTripExercisesSymbol19Indirectly(t *testing.T) {
 	roundTrip(t, "symbol19-ish", data)
 }
 
+// TestSplitChunkRoundTrips guards the 2-block chunk-splitting trial added
+// to compress() (2026-08-18, see gowim's own TODO.md): data with two very
+// different halves (repetitive text vs high-entropy random bytes) must
+// still round-trip correctly through the real bit writer/reader, whether
+// or not the split ends up smaller than the single-block encoding.
+func TestSplitChunkRoundTrips(t *testing.T) {
+	r := rand.New(rand.NewSource(55))
+	first := bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog. "), 300)
+	second := make([]byte, len(first))
+	r.Read(second)
+	data := append(append([]byte{}, first...), second...)
+	roundTrip(t, "split-chunk mixed halves", data)
+}
+
+// TestTrySplitChunkProducesValidSplit guards trySplitChunk directly: the
+// split point must never fall inside a token (matches may not cross a
+// block boundary), both halves must be non-empty, and the resulting
+// bitstream must decode back to the original data exactly like the
+// single-block path.
+func TestTrySplitChunkProducesValidSplit(t *testing.T) {
+	r := rand.New(rand.NewSource(55))
+	first := bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog. "), 300)
+	second := make([]byte, len(first))
+	r.Read(second)
+	data := append(append([]byte{}, first...), second...)
+
+	order, err := windowOrder(len(data))
+	if err != nil {
+		t.Fatalf("windowOrder: %v", err)
+	}
+	nMainSyms := numMainSyms(order)
+
+	pre := make([]byte, len(data))
+	copy(pre, data)
+	lzxPreprocess(pre)
+
+	toks1 := findMatches(pre, costModel{})
+	mainLens1, lenLens1 := buildTables(toks1, nMainSyms)
+	toks := findMatches(pre, costModel{mainLens: mainLens1, lenLens: lenLens1})
+
+	split := trySplitChunk(pre, order, toks, nMainSyms)
+	if split == nil {
+		t.Fatal("expected trySplitChunk to produce a split for this data")
+	}
+
+	got, err := decompress(split, len(data))
+	if err != nil {
+		t.Fatalf("decompress error: %v", err)
+	}
+	if !bytes.Equal(got, pre) {
+		t.Fatalf("split-chunk decode mismatch")
+	}
+}
+
 func TestCompressExceedsMaxWindow(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

@@ -3,16 +3,16 @@ package lzx
 // compress implements this package's WIM-flavor LZX encoder. Per the scope
 // documented in lzx.go, it:
 //
-//   - always emits exactly one block per call (valid since window orders
-//     here never require more than 24 bits to represent the block size,
-//     and 2^maxWindowOrder always fits) -- either VERBATIM or ALIGNED,
-//     whichever encodes smaller for this chunk (see encodeBlock/
-//     buildAlignedTable below); it never emits an uncompressed block;
-//   - uses a one-step lazy binary-tree LZ77 match finder with a bounded
-//     search depth, not a full optimal/DP parse, though it does track and
-//     prefer the repeat-offset LRU queue (see matcher.go) -- both were real,
-//     measured sources of gowim's compression-ratio gap against wimlib (see
-//     gowim's own TODO.md);
+//   - emits 1 or 2 blocks per call (never more -- see trySplitChunk for
+//     why this is a single bounded split attempt, not a general search),
+//     each independently VERBATIM or ALIGNED, whichever encodes smaller
+//     (see encodeBlock/writeBlockInto/buildAlignedTable below); it never
+//     emits an uncompressed block;
+//   - uses a bounded 3-way-lookahead binary-tree LZ77 match finder with a
+//     bounded search depth, not a full optimal/DP parse, though it does
+//     track and prefer the repeat-offset LRU queue (see matcher.go) --
+//     both were real, measured sources of gowim's compression-ratio gap
+//     against wimlib (see gowim's own TODO.md);
 //   - applies the E8 call-translation filter unconditionally, exactly as
 //     real WIM encoders do (see lzx.go's WIM-vs-CAB notes), so that this
 //     package's own compressed output round-trips through a real WIM/LZX
@@ -61,20 +61,148 @@ func compress(input []byte) []byte {
 	// heuristics above.
 	alignedLens, alignedCodes := buildAlignedTable(toks)
 	aligned := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
-	if len(aligned) < len(verbatim) {
-		return aligned
+	best := verbatim
+	if len(aligned) < len(best) {
+		best = aligned
 	}
-	return verbatim
+
+	// Try splitting into 2 blocks too: real data's statistics can vary
+	// enough within one 32768-byte chunk (e.g. text vs binary content) that
+	// giving each half its own Huffman table beats one table for the whole
+	// chunk, even after paying a second block's header overhead. See
+	// trySplitChunk for why this is a single, bounded 2-block attempt (not
+	// a general multi-way search) and gowim's own TODO.md for how much (or
+	// little) this actually saved on real content.
+	if split := trySplitChunk(data, order, toks, nMainSyms); split != nil && len(split) < len(best) {
+		best = split
+	}
+
+	return best
 }
 
-// encodeBlock writes a single LZX block (VERBATIM if alignedLens/
-// alignedCodes are nil, ALIGNED otherwise) for toks against the given main/
-// length (and, for ALIGNED, aligned-offset) Huffman tables.
-func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) []byte {
-	nMainSyms := numMainSyms(order)
-	useAligned := alignedLens != nil
+// tokensByteLen returns the total uncompressed byte length covered by toks.
+func tokensByteLen(toks []token) int {
+	n := 0
+	for _, t := range toks {
+		if t.isMatch {
+			n += t.length
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// trySplitChunk attempts encoding data as 2 LZX blocks instead of 1, split
+// at the token boundary closest to the chunk's midpoint (so the split never
+// truncates a match -- matches may not cross a block boundary, see
+// decode.go's lzCopy). Each block gets its own Huffman tables (main/length,
+// and its own independent VERBATIM-vs-ALIGNED trial), with the second
+// block's tables delta-coded against the first's actual lengths (not an
+// all-zero baseline -- see writeBlockInto). Returns nil if no meaningful
+// split point exists (e.g. a single token spans the whole chunk).
+//
+// This tries exactly one split point, not a general search over every
+// possible number/position of blocks: real near-optimal encoders (e.g.
+// wimlib's) decide block splits via an iterative cost-based search across
+// many candidate boundaries, which is a substantially bigger undertaking
+// than justified here without first checking whether even one bounded
+// split point captures a meaningful share of the benefit -- see gowim's
+// own TODO.md for the measured result.
+func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
+	target := len(data) / 2
+	pos := 0
+	splitIdx := -1
+	for idx, t := range toks {
+		tl := 1
+		if t.isMatch {
+			tl = t.length
+		}
+		if pos+tl > target {
+			if target-pos <= pos+tl-target {
+				splitIdx = idx
+			} else {
+				splitIdx = idx + 1
+			}
+			break
+		}
+		pos += tl
+	}
+	if splitIdx <= 0 || splitIdx >= len(toks) {
+		return nil
+	}
+
+	first := toks[:splitIdx]
+	second := toks[splitIdx:]
+	splitByte := tokensByteLen(first)
+	if splitByte <= 0 || splitByte >= len(data) {
+		return nil
+	}
+	firstData := data[:splitByte]
+	secondData := data[splitByte:]
+
+	mainLens1, lenLens1 := buildTables(first, nMainSyms)
+	mainCodes1 := canonicalCodewords(mainLens1, maxMainCodewordLen)
+	lenCodes1 := canonicalCodewords(lenLens1, maxLenCodewordLen)
+
+	mainLens2, lenLens2 := buildTables(second, nMainSyms)
+	mainCodes2 := canonicalCodewords(mainLens2, maxMainCodewordLen)
+	lenCodes2 := canonicalCodewords(lenLens2, maxLenCodewordLen)
+
+	zeros := make([]byte, nMainSyms)
+	zerosLen := make([]byte, lenCodeNumSymbols)
+
+	// Decide VERBATIM vs ALIGNED for each block independently, using the
+	// existing standalone single-block encoder for the comparison (same
+	// byte-length comparison the whole-chunk case above already uses).
+	chooseAligned := func(blkData []byte, blkToks []token, mainLens, lenLens []byte, mainCodes, lenCodes []uint16) (bool, []byte, []uint16) {
+		v := encodeBlock(blkData, order, blkToks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+		aLens, aCodes := buildAlignedTable(blkToks)
+		a := encodeBlock(blkData, order, blkToks, mainLens, lenLens, mainCodes, lenCodes, aLens, aCodes)
+		return len(a) < len(v), aLens, aCodes
+	}
+	useAligned1, alignedLens1, alignedCodes1 := chooseAligned(firstData, first, mainLens1, lenLens1, mainCodes1, lenCodes1)
+	useAligned2, alignedLens2, alignedCodes2 := chooseAligned(secondData, second, mainLens2, lenLens2, mainCodes2, lenCodes2)
+	if !useAligned1 {
+		alignedLens1, alignedCodes1 = nil, nil
+	}
+	if !useAligned2 {
+		alignedLens2, alignedCodes2 = nil, nil
+	}
 
 	w := newBitWriter()
+	writeBlockInto(w, firstData, order, first, mainLens1, zeros, lenLens1, zerosLen, mainCodes1, lenCodes1, alignedLens1, alignedCodes1)
+	writeBlockInto(w, secondData, order, second, mainLens2, mainLens1, lenLens2, lenLens1, mainCodes2, lenCodes2, alignedLens2, alignedCodes2)
+	return w.flush()
+}
+
+// encodeBlock writes a single, standalone LZX block (VERBATIM if
+// alignedLens/alignedCodes are nil, ALIGNED otherwise) for toks against the
+// given main/length (and, for ALIGNED, aligned-offset) Huffman tables,
+// delta-coded against an all-zero "previous block" baseline. This is the
+// single-block case (compress() always uses it for whole-chunk encoding);
+// see writeBlockInto for the shared multi-block-capable core, used when
+// splitting a chunk into more than one block (see trySplitChunk).
+func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) []byte {
+	nMainSyms := numMainSyms(order)
+	zeros := make([]byte, nMainSyms)
+	zerosLen := make([]byte, lenCodeNumSymbols)
+	w := newBitWriter()
+	writeBlockInto(w, data, order, toks, mainLens, zeros, lenLens, zerosLen, mainCodes, lenCodes, alignedLens, alignedCodes)
+	return w.flush()
+}
+
+// writeBlockInto writes a single LZX block (VERBATIM if alignedLens/
+// alignedCodes are nil, ALIGNED otherwise) into an existing, possibly
+// already-in-progress bitWriter w, with codeword lengths delta-coded
+// against prevMainLens/prevLenLens -- the *actual* previous block's
+// lengths when chaining multiple blocks into one continuous bitstream (LZX
+// blocks are not byte-aligned relative to each other; only an UNCOMPRESSED
+// block realigns -- see decode.go), or an all-zero baseline for the first
+// (or only) block in a chunk.
+func writeBlockInto(w *bitWriter, data []byte, order int, toks []token, mainLens, prevMainLens, lenLens, prevLenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) {
+	nMainSyms := numMainSyms(order)
+	useAligned := alignedLens != nil
 
 	blockType := uint32(blockTypeVerbatim)
 	if useAligned {
@@ -98,13 +226,10 @@ func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte,
 		}
 	}
 
-	// Codeword length tables, delta-coded against all-zero "previous"
-	// lengths (this package always emits exactly one block per call, so
-	// there is no real previous block to delta against).
-	zeros := make([]byte, nMainSyms)
-	writeCodewordLens(w, mainLens[:numChars], zeros[:numChars])
-	writeCodewordLens(w, mainLens[numChars:], zeros[numChars:nMainSyms])
-	writeCodewordLens(w, lenLens, zeros[:lenCodeNumSymbols])
+	// Codeword length tables, delta-coded against prevMainLens/prevLenLens.
+	writeCodewordLens(w, mainLens[:numChars], prevMainLens[:numChars])
+	writeCodewordLens(w, mainLens[numChars:], prevMainLens[numChars:nMainSyms])
+	writeCodewordLens(w, lenLens, prevLenLens[:lenCodeNumSymbols])
 
 	// Literals and matches.
 	for _, t := range toks {
@@ -148,8 +273,6 @@ func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte,
 			}
 		}
 	}
-
-	return w.flush()
 }
 
 // buildAlignedTable computes the aligned-offset Huffman table (codeword

@@ -355,11 +355,12 @@ any compressed output at all.
          (itself plus the shared delta value, which is separately precode-
          encoded -- see decode.go's `readCodewordLens`, case 19, already
          implementing the read side) instead of 4-5 individual symbols.
-         Valid specifically because this package's encoder always
-         transmits codeword lengths against an all-zero "previous block"
-         baseline, so a run of equal deltas is exactly a run of equal
-         actual codeword lengths, which is what symbol 19's decode side
-         assumes. Guarded by `TestCodewordLenTokensUsesSymbol19` (direct
+         Operates purely on the already-computed delta array, so it's
+         correct regardless of what the previous-block baseline actually
+         was (all-zero for a chunk's first/only block, or the prior
+         block's real lengths for a second block -- see item 7 below,
+         which added that second case after this one was written). Guarded
+         by `TestCodewordLenTokensUsesSymbol19` (direct
          token-level check) and `TestRoundTripExercisesSymbol19Indirectly`
          (a real encode/decode round-trip on data likely to trigger it).
 
@@ -373,6 +374,61 @@ any compressed output at all.
          *identical nonzero* values back to back). Implemented anyway per
          explicit instruction to go down the full list; kept since it's
          correctness-verified and adds negligible risk or complexity.
+      7. **[x] Multi-block-per-chunk splitting (bounded, single split
+         point).** `compress()` now also tries encoding the chunk as 2 LZX
+         blocks instead of 1 (`trySplitChunk` in `encode.go`), splitting at
+         the token boundary closest to the chunk's midpoint (never inside
+         a token, since matches may not cross a block boundary -- see
+         decode.go's `lzCopy`), each block with its own independently-built
+         Huffman tables and its own VERBATIM-vs-ALIGNED trial, and keeps
+         the split only if it comes out smaller than the single-block
+         encoding. Required generalizing `encodeBlock` into a standalone
+         wrapper plus a shared `writeBlockInto` core that can write
+         multiple blocks into one continuous bitstream (LZX blocks are not
+         byte-aligned relative to each other -- only an UNCOMPRESSED block
+         realigns), with the second block's codeword-length tables
+         delta-coded against the *first* block's real lengths rather than
+         an all-zero baseline (previously this package only ever emitted
+         one block per call, so `writeCodewordLens` was always called
+         against an all-zero baseline; item 6 above was written before
+         this generalization and has been corrected to reflect it).
+
+         This tries exactly one split point, not a general search over
+         every possible number/position of blocks -- real near-optimal
+         encoders decide splits via an iterative cost-based search across
+         many candidate boundaries, a substantially bigger undertaking
+         than justified without first checking whether even one bounded
+         split point captures a meaningful share of the benefit. Guarded
+         by `TestSplitChunkRoundTrips` and
+         `TestTrySplitChunkProducesValidSplit` (deliberately mixed
+         repetitive-text/high-entropy-random data, to both exercise a real
+         split decision and confirm round-trip correctness either way).
+
+         Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+         combined with items 1-7, total dropped from 6,818,486 to
+         6,815,102 bytes -- a further, modest 0.05% reduction, roughly in
+         between items 4 and 6 in value (small, as predicted up front,
+         since most real WIM chunks don't have statistics that vary sharply
+         enough mid-chunk to be worth a second block's header overhead,
+         but not as negligible as symbol 19). Real cost: whole-file encode
+         time increased a further ~8% (~3.67s to ~3.96s) from the extra
+         per-chunk split-trial encoding work.
+
+      **Summary across all 7 items (2026-08-18):** starting from the
+      3-cause investigation's already-fixed 7,169,604 bytes, the real
+      398-chunk/12.4MB `ntoskrnl.exe` test now produces 6,815,102 bytes --
+      a cumulative 4.94% reduction from these 7 items alone (12.4%
+      smaller than the very first, unoptimized measurement), narrowing the
+      gap to wimlib's level-100 output from the original +7.7% to +2.37%.
+      Whole-file encode time grew from roughly 1s to roughly 4s across all
+      7 items combined -- a real, honestly-reported cost, still fast
+      enough in absolute terms for this project's offline debloat-tool use
+      case. The single biggest remaining lever, per items 2/4's own
+      write-ups, is a full optimal/DP parse with real repeat-offset-state
+      exploration (wimlib's `lzx_compress_near_optimal`) -- deliberately
+      not attempted here given the risk/complexity judged not worthwhile
+      relative to the diminishing returns already measured on cheaper,
+      bounded steps (items 4 and 6 in particular).
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.
