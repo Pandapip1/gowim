@@ -8,7 +8,10 @@ package lzx
 //     represent the block size, and 2^maxWindowOrder always fits);
 //   - never emits an "aligned offset" tree or an uncompressed block;
 //   - uses a simple greedy hash-chain LZ77 match finder with a bounded
-//     search depth, not an optimal parse;
+//     search depth, not an optimal parse, though it does track and prefer
+//     the repeat-offset LRU queue (see matcher.go) since that is nearly
+//     free to do in a greedy parser and a real, measured source of gowim's
+//     compression-ratio gap against wimlib (see gowim's own TODO.md);
 //   - applies the E8 call-translation filter unconditionally, exactly as
 //     real WIM encoders do (see lzx.go's WIM-vs-CAB notes), so that this
 //     package's own compressed output round-trips through a real WIM/LZX
@@ -34,7 +37,10 @@ func compress(input []byte) []byte {
 	lenFreqs := make([]uint32, lenCodeNumSymbols)
 	for _, t := range toks {
 		if t.isMatch {
-			slot := offsetSlot(uint32(t.offset))
+			slot := t.repeat
+			if slot < 0 {
+				slot = offsetSlot(uint32(t.offset))
+			}
 			lengthField := t.length - minMatchLen
 			header := lengthField
 			if header > numPrimaryLens {
@@ -83,7 +89,10 @@ func compress(input []byte) []byte {
 			w.writeBits(uint32(mainCodes[t.literal]), uint(mainLens[t.literal]))
 			continue
 		}
-		slot := offsetSlot(uint32(t.offset))
+		slot := t.repeat
+		if slot < 0 {
+			slot = offsetSlot(uint32(t.offset))
+		}
 		lengthField := t.length - minMatchLen
 		header := lengthField
 		if header > numPrimaryLens {
@@ -95,20 +104,27 @@ func compress(input []byte) []byte {
 			lsym := lengthField - numPrimaryLens
 			w.writeBits(uint32(lenCodes[lsym]), uint(lenLens[lsym]))
 		}
-		extraBits := lzxExtraOffsetBits[slot]
-		if extraBits > 0 {
-			extra := uint32(t.offset) - uint32(lzxOffsetSlotBase[slot])
-			w.writeBits(extra, uint(extraBits))
+		// Repeat-offset matches (t.repeat >= 0) need no extra offset bits:
+		// lzxExtraOffsetBits[0..2] are all 0, and the decoder reads the
+		// offset straight out of its recentOffsets queue for these slots
+		// (see decode.go) rather than from the bitstream.
+		if t.repeat < 0 {
+			extraBits := lzxExtraOffsetBits[slot]
+			if extraBits > 0 {
+				extra := uint32(t.offset) - uint32(lzxOffsetSlotBase[slot])
+				w.writeBits(extra, uint(extraBits))
+			}
 		}
 	}
 
 	return w.flush()
 }
 
-// offsetSlot returns the offset slot (>= 3, i.e. never a repeat-offset
-// slot, since this encoder never uses the repeat-offset LRU queue) whose
-// range [lzxOffsetSlotBase[slot], lzxOffsetSlotBase[slot+1]) contains
-// offset.
+// offsetSlot returns the offset slot (>= 3) whose range
+// [lzxOffsetSlotBase[slot], lzxOffsetSlotBase[slot+1]) contains a *fresh*
+// (non-repeat-offset) match offset. Repeat-offset matches (slots 0-2) are
+// resolved directly by the matcher/encoder from the recent-offsets queue and
+// never go through this function -- see token.repeat and matcher.go.
 func offsetSlot(offset uint32) int {
 	// Linear scan is fine: at most maxOffsetSlots (50) entries, called once
 	// per match.

@@ -213,6 +213,61 @@ func TestDecompressRealWIMGroundTruth(t *testing.T) {
 	}
 }
 
+// TestFindMatchesUsesRepeatOffsetQueue guards the repeat-offset (LRU queue)
+// support added to the matcher/encoder (2026-08-18, see gowim's own
+// TODO.md): a real, ground-truthed comparison against wimlib's own LZX
+// compressor found gowim's encoder producing measurably larger output on
+// real data because it never reused the LZX repeat-offset queue, paying
+// full offset-encoding cost on every match even when immediately repeating
+// the same distance. This constructs data with a distant (large offset,
+// i.e. outside the always-free slots 0-3) repeated pattern and checks that
+// matches after the first reuse a repeat-offset queue slot.
+func TestFindMatchesUsesRepeatOffsetQueue(t *testing.T) {
+	pattern := make([]byte, 4000)
+	for i := range pattern {
+		pattern[i] = byte(i * 7 % 251)
+	}
+	data := append(append([]byte{}, pattern...), pattern...)
+	data = append(data, pattern...)
+
+	toks := findMatches(data)
+	sawFreshLargeOffset := false
+	sawRepeat := false
+	for _, tok := range toks {
+		if !tok.isMatch {
+			continue
+		}
+		if tok.repeat < 0 && tok.offset >= len(pattern) {
+			sawFreshLargeOffset = true
+		}
+		if tok.repeat >= 0 {
+			sawRepeat = true
+		}
+	}
+	if !sawFreshLargeOffset {
+		t.Fatalf("expected at least one fresh match at the pattern's repeat distance")
+	}
+	if !sawRepeat {
+		t.Fatalf("expected the repeated pattern to produce repeat-offset matches")
+	}
+}
+
+// TestRoundTripRepeatOffsetPattern exercises encode/decode correctness for
+// data that should trigger heavy repeat-offset queue use (all three queue
+// slots), including offsets large enough to require extra offset bits.
+func TestRoundTripRepeatOffsetPattern(t *testing.T) {
+	a := bytes.Repeat([]byte{0x11, 0x22, 0x33, 0x44, 0x55}, 500) // distinct offset A
+	b := bytes.Repeat([]byte{0xAA, 0xBB, 0xCC, 0xDD}, 700)       // distinct offset B
+	var data []byte
+	// Interleave so the matcher must juggle multiple recent offsets (A, B,
+	// A again) rather than just reusing one.
+	for i := 0; i < 6; i++ {
+		data = append(data, a...)
+		data = append(data, b...)
+	}
+	roundTrip(t, "repeat-offset interleaved", data)
+}
+
 func TestCompressExceedsMaxWindow(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
