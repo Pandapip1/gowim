@@ -351,6 +351,42 @@ func TestTwoPassRefinementRunsWithoutPanicking(t *testing.T) {
 	roundTrip(t, "two-pass single-symbol", bytes.Repeat([]byte{0x7A}, 5000))
 }
 
+// TestAlignedBlockCanBeSmaller guards the ALIGNED-block trial added to
+// compress() (2026-08-18, see gowim's own TODO.md): the encoder now
+// encodes each chunk both as VERBATIM and ALIGNED and keeps whichever is
+// smaller. This builds a synthetic token stream of fresh matches at large
+// offsets (slot >= minAlignedOffsetSlot) whose low 3 extra-offset bits are
+// heavily skewed toward one value -- exactly the case a skewed 8-symbol
+// aligned Huffman code should beat 3 raw bits per match on -- and checks
+// encodeBlock directly produces a smaller ALIGNED encoding for it.
+func TestAlignedBlockCanBeSmaller(t *testing.T) {
+	order := 15
+	nMainSyms := numMainSyms(order)
+	var toks []token
+	slot := 20 // well above minAlignedOffsetSlot(8)
+	base := uint32(lzxOffsetSlotBase[slot])
+	for i := 0; i < 500; i++ {
+		extra := uint32(0)
+		if i%20 == 0 {
+			extra = 5 // rare outlier
+		}
+		toks = append(toks, token{isMatch: true, offset: int(base + extra), length: 10, repeat: -1})
+	}
+
+	mainLens, lenLens := buildTables(toks, nMainSyms)
+	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
+	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
+
+	data := make([]byte, defaultBlockSize) // dummy; only its length is used for the block header
+	verbatim := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+	alignedLens, alignedCodes := buildAlignedTable(toks)
+	aligned := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
+
+	if len(aligned) >= len(verbatim) {
+		t.Fatalf("expected ALIGNED encoding to be smaller for skewed low-offset-bits data: verbatim=%d aligned=%d", len(verbatim), len(aligned))
+	}
+}
+
 func TestCompressExceedsMaxWindow(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

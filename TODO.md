@@ -258,6 +258,24 @@ any compressed output at all.
          wimlib's level-100 output from +4.1% to +3.12%. Also ran an
          800-trial round-trip stress test with no failures, plus the full
          existing suite.
+      3. **[x] ALIGNED-block trial.** `compress()` now encodes each chunk
+         both as VERBATIM and ALIGNED (`encodeBlock` in `encode.go`,
+         parameterized by block type; `buildAlignedTable` computes the
+         8-symbol aligned Huffman code from the low 3 extra-offset bits of
+         every fresh match at slot >= `minAlignedOffsetSlot`) and keeps
+         whichever encodes smaller. No cost model or estimation needed here
+         -- the main/length trees are identical either way, so directly
+         comparing the two real encoded sizes is exact, not approximate.
+         Guarded by `TestAlignedBlockCanBeSmaller` (synthetic skewed-
+         low-bits data where ALIGNED provably wins).
+
+         Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+         combined with items 1-3, total dropped from 6,864,532 to
+         6,850,540 bytes (a further, smaller 0.20% reduction -- real WIM
+         content apparently doesn't have as skewed a low-offset-bit
+         distribution as the synthetic test case, so the win is modest but
+         real), narrowing the gap to wimlib's level-100 output from +3.12%
+         to +2.91%.
 
       All three are already accurately described as scope limitations in
       gowim's own package docs (`lzx.go`, `matcher.go`, `encode.go`) -- what

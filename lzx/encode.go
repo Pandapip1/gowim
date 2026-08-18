@@ -3,10 +3,11 @@ package lzx
 // compress implements this package's WIM-flavor LZX encoder. Per the scope
 // documented in lzx.go, it:
 //
-//   - always emits exactly one LZX_BLOCKTYPE_VERBATIM block per call
-//     (valid since window orders here never require more than 24 bits to
-//     represent the block size, and 2^maxWindowOrder always fits);
-//   - never emits an "aligned offset" tree or an uncompressed block;
+//   - always emits exactly one block per call (valid since window orders
+//     here never require more than 24 bits to represent the block size,
+//     and 2^maxWindowOrder always fits) -- either VERBATIM or ALIGNED,
+//     whichever encodes smaller for this chunk (see encodeBlock/
+//     buildAlignedTable below); it never emits an uncompressed block;
 //   - uses a one-step lazy hash-chain LZ77 match finder with a bounded
 //     search depth, not a full optimal/DP parse, though it does track and
 //     prefer the repeat-offset LRU queue (see matcher.go) -- both were real,
@@ -48,10 +49,38 @@ func compress(input []byte) []byte {
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
+	verbatim := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+
+	// Try an ALIGNED-offset block too: it costs 24 extra header bits (8
+	// codeword lengths for the aligned code) but replaces the low 3 raw
+	// extra-offset bits of every match at slot >= minAlignedOffsetSlot with
+	// a (possibly cheaper, since it's Huffman-coded) aligned symbol. Since
+	// the main/length trees are identical either way, simply encoding both
+	// and keeping whichever is smaller is exact and correctness-preserving
+	// -- no cost model or estimation needed, unlike the match-selection
+	// heuristics above.
+	alignedLens, alignedCodes := buildAlignedTable(toks)
+	aligned := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
+	if len(aligned) < len(verbatim) {
+		return aligned
+	}
+	return verbatim
+}
+
+// encodeBlock writes a single LZX block (VERBATIM if alignedLens/
+// alignedCodes are nil, ALIGNED otherwise) for toks against the given main/
+// length (and, for ALIGNED, aligned-offset) Huffman tables.
+func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) []byte {
+	nMainSyms := numMainSyms(order)
+	useAligned := alignedLens != nil
+
 	w := newBitWriter()
 
-	// Block header: type (VERBATIM), block size.
-	w.writeBits(blockTypeVerbatim, 3)
+	blockType := uint32(blockTypeVerbatim)
+	if useAligned {
+		blockType = blockTypeAligned
+	}
+	w.writeBits(blockType, 3)
 	if len(data) == defaultBlockSize {
 		w.writeBits(1, 1)
 	} else {
@@ -60,6 +89,12 @@ func compress(input []byte) []byte {
 			w.writeBits(uint32(len(data)), 24)
 		} else {
 			w.writeBits(uint32(len(data)), 16)
+		}
+	}
+
+	if useAligned {
+		for _, l := range alignedLens {
+			w.writeBits(uint32(l), alignedCodeElementSize)
 		}
 	}
 
@@ -97,15 +132,48 @@ func compress(input []byte) []byte {
 		// offset straight out of its recentOffsets queue for these slots
 		// (see decode.go) rather than from the bitstream.
 		if t.repeat < 0 {
-			extraBits := lzxExtraOffsetBits[slot]
+			extraBits := int(lzxExtraOffsetBits[slot])
 			if extraBits > 0 {
 				extra := uint32(t.offset) - uint32(lzxOffsetSlotBase[slot])
-				w.writeBits(extra, uint(extraBits))
+				if useAligned && slot >= minAlignedOffsetSlot {
+					rawBits := extraBits - numAlignedOffsetBits
+					if rawBits > 0 {
+						w.writeBits(extra>>numAlignedOffsetBits, uint(rawBits))
+					}
+					asym := extra & (alignedCodeNumSymbols - 1)
+					w.writeBits(uint32(alignedCodes[asym]), uint(alignedLens[asym]))
+				} else {
+					w.writeBits(extra, uint(extraBits))
+				}
 			}
 		}
 	}
 
 	return w.flush()
+}
+
+// buildAlignedTable computes the aligned-offset Huffman table (codeword
+// lengths and codes for the low numAlignedOffsetBits bits of every fresh
+// match's extra offset value, at slots >= minAlignedOffsetSlot) from toks'
+// symbol frequencies. Repeat-offset matches never reach an aligned slot
+// (their slots are always 0-2, well below minAlignedOffsetSlot), so only
+// fresh matches contribute.
+func buildAlignedTable(toks []token) (lens []byte, codes []uint16) {
+	freqs := make([]uint32, alignedCodeNumSymbols)
+	for _, t := range toks {
+		if !t.isMatch || t.repeat >= 0 {
+			continue
+		}
+		slot := offsetSlot(uint32(t.offset))
+		if slot < minAlignedOffsetSlot {
+			continue
+		}
+		extra := uint32(t.offset) - uint32(lzxOffsetSlotBase[slot])
+		freqs[extra&(alignedCodeNumSymbols-1)]++
+	}
+	lens = buildLengths(freqs, maxAlignedCodewordLen)
+	codes = canonicalCodewords(lens, maxAlignedCodewordLen)
+	return lens, codes
 }
 
 // buildTables computes main/length Huffman codeword lengths from toks'

@@ -80,10 +80,14 @@
 //   - Compression-ratio or match-finding optimality. The encoder uses a
 //     one-step lazy LZ77 match finder (hash-chain based, bounded search
 //     depth, plus a direct check of the repeat-offset LRU queue -- see
-//     lzx/matcher.go) and always emits LZX_BLOCKTYPE_VERBATIM blocks -- it
-//     never builds or emits an "aligned offset" Huffman tree, nor an
-//     uncompressed block, nor does it use a full optimal/DP parse or an
-//     iterative bit-cost model. This is a valid, spec-compliant subset (block
+//     lzx/matcher.go) and always emits exactly one block per call, either
+//     LZX_BLOCKTYPE_VERBATIM or LZX_BLOCKTYPE_ALIGNED (whichever a same-
+//     tokens trial encoding of each comes out smaller as -- see encode.go's
+//     encodeBlock/buildAlignedTable) -- it never emits an uncompressed
+//     block, nor does it use a full optimal/DP parse or an iterative
+//     bit-cost model (beyond the two-pass Huffman-informed re-parse in
+//     compress(), which is not the same as a full iterative optimizer).
+//     This is a valid, spec-compliant subset (block
 //     type is signaled per-block, and wimlib's own compressor already
 //     demonstrates that a real decoder must accept an all-verbatim stream)
 //     that a compliant decoder, including wimlib, must decode correctly;
