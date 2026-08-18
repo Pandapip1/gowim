@@ -31,13 +31,20 @@ import "sort"
 //
 // What this function still does NOT do, unlike wimlib's real algorithm:
 // relax every possible match length (it samples a bounded subset instead
-// -- see repeatLengthSamples/maxFreshCandidates below), fold ALIGNED-block
-// costs into the cost model inline, or run more than the two refinement
-// passes compress() already performs. A real attempt was made at all
-// three (2026-08-18) and measured to make real output *worse*, not
-// better, on gowim's own real-file benchmark -- see gowim's own TODO.md
-// for the measured numbers and the (plausible, not fully proven)
-// explanation, and for why they were reverted rather than kept.
+// -- see repeatLengthSamples/maxFreshCandidates below). Folding
+// ALIGNED-block costs into the cost model inline and running more than a
+// fixed two refinement passes were both tried and initially reverted
+// (2026-08-18) after measuring a real regression -- but that regression
+// turned out to be a real bug in costModel.matchCost/offsetExtraCost (a
+// zero-frequency symbol's codeword length of 0 was being read as "0 bits,
+// free" instead of "not yet encodable"), not a property of these
+// techniques themselves. With that fixed, both are now used: see
+// costModel.offsetExtraCost (matcher.go) and refineParseWith
+// (encode.go), which this function is now run through just like
+// findMatches. Native length-2 (hash2) fresh-match candidates -- see
+// hash2Candidate/buildHash2PrevOcc in matcher.go -- are also offered as
+// DP edges here, not only in findMatches. See gowim's own TODO.md for the
+// full investigation and measured numbers.
 //
 // # Bounded edge and state counts
 //
@@ -52,6 +59,10 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	if n == 0 {
 		return nil
 	}
+
+	order, _ := windowOrder(n) // n > 0 here, and callers never exceed maxWindowSize
+	nMainSyms := numMainSyms(order)
+	prevOcc2 := buildHash2PrevOcc(data)
 
 	head := make([]int32, hashSize)
 	for i := range head {
@@ -90,8 +101,14 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	// the DP considers per position (beyond this, only the longest
 	// candidates are kept -- see bstSearchAll), keeping worst-case DP edge
 	// count bounded regardless of how many non-dominated candidates a
-	// pathological input could otherwise produce.
-	const maxFreshCandidates = 8
+	// pathological input could otherwise produce. Widened from 8 to 24
+	// (2026-08-18, alongside beamWidth below) after measuring a real,
+	// if modest, improvement on the full ntoskrnl.exe benchmark (see
+	// gowim's own TODO.md) -- found while investigating why gowim still
+	// trailed wimlib's real encoder despite its match discovery being
+	// verified non-worse; this alone was not the dominant cause (see the
+	// same TODO.md entry for what was).
+	const maxFreshCandidates = 24
 
 	// bstSearchAll walks the BST rooted at head[hash(pos)] exactly as
 	// bstSearch does (matcher.go), but instead of keeping only the single
@@ -160,7 +177,7 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	// each position. A higher-cost arrival is kept only if it carries a
 	// queue state not already covered by a cheaper arrival, and only if
 	// it's among the beamWidth cheapest such distinct-queue arrivals.
-	const beamWidth = 4
+	const beamWidth = 10
 
 	// dpEdge records how one state at one position was reached: either a
 	// literal (isMatch false) or a match, plus the predecessor position
@@ -259,6 +276,22 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 		freshCands := bstSearchAll(i)
 		litCost := literalCost(data[i])
 
+		// hash2 candidate (native, see matcher.go's hash2Candidate/
+		// buildHash2PrevOcc doc): a length-2 fresh match, offered as one
+		// more DP edge alongside the length>=3 freshCands above, rather
+		// than an ex-post splice against an already-fixed table. Its
+		// (offset, slot) don't depend on which beam state is relaxing
+		// from position i, so this is computed once per position, not
+		// once per state.
+		hash2Offset, hash2OK := -1, false
+		if q := prevOcc2[i]; q >= 0 {
+			off2 := i - int(q)
+			slot2 := offsetSlot(uint32(off2))
+			if numChars+slot2*numLenHeaders < nMainSyms {
+				hash2Offset, hash2OK = off2, true
+			}
+		}
+
 		for si, s := range cur {
 			mergeState(i+1, s.cost+litCost, s.queue, dpEdge{literal: data[i], repeat: -1, from: i, fromState: si})
 
@@ -288,6 +321,14 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 				c := model.matchCost(slot, cand.length) + extraBits
 				nq := applyMatch(s.queue, -1, cand.offset)
 				mergeState(i+cand.length, s.cost+c, nq, dpEdge{isMatch: true, offset: cand.offset, length: cand.length, repeat: -1, from: i, fromState: si})
+			}
+
+			if hash2OK {
+				slot2 := offsetSlot(uint32(hash2Offset))
+				extraBits2 := model.offsetExtraCost(slot2, hash2Offset)
+				c2 := model.matchCost(slot2, minMatchLen) + extraBits2
+				nq2 := applyMatch(s.queue, -1, hash2Offset)
+				mergeState(i+minMatchLen, s.cost+c2, nq2, dpEdge{isMatch: true, offset: hash2Offset, length: minMatchLen, repeat: -1, from: i, fromState: si})
 			}
 		}
 

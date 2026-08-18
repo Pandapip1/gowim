@@ -691,29 +691,21 @@ func TestCompressExceedsMaxWindow(t *testing.T) {
 // reasonable buffer size), this has little enough redundancy that most
 // bytes become individual literal observations, closer to real English
 // text's own token density.
-// TestGreedyHash2RoundTrips guards a real corruption bug found and fixed
-// while building greedyApplyHash2 (hash2greedy.go, 2026-08-18): splicing a
-// new length-2 match token into the middle of an existing token stream
-// shifts the repeat-offset LRU queue's contents at every later position
-// (every match, fresh or repeat, updates the queue -- see matcher.go's
-// applyMatch), so a later token's `repeat` field, chosen by the original
-// parse against the *original* queue trajectory, can silently reference
-// the wrong offset once perturbed by an inserted hash2 match. This first
-// showed up as 2 of 398 real-world 32768-byte chunks (from a real
-// ntoskrnl.exe) decoding without error to the *wrong* bytes -- exactly the
-// kind of silent corruption a compressed-size-only benchmark can't catch
-// (see gowim's own TODO.md's standing methodology lesson on this). Fixed
-// by fixupQueueState, which re-derives every match's repeat field from the
-// actual resulting queue trajectory rather than trusting the original
-// parse's classification.
+// TestGreedyHash2RoundTrips round-trips a real-world chunk that originally
+// exposed a queue-perturbation corruption bug in this package's first,
+// now-removed hash2 implementation (an ex-post token-splice pass,
+// hash2greedy.go, replaced 2026-08-18 by native length-2 candidates in
+// findMatches/findMatchesOptimal themselves -- see matcher.go's
+// hash2Candidate/buildHash2PrevOcc and gowim's own TODO.md). That specific
+// bug class (a spliced-in match perturbing the repeat-offset queue for
+// later tokens chosen under a stale trajectory) cannot recur now that
+// hash2 candidates are evaluated inline by the same parse that already
+// tracks queue state correctly for every token -- but this real chunk
+// remains a useful general round-trip regression fixture regardless.
 //
-// testdata/hash2_greedy_chunk1.bin is the actual real-world chunk this bug
-// was found on: byte offset 6455296 (chunk 197 of 398) of a real 12.4MB
-// ntoskrnl.exe extracted from a real boot.wim during this package's
-// wimlib-comparison investigation (see gowim's own TODO.md) -- confirmed to
-// round-trip incorrectly (no decode error, just wrong output bytes)
-// without fixupQueueState, and correctly with it, so this is a genuine
-// regression fixture, not a synthetic guess at the failure mode.
+// testdata/hash2_greedy_chunk1.bin: byte offset 6455296 (chunk 197 of 398)
+// of a real 12.4MB ntoskrnl.exe extracted from a real boot.wim during this
+// package's wimlib-comparison investigation (see gowim's own TODO.md).
 func TestGreedyHash2RoundTrips(t *testing.T) {
 	data, err := os.ReadFile("testdata/hash2_greedy_chunk1.bin")
 	if err != nil {
@@ -735,12 +727,21 @@ func TestGreedyHash2RoundTrips(t *testing.T) {
 // of the window referencing the window's first two bytes), but
 // numOffsetSlots/numMainSyms (lzx.go) size the main-symbol alphabet
 // assuming the smallest match ever encoded is length minMatch=3 (the
-// normal fresh-match finder's own floor), whose largest possible offset is
-// only windowSize-3 -- one slot short of what a length-2 candidate can
-// reach. On an exactly-power-of-two-sized chunk (the routine case for
-// 32768-byte WIM chunks), this produced a genuine out-of-range index into
-// the main Huffman-length table. Fixed in findHash2Candidates by rejecting
-// any candidate whose computed main symbol doesn't fit within nMainSyms.
+// normal length>=3 fresh-match finder's own floor), whose largest possible
+// offset is only windowSize-3 -- one slot short of what a length-2
+// candidate can reach. On an exactly-power-of-two-sized chunk (the
+// routine case for 32768-byte WIM chunks), this produced a genuine
+// out-of-range index into the main Huffman-length table.
+//
+// This is not actually an encoder oversight to work around: confirmed
+// directly from wimlib's real lzx_get_num_main_syms (src/lzx_common.c)
+// that the LZX format itself explicitly disallows this exact case (a
+// length-2 match at the window's maximum possible offset), specifically
+// so the offset-slot table can be one slot smaller. Fixed (originally in
+// the now-removed findHash2Candidates, now in matcher.go's
+// hash2Candidate, used natively by both findMatches and
+// findMatchesOptimal) by rejecting any candidate whose computed main
+// symbol doesn't fit within nMainSyms.
 func TestHash2BoundaryOffsetDoesNotCrash(t *testing.T) {
 	n := 32768
 	r := rand.New(rand.NewSource(1))

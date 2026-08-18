@@ -58,6 +58,20 @@ type costModel struct {
 // (and secondary length symbol, if needed), NOT including extra offset
 // bits (the caller adds those separately, since they depend only on the
 // offset slot, not on any Huffman table).
+//
+// A real codeword length of 0 means "this symbol has no codeword at all in
+// the current table" (buildLengths' documented behavior for zero-frequency
+// symbols -- see huffman.go), not "this symbol is free": using it, once
+// this round's table becomes final, would cost whatever bits the *next*
+// real rebuild assigns it, not zero. Treating a 0 as a real, usable cost
+// (a bug found and fixed 2026-08-18 -- see gowim's own TODO.md) made every
+// brand-new main symbol -- most consequentially, a freshly-introduced
+// length-2 hash2 offset slot that had zero frequency in the previous
+// round's table -- look artificially, wrongly free, causing exactly the
+// kind of runaway over-selection that made native hash2 integration
+// regress the real benchmark until this was caught. literalCost (below)
+// already guarded against the identical situation for literal symbols;
+// this function did not, for either the main or secondary length symbol.
 func (m costModel) matchCost(slot, length int) int {
 	lengthField := length - minMatchLen
 	header := lengthField
@@ -67,7 +81,9 @@ func (m costModel) matchCost(slot, length int) int {
 	mainBits := flatMainBits
 	if m.mainLens != nil {
 		mainSym := numChars + slot*numLenHeaders + header
-		mainBits = int(m.mainLens[mainSym])
+		if c := int(m.mainLens[mainSym]); c > 0 {
+			mainBits = c
+		}
 	}
 	if header != numPrimaryLens {
 		return mainBits
@@ -75,7 +91,9 @@ func (m costModel) matchCost(slot, length int) int {
 	lenBits := flatLenBits
 	if m.lenLens != nil {
 		lsym := lengthField - numPrimaryLens
-		lenBits = int(m.lenLens[lsym])
+		if c := int(m.lenLens[lsym]); c > 0 {
+			lenBits = c
+		}
 	}
 	return mainBits + lenBits
 }
@@ -122,7 +140,15 @@ func (m costModel) offsetExtraCost(slot, offset int) int {
 	}
 	extra := uint32(offset) - uint32(lzxOffsetSlotBase[slot])
 	asym := extra & (alignedCodeNumSymbols - 1)
-	return (extraBits - numAlignedOffsetBits) + int(m.alignedLens[asym])
+	// Same zero-means-unencoded-not-free fix as matchCost above: a real
+	// codeword length of 0 for this aligned symbol means it has no
+	// codeword yet, not that it's free, so fall back to the raw-bits cost
+	// rather than reading it as 0.
+	alignedBits := numAlignedOffsetBits
+	if c := int(m.alignedLens[asym]); c > 0 {
+		alignedBits = c
+	}
+	return (extraBits - numAlignedOffsetBits) + alignedBits
 }
 
 // matchValue estimates how many bits a match of the given slot/length/
@@ -166,6 +192,77 @@ func applyMatch(q [numRecentOffsets]int32, repeat, offset int) [numRecentOffsets
 	return q
 }
 
+// buildHash2PrevOcc precomputes, for every position p in data, the most
+// recent EARLIER position with the same 2-byte value at data[p:p+2] (or -1
+// if none), via a direct 65536-entry table keyed by the exact 2-byte value
+// (not a lossy hash, since a 2-byte pair has exactly 65536 possible
+// values). Shared by findMatches and findMatchesOptimal to make length-2
+// fresh matches ("hash2" opportunities -- wimlib's own bt_matchfinder.h
+// uses the same technique, a single-slot most-recent-occurrence table) a
+// candidate the main parse itself weighs against every other option every
+// round, rather than an ex-post splice against an already-built Huffman
+// table. An earlier version of this package (hash2greedy.go, removed
+// 2026-08-18 -- see gowim's own TODO.md) tried the splice approach and
+// found it could only ever accept a small fraction of a chunk's real
+// length-2 opportunities: introducing any previously-zero-frequency
+// symbol into a table that was already optimized without it is
+// expensive by construction (a real Kraft-inequality effect, not a
+// modeling bug), so the splice's own greedy MC>MB rule correctly
+// rejected almost everything, unlike wimlib's real encoder, which treats
+// length-2 matches as first-class from its very first pass.
+//
+// Unlike the length>=3 BST match finder, this needs no incremental
+// insertion as the parse advances: byte VALUES never change based on
+// which tokens get chosen, so the whole table can be computed once, up
+// front, from data alone.
+func buildHash2PrevOcc(data []byte) []int32 {
+	n := len(data)
+	lastPos := make([]int32, 1<<16)
+	for i := range lastPos {
+		lastPos[i] = -1
+	}
+	prevOcc := make([]int32, n)
+	for i := range prevOcc {
+		prevOcc[i] = -1 // the last position (p+1 == n) is never assigned by the loop below
+	}
+	for p := 0; p+1 < n; p++ {
+		key := uint16(data[p]) | uint16(data[p+1])<<8
+		prevOcc[p] = lastPos[key]
+		lastPos[key] = int32(p)
+	}
+	return prevOcc
+}
+
+// hash2Candidate returns the length-2 fresh-match candidate at position i
+// (prevOcc2[i]'s offset), or the zero value if none exists or if its
+// offset would need a main-code symbol beyond nMainSyms. That specific
+// boundary case (offset == windowSize-2, the maximum possible for a
+// length-2 match) is not a bug to work around: the LZX format itself
+// explicitly disallows it, precisely so the offset-slot table can be one
+// slot smaller -- confirmed directly from wimlib's real
+// lzx_get_num_main_syms (src/lzx_common.c), whose own comment states this
+// outright ("the format disallows this case[,] reduc[ing] the number of
+// needed offset slots by 1").
+func hash2Candidate(prevOcc2 []int32, model costModel, litPrefix []int, nMainSyms int, i int) candidateMatch {
+	q := prevOcc2[i]
+	if q < 0 {
+		return candidateMatch{}
+	}
+	offset := i - int(q)
+	slot := offsetSlot(uint32(offset))
+	if numChars+slot*numLenHeaders >= nMainSyms {
+		return candidateMatch{}
+	}
+	extraBits := model.offsetExtraCost(slot, offset)
+	return candidateMatch{
+		found:  true,
+		offset: offset,
+		length: minMatchLen,
+		repeat: -1,
+		value:  model.matchValue(slot, minMatchLen, extraBits, litPrefix[i+minMatchLen]-litPrefix[i]),
+	}
+}
+
 // findMatches runs a bounded 3-way lookahead LZ77 parse over data using a
 // binary-tree match finder for fresh offsets, plus a direct check of the
 // LZX repeat-offset LRU queue (the three most recently used match offsets)
@@ -205,6 +302,10 @@ func findMatches(data []byte, model costModel) []token {
 	if n == 0 {
 		return toks
 	}
+
+	order, _ := windowOrder(n) // n > 0 here, and callers never exceed maxWindowSize
+	nMainSyms := numMainSyms(order)
+	prevOcc2 := buildHash2PrevOcc(data)
 
 	head := make([]int32, hashSize)
 	for i := range head {
@@ -377,13 +478,24 @@ func findMatches(data []byte, model costModel) []token {
 		return candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: model.matchValue(slot, bestLen, extraBits, litPrefix[i+bestLen]-litPrefix[i])}
 	}
 
-	// chooseMatch finds the single best-value candidate (repeat or fresh)
-	// at position i, or the zero value if neither is worth using over a
+	bestFreshCandidate2 := func(i int) candidateMatch {
+		if i+minMatchLen > n {
+			return candidateMatch{}
+		}
+		return hash2Candidate(prevOcc2, model, litPrefix, nMainSyms, i)
+	}
+
+	// chooseMatch finds the single best-value candidate (repeat or fresh,
+	// including length-2 fresh matches via bestFreshCandidate2) at
+	// position i, or the zero value if none is worth using over a
 	// literal.
 	chooseMatch := func(i int, queue [numRecentOffsets]int32) candidateMatch {
 		best := bestRepeatCandidate(i, queue)
 		if fresh := bestFreshCandidate(i); fresh.found && (!best.found || fresh.value > best.value) {
 			best = fresh
+		}
+		if fresh2 := bestFreshCandidate2(i); fresh2.found && (!best.found || fresh2.value > best.value) {
+			best = fresh2
 		}
 		if best.found && best.value <= 0 {
 			return candidateMatch{}
@@ -407,13 +519,16 @@ func findMatches(data []byte, model costModel) []token {
 		return chooseMatch(pos, q).value
 	}
 
-	// Bounded 3-way lookahead: at each position, evaluate the best repeat
-	// candidate, the best fresh candidate, and "emit a literal", each
-	// combined with its own 1-step continuation value (continuationValue
-	// above, itself a single non-recursive chooseMatch call, so this stays
-	// a fixed depth-2 evaluation, never a full whole-chunk search) --
-	// then commit whichever option has the highest 2-step total. This is
-	// a deliberately bounded generalization of one-step lazy matching
+	// Bounded 4-way lookahead: at each position, evaluate the best repeat
+	// candidate, the best length>=3 fresh candidate, the best length-2
+	// fresh candidate (bestFreshCandidate2 -- see its own doc for why
+	// this needs to be a native option here rather than an ex-post
+	// splice), and "emit a literal", each combined with its own 1-step
+	// continuation value (continuationValue above, itself a single
+	// non-recursive chooseMatch call, so this stays a fixed depth-2
+	// evaluation, never a full whole-chunk search) -- then commit
+	// whichever option has the highest 2-step total. This is a
+	// deliberately bounded generalization of one-step lazy matching
 	// (which only ever compared a single pre-selected best candidate
 	// against "literal, then re-decide"): here, taking the repeat
 	// candidate now (even if its own immediate value is lower than the
@@ -435,9 +550,12 @@ func findMatches(data []byte, model costModel) []token {
 	for i < n {
 		rep := bestRepeatCandidate(i, queue)
 		fresh := bestFreshCandidate(i)
+		fresh2 := bestFreshCandidate2(i)
 		// bestFreshCandidate (via bstSearch) must run before bstInsert(i):
 		// inserting i's own tree entry first would let it match against
-		// itself at offset 0.
+		// itself at offset 0. bestFreshCandidate2 doesn't use the BST at
+		// all (see buildHash2PrevOcc), so ordering relative to bstInsert
+		// doesn't matter for it.
 		bstInsert(i)
 
 		var best lookaheadOption
@@ -455,6 +573,9 @@ func findMatches(data []byte, model costModel) []token {
 		}
 		if fresh.found && fresh.value > 0 {
 			consider(lookaheadOption{cand: fresh, total: fresh.value + continuationValue(i+fresh.length, applyMatch(queue, fresh.repeat, fresh.offset))})
+		}
+		if fresh2.found && fresh2.value > 0 {
+			consider(lookaheadOption{cand: fresh2, total: fresh2.value + continuationValue(i+fresh2.length, applyMatch(queue, fresh2.repeat, fresh2.offset))})
 		}
 
 		if !best.cand.found {

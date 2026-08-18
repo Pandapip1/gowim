@@ -1129,6 +1129,110 @@ any compressed output at all.
       reasoned improvement applied to the wrong (already-losing) parse
       path measures as nearly a no-op, exactly what happened here for
       most of today's earlier work before this was found.
+- [x] **Found and fixed refineParseWith's own non-monotonic-convergence
+      bug, then made hash2 fully native (replacing the ex-post splice
+      entirely) and, in doing so, found and fixed a real cost-model bug
+      that -- once fixed -- closed the rest of the gap to wimlib entirely
+      (2026-08-18, same day, continuing the investigation above).**
+
+      **Part A: `refineParseWith` was stopping too early.** Instrumenting
+      round-by-round encoded size across real chunks found the sequence is
+      NOT monotonic: it can regress for several consecutive rounds and
+      then recover to a new true best later (one sampled chunk's true best
+      over 12 rounds only appeared on round 12, after 3 and then 5
+      consecutive non-improving rounds). The original "stop at the first
+      non-improving round" policy measurably left real gains on the table:
+      926 bytes lost across just 12 sampled chunks compared to tracking
+      the true global best over more rounds. Fixed with a patience-based
+      stopping rule (keep going as long as recent rounds keep failing to
+      beat the *global* best, not just the immediately preceding round)
+      plus an explicit fixed-point/cycle detector (`tokensFingerprint`,
+      an FNV-1a hash of a round's full token sequence -- an exact repeat
+      of any earlier round's output proves every later round will just
+      replay the same cycle forever, so stop immediately rather than
+      burning the full patience/hard-cap budget for nothing). Swept
+      `refinePatience` directly: 2 captured 86% of the gain available
+      from going all the way to 6, at ~1.6x the time cost vs. 6's ~4.7x --
+      kept 2, with a generous (rarely-hit) `maxRefineItersHardCap = 32`
+      safety ceiling, since there's no proof this iteration is guaranteed
+      to reach a true fixed point on every input.
+
+      **Part B: went back to wimlib's real match usage and found gowim
+      was still radically under-using hash2, at the user's direction ("the
+      problem is that we aren't using them when we need to").** Decoded
+      wimlib's *actual* compressed output for several real chunks with
+      gowim's own (already-verified-correct) decoder, position by
+      position, and directly diffed the resulting token streams against
+      gowim's own. The result was unambiguous: the overwhelming majority
+      of divergences were length-2 matches wimlib used and gowim didn't
+      (783 vs. 112 the other way, for one representative chunk). Checked
+      whether `greedyApplyHash2` (the ex-post splice from the earlier
+      entry) was even trying: it found 2,291 real candidates in that same
+      chunk, accepted only 31, and even those 31 made the encoding
+      *worse* -- confirmed across an 11-chunk sample (thousands of
+      candidates each, single-digit-percent acceptance, net negative in
+      most chunks). Root cause: introducing any previously-zero-frequency
+      symbol into an *already-built* Huffman table is expensive by
+      construction (Kraft-inequality reallocation), so a post-hoc splice
+      against a fixed table can never compete with a native encoder that
+      treats length-2 matches as first-class from its first pass, the way
+      wimlib's real encoder does.
+
+      **Replaced the splice with native support.** Deleted
+      `hash2greedy.go` entirely (`greedyApplyHash2`, `findHash2Candidates`,
+      `fixupQueueState`) and added length-2 fresh-match candidates directly
+      to both parsers: `buildHash2PrevOcc` (matcher.go) precomputes, for
+      every position, the most recent earlier occurrence of the same
+      2-byte value (an exact 65536-entry table, needing no incremental
+      update since byte values never change based on which tokens get
+      chosen -- unlike the length>=3 BST, which does need per-position
+      insertion). `findMatches`' bounded lookahead gained a 4th candidate
+      (`bestFreshCandidate2`) alongside repeat/fresh-length>=3/literal;
+      `findMatchesOptimal`'s DP gained a matching edge per position,
+      relaxed once per beam state. Also confirmed directly from wimlib's
+      real `lzx_get_num_main_syms` (`src/lzx_common.c`) that a length-2
+      match's one edge-case offset (`windowSize-2`, one slot beyond what
+      `numOffsetSlots` sizes for) is not an oversight to patch around but
+      an explicit LZX format restriction -- its own comment states outright
+      that the format disallows this exact case specifically so the
+      offset-slot table can be one slot smaller. Guarded for it
+      (`hash2Candidate` rejects any candidate whose main symbol doesn't
+      fit `nMainSyms`) with a permanent regression test reproducing the
+      exact boundary crash a review agent's fuzz run had separately found
+      in the (now-deleted) splice version.
+
+      **This measurably regressed the full benchmark at first: 6,709,290
+      -> 6,738,762 bytes, and 1.6x slower.** Prompted directly by the user
+      ("exploring more options should not result in a regression"): a
+      *true* optimal solver can't get worse by gaining legal moves, since
+      the old solution stays reachable -- so this had to be a real bug in
+      the approximate optimizer, not an inherent property of having more
+      candidates. Found it: `costModel.matchCost` read a real Huffman
+      codeword length of `0` (buildLengths' documented meaning: "this
+      symbol has no codeword in the current table") as if it meant "this
+      symbol costs 0 bits" -- i.e. free -- instead of falling back to the
+      flat estimate the way `literalCost` already correctly did for the
+      identical situation. Every brand-new length-2 offset slot (zero
+      frequency in whatever round's table was active) looked artificially
+      free the instant it was considered, causing exactly the kind of
+      runaway over-selection observed. `costModel.offsetExtraCost` had the
+      identical bug for aligned-code symbols. Fixed both (fall back to
+      the flat/raw-bits estimate whenever the real length is 0, matching
+      `literalCost`'s existing pattern) -- this was the actual, correct
+      fix, not a workaround: no on/off toggle or dual-parse safety net was
+      needed once the cost function itself was correct.
+
+      **Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test,
+      decoding every chunk: 0 corrupted chunks, 6,653,212 bytes -- smaller
+      than wimlib's own real level-100 output (6,657,082 bytes) on this
+      file, by about 3,870 bytes (~0.06%).** This is the first point in
+      the whole investigation where gowim's pure-Go encoder has matched or
+      beaten wimlib's real compiled one on this benchmark, closing what
+      was a real, measured, verified gap. Cost: native hash2 costs real
+      time (94s -> 225s for the full benchmark, on top of all the earlier
+      iteration/beam-width costs), since both parsers now do meaningfully
+      more work per round; not yet tuned for speed given the ratio result
+      was the more urgent question to settle.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.

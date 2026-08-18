@@ -94,18 +94,44 @@ func compress(input []byte) []byte {
 	return best
 }
 
-// maxRefineIters bounds refineParse's extra re-parse rounds beyond the
-// original pass 2 (see refineParse's own doc for why this is a fixed-point
-// iteration expected to converge quickly, not an open-ended search).
-// Measured on the real 398-chunk ntoskrnl.exe benchmark (see gowim's own
-// TODO.md): chunks use an average of well under 1 of these rounds before
-// converging (a round that doesn't measurably help stops iteration
-// immediately), so this cap is rarely fully exhausted in practice -- but
-// every round, converging or not, costs one more full findMatches call,
-// roughly doubling compressLookahead's own real-world time cost end to
-// end (since a chunk that doesn't improve still pays for the one round
-// that checked).
-const maxRefineIters = 4
+// refinePatience bounds how many *consecutive* non-improving rounds
+// refineParseWith tolerates before giving up, rather than a flat round
+// count: measured directly on real chunks, most converge (or fail to ever
+// improve at all) within the first round or two, but a real minority
+// oscillate -- regressing for several consecutive rounds before recovering
+// to a new overall best (one sampled real chunk's true best over 12 rounds
+// only appeared on round 12, after 3 and then 5 consecutive non-improving
+// rounds). A flat round cap either wastes rounds on the common
+// fast-converging case or cuts the rare oscillating case off too early;
+// patience against the *global* best (not just the immediately preceding
+// round) costs ~1 extra round in the common case while still letting a
+// slow-recovering chunk keep going. See refineParseWith's own doc for why
+// stopping at the first non-improving round (this package's original
+// policy) measurably left real gains on the table (see gowim's own
+// TODO.md for the 926-byte loss found across just 12 sampled chunks).
+//
+// 2, not a larger value like 6, after directly measuring the tradeoff on
+// the same 12-chunk sample: patience=2 captured 828 of the 964 bytes
+// gained going from patience=1 to patience=6 (86%) at only ~1.6x
+// patience=1's time cost, whereas patience=6 cost ~4.7x for the remaining
+// 14% -- steeply diminishing returns past 2. On the full 398-chunk
+// benchmark, patience=6 measured a real full-benchmark wall-time cost of
+// 61s -> 234s (~3.8x) for a further 5,436-byte gain over the
+// beam-widened baseline -- too steep a trade to keep as the default.
+const refinePatience = 2
+
+// maxRefineItersHardCap is an absolute safety ceiling on refineParseWith's
+// total rounds, independent of refinePatience: there is no proof this
+// iteration is guaranteed to ever settle into a true fixed point (each
+// round's table is built from a discrete re-parse, not a continuous
+// process), so an unconditionally patience-only loop could in principle
+// run indefinitely on a pathological input that keeps finding ever-more-
+// delayed improvements. This bounds worst-case cost regardless -- with
+// refinePatience now at 2, this ceiling is rarely relevant in practice
+// (it would take a chunk finding a new best every third round, sustained
+// for 32 rounds straight, to ever reach it) but is kept generous since it
+// costs nothing unless actually hit.
+const maxRefineItersHardCap = 32
 
 // refineParse runs findMatches through refineParseWith below -- see that
 // function's doc for the actual iteration logic. Factored out from
@@ -128,10 +154,10 @@ func refineParse(data []byte, order, nMainSyms int, initial costModel) (toks []t
 //
 // Originally this only wrapped findMatches (see gowim's own TODO.md for
 // why: the "rebuild the real table, don't trust a stale one" lesson from
-// hash2greedy.go's greedy splice generalizes to full matches via iterated
-// re-parsing rather than a local candidate-accept step, since general
-// match candidates overlap their neighbors arbitrarily). It was widened
-// to take the parse function as a parameter after measuring, on the real
+// an earlier hash2 ex-post-splice attempt generalizes to full matches via
+// iterated re-parsing rather than a local candidate-accept step, since
+// general match candidates overlap their neighbors arbitrarily). It was
+// widened to take the parse function as a parameter after measuring, on the real
 // 398-chunk ntoskrnl.exe benchmark, that findMatchesOptimal's DP actually
 // wins (produces the smaller encoding) on 346 of 398 chunks -- i.e. most
 // of this encoder's real-world output was coming from the *unrefined*
@@ -148,41 +174,94 @@ func refineParse(data []byte, order, nMainSyms int, initial costModel) (toks []t
 // (CONSIDER_ALIGNED_COSTS in its src/lzx_compress.c).
 //
 // Each round's real encoded byte count is measured directly (encodeBlock,
-// not the token-implied estimate), and iteration stops as soon as a round
-// fails to beat the previous best -- both because further rounds rarely
-// help once the table has converged, and because this keeps the same
-// "try both, keep smaller" safety property as everywhere else in this
-// encoder: a round that doesn't measurably help is simply discarded,
-// never trusted on the strength of its own re-parse alone.
+// not the token-implied estimate). Unlike an earlier version of this
+// function, iteration does NOT stop at the first round that fails to beat
+// the current best: measured directly on real chunks, the per-round size
+// is not monotonic -- it can regress for several consecutive rounds and
+// then recover to a new true best later (see refinePatience's own doc for
+// the measured example). Every round still chains from the *previous*
+// round's own resulting table, whether or not that round was itself an
+// improvement -- that chaining, not resetting to the best-so-far's table
+// after a bad round, is what lets the sequence recover in the first
+// place. The best result seen across all attempted rounds (which may
+// not be the last one) is what's returned, keeping the same "try both,
+// keep smaller" safety property as everywhere else in this encoder.
 func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse func([]byte, costModel) []token) (toks []token, mainLens, lenLens []byte, encoded []byte) {
 	bestToks := parse(data, initial)
 	bestMainLens, bestLenLens := buildTables(bestToks, nMainSyms)
 	bestEncoded := encodeBlock(data, order, bestToks, bestMainLens, bestLenLens,
 		canonicalCodewords(bestMainLens, maxMainCodewordLen), canonicalCodewords(bestLenLens, maxLenCodewordLen), nil, nil)
 
+	// seen guards against fixed points and longer cycles: since each
+	// round's parse is a pure function of the model handed to it, an
+	// exact repeat of any earlier round's token sequence proves every
+	// later round will just replay the same cycle forever (a fixed point
+	// is simply a cycle of length 1). Stopping the moment a repeat is
+	// detected avoids burning the full patience/hard-cap budget on every
+	// affected chunk for no possible further benefit.
+	seen := map[uint64]bool{tokensFingerprint(bestToks): true}
+
 	alignedLens, _ := buildAlignedTable(bestToks)
 	model := costModel{mainLens: bestMainLens, lenLens: bestLenLens, alignedLens: alignedLens}
-	for i := 0; i < maxRefineIters; i++ {
+	noImprove := 0
+	for i := 0; i < maxRefineItersHardCap && noImprove < refinePatience; i++ {
 		nt := parse(data, model)
+		fp := tokensFingerprint(nt)
 		nMainLens, nLenLens := buildTables(nt, nMainSyms)
 		enc := encodeBlock(data, order, nt, nMainLens, nLenLens,
 			canonicalCodewords(nMainLens, maxMainCodewordLen), canonicalCodewords(nLenLens, maxLenCodewordLen), nil, nil)
 
 		nAlignedLens, _ := buildAlignedTable(nt)
 		model = costModel{mainLens: nMainLens, lenLens: nLenLens, alignedLens: nAlignedLens}
-		if len(enc) >= len(bestEncoded) {
-			break // this round's re-parse didn't measurably help; converged (or diverging) -- stop.
+		if len(enc) < len(bestEncoded) {
+			bestToks, bestMainLens, bestLenLens, bestEncoded = nt, nMainLens, nLenLens, enc
+			noImprove = 0
+		} else {
+			noImprove++
 		}
-		bestToks, bestMainLens, bestLenLens, bestEncoded = nt, nMainLens, nLenLens, enc
+		if seen[fp] {
+			break // fixed point or longer cycle detected; further rounds can only repeat it
+		}
+		seen[fp] = true
 	}
 	return bestToks, bestMainLens, bestLenLens, bestEncoded
 }
 
+// tokensFingerprint returns a compact, order-sensitive FNV-1a hash of toks'
+// full content (every field of every token), used by refineParseWith to
+// detect an exact repeat of a previous round's parse output cheaply,
+// without retaining and comparing full token slices.
+func tokensFingerprint(toks []token) uint64 {
+	const offset64 = 14695981039346656037
+	const prime64 = 1099511628211
+	h := uint64(offset64)
+	mix := func(v uint64) {
+		for k := 0; k < 8; k++ {
+			h ^= v & 0xff
+			h *= prime64
+			v >>= 8
+		}
+	}
+	for _, t := range toks {
+		var b uint64
+		if t.isMatch {
+			b = 1
+		}
+		mix(b)
+		mix(uint64(t.literal))
+		mix(uint64(int64(t.offset)))
+		mix(uint64(int64(t.length)))
+		mix(uint64(int64(t.repeat)))
+	}
+	return h
+}
+
 // compressLookahead runs refineParse's iteratively-refined bounded-lookahead
-// parse and returns the smallest of its VERBATIM, ALIGNED, 2-block-split,
-// splitStats, and hash2 encodings -- the non-DP half of compress()'s work,
-// split out so it can run concurrently with compressOptimal (see compress
-// above).
+// parse (which now natively considers length-2 hash2 candidates alongside
+// everything else -- see matcher.go's hash2Candidate) and returns the
+// smallest of its VERBATIM, ALIGNED, 2-block-split, and splitStats
+// encodings -- the non-DP half of compress()'s work, split out so it can
+// run concurrently with compressOptimal (see compress above).
 func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) []byte {
 	toks, mainLens, lenLens, refinedVerbatim := refineParse(data, order, nMainSyms, pass1Model)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
@@ -197,9 +276,9 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 	// the one most worth overlapping with the other two's cheaper,
 	// already-built-table encodeBlock calls.
 	verbatim := refinedVerbatim // refineParse already measured this exact encoding while converging
-	var aligned, split, splitStats, hash2 []byte
+	var aligned, split, splitStats []byte
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		// Try an ALIGNED-offset block too: it costs 24 extra header bits
@@ -238,29 +317,6 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 		// changes.
 		splitStats = trySplitChunkStats(data, order, nMainSyms, toks)
 	}()
-	go func() {
-		defer wg.Done()
-		// Also try greedily substituting hash2 (length-2 fresh-offset)
-		// matches into toks (hash2greedy.go), scoring each candidate
-		// against a main Huffman table rebuilt after every prior
-		// acceptance -- unlike the flat/stale pass1Model estimate the
-		// main parse above used, this reflects each candidate's real
-		// effect (including Kraft-inequality knock-on lengthening of
-		// other codewords) before deciding the next one. See
-		// hash2greedy.go's own doc for why this is expected to avoid
-		// the earlier, static-table hash2 attempt's measured regression
-		// (see gowim's own TODO.md), and why the result is still only
-		// kept here if it measures smaller than every other candidate,
-		// not trusted on the strength of its own scoring alone.
-		hash2Toks := greedyApplyHash2(data, toks, nMainSyms)
-		if len(hash2Toks) == len(toks) {
-			return // no candidate was accepted; identical to verbatim
-		}
-		hash2MainLens, hash2LenLens := buildTables(hash2Toks, nMainSyms)
-		hash2MainCodes := canonicalCodewords(hash2MainLens, maxMainCodewordLen)
-		hash2LenCodes := canonicalCodewords(hash2LenLens, maxLenCodewordLen)
-		hash2 = encodeBlock(data, order, hash2Toks, hash2MainLens, hash2LenLens, hash2MainCodes, hash2LenCodes, nil, nil)
-	}()
 	wg.Wait()
 
 	best := verbatim
@@ -272,9 +328,6 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 	}
 	if splitStats != nil && len(splitStats) < len(best) {
 		best = splitStats
-	}
-	if hash2 != nil && len(hash2) < len(best) {
-		best = hash2
 	}
 	return best
 }
@@ -289,23 +342,7 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 // compress() keeps whichever of the two is actually smaller rather than
 // assuming this one wins.
 func compressOptimal(data []byte, order, nMainSyms int, pass1Model costModel) []byte {
-	optToks, _, _, best := refineParseWith(data, order, nMainSyms, pass1Model, findMatchesOptimal)
-
-	// Also try greedily splicing hash2 matches into the DP's own tokens
-	// (see hash2greedy.go): this was previously only ever applied to the
-	// bounded-lookahead path's tokens, but measuring found the DP path
-	// actually produces the smaller encoding on the large majority of
-	// real chunks (see refineParseWith's own doc), meaning hash2 was
-	// missing from where most of this encoder's real output comes from.
-	hash2Toks := greedyApplyHash2(data, optToks, nMainSyms)
-	if len(hash2Toks) != len(optToks) {
-		hash2MainLens, hash2LenLens := buildTables(hash2Toks, nMainSyms)
-		hash2Encoded := encodeBlock(data, order, hash2Toks, hash2MainLens, hash2LenLens,
-			canonicalCodewords(hash2MainLens, maxMainCodewordLen), canonicalCodewords(hash2LenLens, maxLenCodewordLen), nil, nil)
-		if len(hash2Encoded) < len(best) {
-			best = hash2Encoded
-		}
-	}
+	_, _, _, best := refineParseWith(data, order, nMainSyms, pass1Model, findMatchesOptimal)
 	return best
 }
 
@@ -562,9 +599,7 @@ func buildTables(toks []token, nMainSyms int) (mainLens, lenLens []byte) {
 
 // tokenFreqs computes the raw main/length symbol frequency counts toks
 // would produce, per the LZX main/length code alphabets -- the shared
-// counting logic behind buildTables, also used by greedyApplyHash2
-// (hash2greedy.go), which needs to mutate these counts incrementally
-// rather than only ever consuming a finished Huffman table built from them.
+// counting logic behind buildTables.
 func tokenFreqs(toks []token, nMainSyms int) (mainFreqs, lenFreqs []uint32) {
 	mainFreqs = make([]uint32, nMainSyms)
 	lenFreqs = make([]uint32, lenCodeNumSymbols)
