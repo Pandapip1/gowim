@@ -769,6 +769,40 @@ any codec's actual algorithm.
       indexes entries into a map afterward). Safe because `*wim.Reader`'s
       `ReadFile` goes through `ReadAt`, which is safe for concurrent use
       the same way `os.File.ReadAt` is. Verified with `go test -race`.
+- [x] Parallelize *within* `lzx.compress()` itself (2026-08-18), as distinct
+      from the three per-chunk/per-blob items above (which parallelize
+      *across* chunks/blobs, at the `wim` package level) -- this helps even
+      when there's only one chunk to compress, or when outer parallelism
+      is already saturating every core. Two changes, both verified with
+      `go test -race` and both confirmed byte-identical output (same
+      6,730,928-byte real-benchmark total as before, just faster) since
+      neither changes which candidate wins, only how many run at once:
+        - `compress()`'s two most expensive steps -- the bounded-lookahead
+          parse (`compressLookahead`, new) and the DP parse
+          (`compressOptimal`, new) -- only depend on pass 1's tables, not
+          on each other, so they now run in two goroutines joined by a
+          `sync.WaitGroup` instead of serially. This is the change that
+          actually mattered: on the real 398-chunk/12.4MB `ntoskrnl.exe`
+          test, compressing chunks one at a time (no outer parallelism at
+          all, to isolate this change's own effect) dropped from ~14.0s to
+          ~11.7s (~16% faster) for byte-identical output.
+        - Finer-grained: `compressLookahead`'s three candidates (VERBATIM,
+          ALIGNED, the 2-block split trial) and `trySplitChunk`'s two
+          independent per-half table-building/ALIGNED-decision steps were
+          also parallelized (three and two goroutines respectively). This
+          part is honestly not worth much on its own: measured before/
+          after this specific change in isolation, the same benchmark
+          stayed at ~11.7s (11.72s vs 11.71s, within noise) -- these steps
+          are cheap encodeBlock/table-building work compared to the two
+          real match-finding parses above, which already dominate total
+          cost and were already the ones parallelized. Kept anyway since
+          it's a real, correctness-preserving, race-clean improvement in
+          the cases where it *does* matter (e.g. a machine with far more
+          cores than this single chunk's own critical path can use), not
+          reverted the way item 10 above was -- unlike that experiment,
+          this one never changes the chosen output, only overlaps
+          independent work, so there is no risk of the "more exploration
+          under an approximate model backfires" failure mode from item 10.
 
 ## In-memory WIM filesystem operations
 

@@ -1,5 +1,7 @@
 package lzx
 
+import "sync"
+
 // compress implements this package's WIM-flavor LZX encoder. Per the scope
 // documented in lzx.go, it:
 //
@@ -17,6 +19,18 @@ package lzx
 //     though both do track and prefer the repeat-offset LRU queue (see
 //     matcher.go) -- real, measured sources of gowim's compression-ratio
 //     gap against wimlib (see gowim's own TODO.md);
+//   - runs the bounded-lookahead parse and the DP parse concurrently (see
+//     the goroutines below): both only depend on pass 1's tables, not on
+//     each other, and the DP parse in particular is real, measured extra
+//     CPU time (see gowim's own TODO.md) that's worth overlapping with the
+//     lookahead parse rather than paying serially. This is independent of,
+//     and stacks with, the outer per-chunk/per-blob parallelism in the
+//     `wim` package (see gowim's own TODO.md's "Performance: concurrency
+//     opportunities" section) -- that parallelizes *across* chunks/blobs;
+//     this parallelizes *within* a single chunk's own compress() call, so
+//     it still helps even when there's only one chunk to compress, or
+//     when the outer parallelism is already saturating all cores (this
+//     adds real CPU-time cost, not just wall-clock latency, in that case);
 //   - applies the E8 call-translation filter unconditionally, exactly as
 //     real WIM encoders do (see lzx.go's WIM-vs-CAB notes), so that this
 //     package's own compressed output round-trips through a real WIM/LZX
@@ -24,7 +38,9 @@ package lzx
 //     Decompress.
 func compress(input []byte) []byte {
 	// Work on a private copy: E8 preprocessing mutates the buffer in place,
-	// and the caller must not see their slice modified.
+	// and the caller must not see their slice modified. Both goroutines
+	// below only ever read data/order/nMainSyms after this point -- no
+	// shared mutable state, so no locking is needed between them.
 	data := make([]byte, len(input))
 	copy(data, input)
 	lzxPreprocess(data)
@@ -47,61 +63,113 @@ func compress(input []byte) []byte {
 	// package doesn't implement the latter).
 	toks1 := findMatches(data, costModel{})
 	mainLens1, lenLens1 := buildTables(toks1, nMainSyms)
+	pass1Model := costModel{mainLens: mainLens1, lenLens: lenLens1}
 
-	toks := findMatches(data, costModel{mainLens: mainLens1, lenLens: lenLens1})
+	// The bounded-lookahead parse (and everything downstream of it:
+	// ALIGNED/split trials) and the DP parse are independent given
+	// pass1Model, so run them concurrently rather than serially -- the DP
+	// parse in particular is the most expensive single step in compress()
+	// (see gowim's own TODO.md's measured time cost), making this the
+	// highest-value place in the encoder to overlap work.
+	var lookaheadBest, optBest []byte
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		lookaheadBest = compressLookahead(data, order, nMainSyms, pass1Model)
+	}()
+	go func() {
+		defer wg.Done()
+		optBest = compressOptimal(data, order, nMainSyms, pass1Model)
+	}()
+	wg.Wait()
+
+	best := lookaheadBest
+	if len(optBest) < len(best) {
+		best = optBest
+	}
+	return best
+}
+
+// compressLookahead runs findMatches' bounded-lookahead parse (pass 2,
+// refining pass1Model) and returns the smallest of its VERBATIM, ALIGNED,
+// and 2-block-split encodings -- the non-DP half of compress()'s work,
+// split out so it can run concurrently with compressOptimal (see compress
+// above).
+func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) []byte {
+	toks := findMatches(data, pass1Model)
 	mainLens, lenLens := buildTables(toks, nMainSyms)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
-	verbatim := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+	// VERBATIM, ALIGNED, and the 2-block split trial are all independent
+	// given toks/mainLens/lenLens/mainCodes/lenCodes (none reads another's
+	// output), so run them concurrently rather than serially. The split
+	// trial does meaningfully more work than the other two (it rebuilds
+	// its own per-half tables and tries VERBATIM-vs-ALIGNED per half --
+	// see trySplitChunk, itself further parallelized internally), so it's
+	// the one most worth overlapping with the other two's cheaper,
+	// already-built-table encodeBlock calls.
+	var verbatim, aligned, split []byte
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		verbatim = encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+	}()
+	go func() {
+		defer wg.Done()
+		// Try an ALIGNED-offset block too: it costs 24 extra header bits
+		// (8 codeword lengths for the aligned code) but replaces the low
+		// 3 raw extra-offset bits of every match at slot >=
+		// minAlignedOffsetSlot with a (possibly cheaper, since it's
+		// Huffman-coded) aligned symbol. Since the main/length trees are
+		// identical either way, simply encoding both and keeping
+		// whichever is smaller is exact and correctness-preserving -- no
+		// cost model or estimation needed, unlike the match-selection
+		// heuristics above.
+		alignedLens, alignedCodes := buildAlignedTable(toks)
+		aligned = encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
+	}()
+	go func() {
+		defer wg.Done()
+		// Try splitting into 2 blocks too: real data's statistics can vary
+		// enough within one 32768-byte chunk (e.g. text vs binary content)
+		// that giving each half its own Huffman table beats one table for
+		// the whole chunk, even after paying a second block's header
+		// overhead. See trySplitChunk for why this is a single, bounded
+		// 2-block attempt (not a general multi-way search) and gowim's
+		// own TODO.md for how much (or little) this actually saved on
+		// real content.
+		split = trySplitChunk(data, order, toks, nMainSyms)
+	}()
+	wg.Wait()
 
-	// Try an ALIGNED-offset block too: it costs 24 extra header bits (8
-	// codeword lengths for the aligned code) but replaces the low 3 raw
-	// extra-offset bits of every match at slot >= minAlignedOffsetSlot with
-	// a (possibly cheaper, since it's Huffman-coded) aligned symbol. Since
-	// the main/length trees are identical either way, simply encoding both
-	// and keeping whichever is smaller is exact and correctness-preserving
-	// -- no cost model or estimation needed, unlike the match-selection
-	// heuristics above.
-	alignedLens, alignedCodes := buildAlignedTable(toks)
-	aligned := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 	best := verbatim
 	if len(aligned) < len(best) {
 		best = aligned
 	}
-
-	// Try splitting into 2 blocks too: real data's statistics can vary
-	// enough within one 32768-byte chunk (e.g. text vs binary content) that
-	// giving each half its own Huffman table beats one table for the whole
-	// chunk, even after paying a second block's header overhead. See
-	// trySplitChunk for why this is a single, bounded 2-block attempt (not
-	// a general multi-way search) and gowim's own TODO.md for how much (or
-	// little) this actually saved on real content.
-	if split := trySplitChunk(data, order, toks, nMainSyms); split != nil && len(split) < len(best) {
+	if split != nil && len(split) < len(best) {
 		best = split
 	}
+	return best
+}
 
-	// Try the bounded multi-state beam DP parse too (findMatchesOptimal in
-	// optimal.go), using the same pass-1-informed cost model as the
-	// bounded-lookahead parse above, and keep it only if it's actually
-	// smaller. This is deliberately a "try both, keep smaller" addition
-	// rather than a replacement: findMatchesOptimal's beam-width cap means
-	// it is NOT guaranteed to beat the bounded lookahead on every input
-	// (see optimal.go's doc for the precise scope/limitation), so falling
-	// back to whichever already-verified path is smaller keeps this a
-	// strict quality improvement (at the cost of the DP's own, real,
-	// additional CPU time -- see gowim's own TODO.md for the measured
-	// tradeoff).
-	optToks := findMatchesOptimal(data, costModel{mainLens: mainLens1, lenLens: lenLens1})
+// compressOptimal runs the bounded multi-state beam DP parse
+// (findMatchesOptimal in optimal.go), using the same pass-1-informed cost
+// model as compressLookahead, and returns its VERBATIM encoding -- the DP
+// half of compress()'s work, split out so it can run concurrently with
+// compressLookahead (see compress above). findMatchesOptimal's beam-width
+// cap means it is NOT guaranteed to beat the bounded lookahead on every
+// input (see optimal.go's doc for the precise scope/limitation), so
+// compress() keeps whichever of the two is actually smaller rather than
+// assuming this one wins.
+func compressOptimal(data []byte, order, nMainSyms int, pass1Model costModel) []byte {
+	optToks := findMatchesOptimal(data, pass1Model)
 	optMainLens, optLenLens := buildTables(optToks, nMainSyms)
 	optMainCodes := canonicalCodewords(optMainLens, maxMainCodewordLen)
 	optLenCodes := canonicalCodewords(optLenLens, maxLenCodewordLen)
-	optVerbatim := encodeBlock(data, order, optToks, optMainLens, optLenLens, optMainCodes, optLenCodes, nil, nil)
-	if len(optVerbatim) < len(best) {
-		best = optVerbatim
-	}
-
-	return best
+	return encodeBlock(data, order, optToks, optMainLens, optLenLens, optMainCodes, optLenCodes, nil, nil)
 }
 
 // tokensByteLen returns the total uncompressed byte length covered by toks.
@@ -165,28 +233,53 @@ func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
 	firstData := data[:splitByte]
 	secondData := data[splitByte:]
 
-	mainLens1, lenLens1 := buildTables(first, nMainSyms)
-	mainCodes1 := canonicalCodewords(mainLens1, maxMainCodewordLen)
-	lenCodes1 := canonicalCodewords(lenLens1, maxLenCodewordLen)
-
-	mainLens2, lenLens2 := buildTables(second, nMainSyms)
-	mainCodes2 := canonicalCodewords(mainLens2, maxMainCodewordLen)
-	lenCodes2 := canonicalCodewords(lenLens2, maxLenCodewordLen)
-
+	// The two halves' table-building and VERBATIM-vs-ALIGNED decisions are
+	// completely independent of each other (each only reads its own
+	// half's data/tokens), so run them concurrently in two goroutines
+	// rather than one after the other.
 	zeros := make([]byte, nMainSyms)
 	zerosLen := make([]byte, lenCodeNumSymbols)
 
-	// Decide VERBATIM vs ALIGNED for each block independently, using the
-	// existing standalone single-block encoder for the comparison (same
-	// byte-length comparison the whole-chunk case above already uses).
+	// Decide VERBATIM vs ALIGNED for one half, using the existing
+	// standalone single-block encoder for the comparison (same byte-length
+	// comparison the whole-chunk case above already uses).
 	chooseAligned := func(blkData []byte, blkToks []token, mainLens, lenLens []byte, mainCodes, lenCodes []uint16) (bool, []byte, []uint16) {
 		v := encodeBlock(blkData, order, blkToks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
 		aLens, aCodes := buildAlignedTable(blkToks)
 		a := encodeBlock(blkData, order, blkToks, mainLens, lenLens, mainCodes, lenCodes, aLens, aCodes)
 		return len(a) < len(v), aLens, aCodes
 	}
-	useAligned1, alignedLens1, alignedCodes1 := chooseAligned(firstData, first, mainLens1, lenLens1, mainCodes1, lenCodes1)
-	useAligned2, alignedLens2, alignedCodes2 := chooseAligned(secondData, second, mainLens2, lenLens2, mainCodes2, lenCodes2)
+
+	var mainLens1, lenLens1 []byte
+	var mainCodes1, lenCodes1 []uint16
+	var useAligned1 bool
+	var alignedLens1 []byte
+	var alignedCodes1 []uint16
+
+	var mainLens2, lenLens2 []byte
+	var mainCodes2, lenCodes2 []uint16
+	var useAligned2 bool
+	var alignedLens2 []byte
+	var alignedCodes2 []uint16
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		mainLens1, lenLens1 = buildTables(first, nMainSyms)
+		mainCodes1 = canonicalCodewords(mainLens1, maxMainCodewordLen)
+		lenCodes1 = canonicalCodewords(lenLens1, maxLenCodewordLen)
+		useAligned1, alignedLens1, alignedCodes1 = chooseAligned(firstData, first, mainLens1, lenLens1, mainCodes1, lenCodes1)
+	}()
+	go func() {
+		defer wg.Done()
+		mainLens2, lenLens2 = buildTables(second, nMainSyms)
+		mainCodes2 = canonicalCodewords(mainLens2, maxMainCodewordLen)
+		lenCodes2 = canonicalCodewords(lenLens2, maxLenCodewordLen)
+		useAligned2, alignedLens2, alignedCodes2 = chooseAligned(secondData, second, mainLens2, lenLens2, mainCodes2, lenCodes2)
+	}()
+	wg.Wait()
+
 	if !useAligned1 {
 		alignedLens1, alignedCodes1 = nil, nil
 	}
