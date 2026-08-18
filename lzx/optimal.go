@@ -1,7 +1,5 @@
 package lzx
 
-import "sort"
-
 // findMatchesOptimal runs a forward shortest-path DP over the whole chunk,
 // using the same binary-tree match finder as findMatches (see matcher.go),
 // as an attempt at a genuinely more "optimal" parse than the bounded 3-way
@@ -208,34 +206,75 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	// mergeState folds a newly-relaxed (cost, queue) arrival into
 	// states[to]: if a hypothesis with the same queue state already
 	// exists there, it's replaced only if the new arrival is cheaper;
-	// otherwise the new hypothesis is appended as a distinct candidate.
-	// Bounding to beamWidth happens later, in pruneState, once all
-	// arrivals into a position have been folded in.
+	// otherwise the new hypothesis is added as a distinct candidate --
+	// but states[to] is held at no more than beamWidth entries *at insert
+	// time*, evicting the currently-most-expensive entry (and only if the
+	// arrival is strictly cheaper than it; otherwise the arrival is
+	// dropped).
+	//
+	// # Why bound here rather than after the fact (2026-08-18)
+	//
+	// This function previously appended unconditionally and left the
+	// beamWidth bound to a separate pruneState pass run on a position
+	// right before that position became the DP's current position. That
+	// is correct but accidentally quadratic-ish: a position accumulates
+	// arrivals from up to maxMatchLen+1 predecessor positions x beamWidth
+	// states x ~32 edges each *before* it is ever pruned, so this
+	// function's linear same-queue scan ran over a slice of 20-212 entries
+	// (380 at worst on a sampled real ntoskrnl.exe chunk) instead of the
+	// intended <= 10. Profiling measured mergeState+pruneState at ~54% of
+	// the encoder's CPU (a further 19% in pruneState's reflect-based
+	// sort.Slice), and this function's append at 85% of a measured 9.57 GB
+	// of allocation for 256 KB of input. Bounding at insert time makes the
+	// scan O(beamWidth) and removes essentially all of that growslice
+	// traffic: measured (serial, 32 KiB chunks through Compress) 14.5s ->
+	// 10.9s on 544 KiB of mixed corpus (8x32KiB of libLLVM.so.18.1,
+	// 8x32KiB of Go runtime source, testdata/hash2_greedy_chunk1.bin), and
+	// 22.6s -> 15.4s on a wider 832 KiB 8-file corpus (bash, libc, more
+	// libLLVM, /usr/share/dict words, Debian copyright text, net/http
+	// source, both testdata chunks).
+	//
+	// This is NOT exactly equivalent to accumulate-then-prune: an arrival
+	// that would have survived the old pruning pass can be evicted here by
+	// a cheaper arrival, and equal-cost arrivals are resolved differently
+	// (the old code's sort.Slice was unstable), so the surviving beam --
+	// and hence which of several equal-DP-cost parses is emitted -- can
+	// differ. The beam was always a heuristic bound (it is the documented
+	// gap between this parser and a true optimal one), so the question is
+	// empirical and it was measured rather than assumed: total output
+	// moved 134280 -> 134290 bytes (+0.007%) on the first corpus and
+	// 255474 -> 255516 (+0.016%) on the second, individual files moving in
+	// both directions (llvm_a.bin 17762 -> 17760, bash.bin 30182 ->
+	// 30190). That residual is tie-break noise, not a systematic loss:
+	// flipping only the tie rule below from `<` to `<=` moves the same
+	// 8-file total to 255486 (+0.005%) with no other change. Two
+	// alternatives were also measured and rejected: keeping a 2*beamWidth
+	// insert-time slack plus a cheap concrete-typed selection prune at the
+	// position's turn was *both* slower (13.0s vs 10.7s on the first
+	// corpus) and larger (134402), and the old accumulate-then-prune is
+	// the 1.4x-slower baseline above.
 	mergeState := func(to int, newCost int, newQueue [numRecentOffsets]int32, edge dpEdge) {
-		for idx := range states[to] {
-			if states[to][idx].queue == newQueue {
-				if newCost < states[to][idx].cost {
-					states[to][idx].cost = newCost
-					states[to][idx].edge = edge
+		s := states[to]
+		worst := -1
+		for idx := range s {
+			if s[idx].queue == newQueue {
+				if newCost < s[idx].cost {
+					s[idx].cost = newCost
+					s[idx].edge = edge
 				}
 				return
 			}
+			if worst < 0 || s[idx].cost > s[worst].cost {
+				worst = idx
+			}
 		}
-		states[to] = append(states[to], dpState{cost: newCost, queue: newQueue, edge: edge})
-	}
-
-	// pruneState trims states[pos] down to the beamWidth cheapest distinct
-	// queue-state hypotheses. It's called on position i right before i is
-	// used as a source of outgoing edges, by which point every edge that
-	// could ever land on i (all of which come from positions < i) has
-	// already been folded in via mergeState.
-	pruneState := func(pos int) {
-		s := states[pos]
-		if len(s) <= beamWidth {
+		if len(s) < beamWidth {
+			states[to] = append(s, dpState{cost: newCost, queue: newQueue, edge: edge})
 			return
 		}
-		sort.Slice(s, func(a, b int) bool { return s[a].cost < s[b].cost })
-		states[pos] = append([]dpState(nil), s[:beamWidth]...)
+		if newCost < s[worst].cost {
+			s[worst] = dpState{cost: newCost, queue: newQueue, edge: edge}
+		}
 	}
 
 	literalCost := func(b byte) int {
@@ -263,7 +302,6 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	}
 
 	for i := 0; i < n; i++ {
-		pruneState(i)
 		cur := states[i]
 		if len(cur) == 0 {
 			// Unreachable: cannot happen in practice since every position
