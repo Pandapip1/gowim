@@ -5,9 +5,12 @@ import "sync"
 // compress implements this package's WIM-flavor LZX encoder. Per the scope
 // documented in lzx.go, it:
 //
-//   - emits 1 or 2 blocks per call (never more -- see trySplitChunk for
-//     why this is a single bounded split attempt, not a general search),
-//     each independently VERBATIM or ALIGNED, whichever encodes smaller
+//   - emits one or more blocks per call: a single bounded midpoint split
+//     (trySplitChunk) and wimlib's own real, statistics-driven multi-way
+//     block-splitting heuristic (splitstats.go's trySplitChunkStats) are
+//     both tried alongside the whole-chunk VERBATIM/ALIGNED candidates,
+//     keeping whichever encodes smallest -- not a from-scratch general
+//     block-split search; each block independently VERBATIM or ALIGNED
 //     (see encodeBlock/writeBlockInto/buildAlignedTable below); it never
 //     emits an uncompressed block;
 //   - uses a bounded 3-way-lookahead binary-tree LZ77 match finder, plus a
@@ -110,9 +113,9 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 	// see trySplitChunk, itself further parallelized internally), so it's
 	// the one most worth overlapping with the other two's cheaper,
 	// already-built-table encodeBlock calls.
-	var verbatim, aligned, split []byte
+	var verbatim, aligned, split, splitStats []byte
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		verbatim = encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
@@ -143,6 +146,18 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 		// real content.
 		split = trySplitChunk(data, order, toks, nMainSyms)
 	}()
+	go func() {
+		defer wg.Done()
+		// Also try wimlib's own real, statistics-driven block-splitting
+		// heuristic (splitstats.go, ported directly from wimlib's source),
+		// which can produce zero, one, or several split points based on
+		// actual content shifts rather than trySplitChunk's single
+		// midpoint-only attempt. See gowim's own TODO.md for why this
+		// (block layout) was tried as a separate lever from this
+		// package's several already-tried-and-measured parse/cost-model
+		// changes.
+		splitStats = trySplitChunkStats(data, order, nMainSyms, toks)
+	}()
 	wg.Wait()
 
 	best := verbatim
@@ -151,6 +166,9 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 	}
 	if split != nil && len(split) < len(best) {
 		best = split
+	}
+	if splitStats != nil && len(splitStats) < len(best) {
+		best = splitStats
 	}
 	return best
 }

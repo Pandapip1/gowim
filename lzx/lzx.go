@@ -86,13 +86,17 @@
 //     full near-optimal parser, which explores every reachable repeat-
 //     offset-queue state without a beam-width cap; see optimal.go's own
 //     doc for exactly where this package's DP falls short of that.
-//     compress() emits either 1 or 2
-//     blocks per call (it tries a 2-block split at the token boundary
-//     closest to the midpoint and keeps it only if smaller -- see
-//     encode.go's trySplitChunk -- never more than 2, i.e. not a general
-//     multi-way block-split search), each block independently VERBATIM or
-//     ALIGNED (whichever a same-tokens trial encoding of each comes out
-//     smaller as -- see encode.go's encodeBlock/writeBlockInto/
+//     compress() emits one or more
+//     blocks per call: besides the whole-chunk VERBATIM/ALIGNED
+//     candidates, it tries a single bounded 2-block midpoint split
+//     (encode.go's trySplitChunk) and wimlib's own real, statistics-driven
+//     multi-way block-splitting heuristic (lzx/splitstats.go's
+//     trySplitChunkStats, ported from wimlib's lzx_should_end_block --
+//     see gowim's own TODO.md), keeping whichever candidate encodes
+//     smallest -- not a from-scratch general multi-way block-split
+//     search of its own. Each block independently VERBATIM or ALIGNED
+//     (whichever a same-tokens trial encoding of each comes out smaller
+//     as -- see encode.go's encodeBlock/writeBlockInto/
 //     buildAlignedTable) -- it never emits an uncompressed block, nor does
 //     it use a full iterative bit-cost model across the whole file (beyond
 //     the two-pass Huffman-informed re-parse in compress(), which is not

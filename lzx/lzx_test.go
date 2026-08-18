@@ -676,3 +676,104 @@ func TestCompressExceedsMaxWindow(t *testing.T) {
 	}()
 	Compress(make([]byte, maxWindowSize+1))
 }
+
+// pseudoASCIIText generates n bytes of pseudo-random lowercase-letter-and-
+// space text: unlike a repeated phrase (which the match finder collapses
+// into a few very long matches, producing too few "observations" -- see
+// splitstats.go -- to exercise the block-split heuristic within a
+// reasonable buffer size), this has little enough redundancy that most
+// bytes become individual literal observations, closer to real English
+// text's own token density.
+func pseudoASCIIText(n int, seed int64) []byte {
+	const letters = "abcdefghijklmnopqrstuvwxyz "
+	r := rand.New(rand.NewSource(seed))
+	data := make([]byte, n)
+	for i := range data {
+		data[i] = letters[r.Intn(len(letters))]
+	}
+	return data
+}
+
+// TestLzxBlockSplitPointsFindsRealShift guards lzxBlockSplitPoints
+// (splitstats.go, wimlib's real statistics-driven block-splitting
+// heuristic, ported after reading wimlib's own source -- see gowim's own
+// TODO.md): a chunk whose content shifts sharply partway through (from
+// pseudo-ASCII text to random bytes -- a real "few matches, ASCII-only
+// literals" to "no matches, full-byte-range literals" shift, exactly what
+// wimlib's heuristic is designed to notice) should produce at least one
+// split point, and every split point must respect the minStatsBlockSize
+// gap from both the start and end of the chunk.
+func TestLzxBlockSplitPointsFindsRealShift(t *testing.T) {
+	r := rand.New(rand.NewSource(77))
+	first := pseudoASCIIText(20000, 77)
+	second := make([]byte, 20000)
+	r.Read(second)
+	data := append(append([]byte{}, first...), second...)
+
+	pre := make([]byte, len(data))
+	copy(pre, data)
+	lzxPreprocess(pre)
+
+	toks1 := findMatches(pre, costModel{})
+	splits := lzxBlockSplitPoints(toks1, len(pre))
+	if len(splits) == 0 {
+		t.Fatal("expected at least one split point for a sharp content shift")
+	}
+	for _, s := range splits {
+		if s < minStatsBlockSize || len(pre)-s < minStatsBlockSize {
+			t.Fatalf("split point %d violates minStatsBlockSize gap (len=%d)", s, len(pre))
+		}
+	}
+}
+
+// TestTrySplitChunkStatsProducesValidSplit guards trySplitChunkStats
+// directly: split points must never fall inside a token, every segment
+// must be non-empty, and the resulting bitstream must decode back to the
+// original data exactly.
+func TestTrySplitChunkStatsProducesValidSplit(t *testing.T) {
+	r := rand.New(rand.NewSource(77))
+	first := pseudoASCIIText(20000, 77)
+	second := make([]byte, 20000)
+	r.Read(second)
+	data := append(append([]byte{}, first...), second...)
+
+	order, err := windowOrder(len(data))
+	if err != nil {
+		t.Fatalf("windowOrder: %v", err)
+	}
+	nMainSyms := numMainSyms(order)
+
+	pre := make([]byte, len(data))
+	copy(pre, data)
+	lzxPreprocess(pre)
+
+	toks1 := findMatches(pre, costModel{})
+	mainLens1, lenLens1 := buildTables(toks1, nMainSyms)
+	toks := findMatches(pre, costModel{mainLens: mainLens1, lenLens: lenLens1})
+
+	split := trySplitChunkStats(pre, order, nMainSyms, toks)
+	if split == nil {
+		t.Fatal("expected trySplitChunkStats to produce a split for this data")
+	}
+
+	got, err := decompress(split, len(data))
+	if err != nil {
+		t.Fatalf("decompress error: %v", err)
+	}
+	if !bytes.Equal(got, pre) {
+		t.Fatal("trySplitChunkStats round-trip mismatch")
+	}
+}
+
+// TestTrySplitChunkStatsRoundTripsThroughCompress guards the full,
+// wired-in Compress()/Decompress() path when trySplitChunkStats' output
+// is the smallest candidate, using the same sharp-content-shift data as
+// above (post-E8-filter data, matching Compress's own preprocessing).
+func TestTrySplitChunkStatsRoundTripsThroughCompress(t *testing.T) {
+	r := rand.New(rand.NewSource(77))
+	first := pseudoASCIIText(20000, 77)
+	second := make([]byte, 20000)
+	r.Read(second)
+	data := append(append([]byte{}, first...), second...)
+	roundTrip(t, "split-chunk-stats sharp content shift", data)
+}

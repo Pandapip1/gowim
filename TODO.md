@@ -752,6 +752,75 @@ any compressed output at all.
       parse strategy) -- everything tested in this investigation so far
       has been the latter. Neither has been attempted; both are real,
       specific, checkable next steps, not vague future work.
+
+      **Item 13 (2026-08-18): wimlib's real, statistics-driven block-
+      splitting heuristic, implemented and kept -- a genuine, if modest,
+      win.** Read wimlib's actual `lzx_should_end_block`/
+      `lzx_observe_literal`/`lzx_observe_match`/`lzx_init_block_split_
+      stats` (`src/lzx_compress.c`) directly rather than guessing, and
+      found real block-splitting there is a fundamentally different,
+      richer mechanism than this package's single bounded-midpoint
+      attempt (`trySplitChunk`, item 7): wimlib buckets each literal into
+      1 of 8 types (top 2 bits + low 1 bit) and each match into 1 of 2
+      types (short/long, threshold length 5), and every 400 such
+      observations (`NUM_OBSERVATIONS_PER_BLOCK_CHECK`), compares the
+      newly-accumulated bucket distribution against the block's
+      cumulative distribution so far; if they differ by at least 7/8 of
+      the expected total (computed with the same cross-multiplied
+      integer arithmetic wimlib uses, to stay faithful rather than
+      "cleaner but different"), it ends the current block right there.
+      This can produce zero, one, or several split points per input,
+      driven by real content shifts rather than position alone. Ported
+      byte-faithfully as `lzxBlockSplitPoints` (new file
+      `lzx/splitstats.go`), using wimlib's own `MIN_BLOCK_SIZE` (6500) as
+      the minimum-gap requirement from both the start and end of the
+      chunk; wimlib's separate soft-max-block-size (100,000 bytes) and
+      match-cache-overflow triggers don't apply here, since a WIM chunk
+      (32768 bytes) is always under wimlib's own soft max and this
+      package holds the whole chunk in memory already.
+
+      `trySplitChunkStats` generalizes `trySplitChunk`'s single-split
+      machinery to an arbitrary number of split points: each resulting
+      segment gets its own Huffman tables and its own independent
+      VERBATIM-vs-ALIGNED decision, chained via the existing
+      `writeBlockInto` (each subsequent segment's tables delta-coded
+      against the *previous* segment's real lengths, not an all-zero
+      baseline). Wired into `compressLookahead` as a fourth candidate
+      alongside VERBATIM/ALIGNED/`trySplitChunk`, run concurrently with
+      them (same "try independent candidates, keep smallest" pattern as
+      every other candidate in this encoder). Guarded by
+      `TestLzxBlockSplitPointsFindsRealShift` (verifies at least one
+      split point is found for data with a real, sharp content shift --
+      pseudo-random ASCII text into pure random bytes, chosen specifically
+      because a *repeated phrase* produces too few actual observations to
+      exercise the heuristic at all, having collapsed into a handful of
+      very long matches -- an early version of this test used repeated
+      text and silently found zero splits for exactly that reason, caught
+      by checking the split count rather than assuming it worked),
+      `TestTrySplitChunkStatsProducesValidSplit` (direct round-trip
+      guard), and `TestTrySplitChunkStatsRoundTripsThroughCompress` (full
+      `Compress()`/`Decompress()` path).
+
+      Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+      6,730,928 -> 6,729,686 bytes -- a real but modest 1,242-byte
+      (0.018%) further reduction, no measured time regression (runs
+      concurrently with the other three lookahead candidates). Narrows
+      the gap to wimlib's LZX:100 reference (6,659,122 bytes) from +1.08%
+      to **+1.06%**. Modest, as expected: a 32768-byte WIM chunk can fit
+      at most a handful of wimlib-style splits (each segment needing >=
+      6500 bytes), so there's an inherent ceiling on how much this lever
+      alone can move the needle within gowim's chunk-at-a-time
+      architecture, unlike wimlib's own much larger (up to 100,000-byte)
+      real blocks. Still a genuine, real-content-driven win, not the
+      negative/negligible result of items 10 and 12 -- this was a
+      different lever (block layout) from those (parse/cost-model
+      strategy), which is exactly why it paid off where they didn't.
+
+      What remains unclosed, same as before this item: a direct,
+      position-by-position comparison of which matches wimlib's own
+      match-finder actually finds vs. gowim's, to check whether the
+      remaining ~1.06% gap is now more a match-*discovery* problem than a
+      match-*selection* or block-*layout* problem -- still not attempted.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.
