@@ -31,32 +31,20 @@ func compress(input []byte) []byte {
 	}
 	nMainSyms := numMainSyms(order)
 
-	toks := findMatches(data)
+	// Two-pass parse: pass 1 uses a flat, data-independent cost estimate
+	// (costModel{}) to choose among candidate matches, since no real
+	// Huffman codeword lengths exist yet. Its resulting token frequencies
+	// build a first Huffman table, which is then used as pass 2's cost
+	// model -- a refined, this-chunk's-real-code-informed re-parse. This
+	// is a standard two-pass technique approximating the joint parse/code
+	// optimization a full iterative optimal parser would do (see
+	// matcher.go's costModel doc and gowim's own TODO.md for why this
+	// package doesn't implement the latter).
+	toks1 := findMatches(data, costModel{})
+	mainLens1, lenLens1 := buildTables(toks1, nMainSyms)
 
-	mainFreqs := make([]uint32, nMainSyms)
-	lenFreqs := make([]uint32, lenCodeNumSymbols)
-	for _, t := range toks {
-		if t.isMatch {
-			slot := t.repeat
-			if slot < 0 {
-				slot = offsetSlot(uint32(t.offset))
-			}
-			lengthField := t.length - minMatchLen
-			header := lengthField
-			if header > numPrimaryLens {
-				header = numPrimaryLens
-			}
-			mainFreqs[numChars+slot*numLenHeaders+header]++
-			if header == numPrimaryLens {
-				lenFreqs[lengthField-numPrimaryLens]++
-			}
-		} else {
-			mainFreqs[t.literal]++
-		}
-	}
-
-	mainLens := buildLengths(mainFreqs, maxMainCodewordLen)
-	lenLens := buildLengths(lenFreqs, maxLenCodewordLen)
+	toks := findMatches(data, costModel{mainLens: mainLens1, lenLens: lenLens1})
+	mainLens, lenLens := buildTables(toks, nMainSyms)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
@@ -118,6 +106,33 @@ func compress(input []byte) []byte {
 	}
 
 	return w.flush()
+}
+
+// buildTables computes main/length Huffman codeword lengths from toks'
+// symbol frequencies, per the LZX main/length code alphabets.
+func buildTables(toks []token, nMainSyms int) (mainLens, lenLens []byte) {
+	mainFreqs := make([]uint32, nMainSyms)
+	lenFreqs := make([]uint32, lenCodeNumSymbols)
+	for _, t := range toks {
+		if t.isMatch {
+			slot := t.repeat
+			if slot < 0 {
+				slot = offsetSlot(uint32(t.offset))
+			}
+			lengthField := t.length - minMatchLen
+			header := lengthField
+			if header > numPrimaryLens {
+				header = numPrimaryLens
+			}
+			mainFreqs[numChars+slot*numLenHeaders+header]++
+			if header == numPrimaryLens {
+				lenFreqs[lengthField-numPrimaryLens]++
+			}
+		} else {
+			mainFreqs[t.literal]++
+		}
+	}
+	return buildLengths(mainFreqs, maxMainCodewordLen), buildLengths(lenFreqs, maxLenCodewordLen)
 }
 
 // offsetSlot returns the offset slot (>= 3) whose range

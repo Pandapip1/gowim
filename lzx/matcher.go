@@ -18,19 +18,74 @@ const (
 	minMatch    = 3 // minimum length for a *fresh*-offset match (see below)
 	maxChainLen = 96
 
-	// repeatBonus is how many bytes shorter a repeat-offset match is allowed
-	// to be than the best fresh-offset match while still being preferred.
-	// Reusing one of the three most-recent offsets costs zero extra offset
-	// bits (lzxExtraOffsetBits[0..2] are all 0) and no offset-slot Huffman
-	// code beyond the length header, whereas a fresh offset can cost up to
-	// 17 extra bits plus a costlier main-code symbol; a repeat match within
-	// a couple of bytes of the best fresh match is essentially always
-	// cheaper once Huffman-coded. This fixed margin is a conservative
-	// heuristic (matching the kind of tradeoff wimlib's own non-optimal-
-	// parse compression levels make), not a full bit-cost model, consistent
-	// with this package's documented greedy/lazy-parse scope.
-	repeatBonus = 2
+	// Flat per-symbol bit-cost estimates used by costModel when it has no
+	// real Huffman codeword lengths yet (findMatches' first pass -- see
+	// compress() in encode.go). These are rough constants, not measured
+	// from this chunk's actual data: real codeword lengths for the
+	// commonly-used literal/main/length symbols in typical data cluster in
+	// roughly this range, so this is "good enough to rank candidates
+	// sensibly" for a first pass whose whole purpose is to produce
+	// *some* Huffman table for the second, real pass to refine against.
+	flatLiteralBits = 8
+	flatMainBits    = 8
+	flatLenBits     = 8
 )
+
+// costModel estimates the bit cost of literals and matches, used to choose
+// among candidate matches (including whether a repeat-offset match is
+// worth preferring over a longer fresh-offset one) and to compare a
+// lazy-matching peek against the current position's best candidate. A zero
+// costModel (nil Lens slices) uses the flat estimates above -- this is
+// findMatches' first pass. A costModel built from a first pass's actual
+// Huffman codeword lengths is used for a refining second pass (see
+// compress() in encode.go): this is a standard two-pass technique (parse,
+// build a code, re-parse against the real code's costs) for approximating
+// the joint parse/code optimization a full iterative optimal parser would
+// do, without that full complexity.
+//
+// Literal cost is always the flat estimate, even in the second pass:
+// unlike match costs (which vary hugely with offset slot, 0-17 extra bits),
+// real literal codeword lengths vary comparatively little, so refining
+// match cost captures the great majority of the benefit for much less
+// complexity.
+type costModel struct {
+	mainLens []byte // nil => flatMainBits/flatLenBits estimates
+	lenLens  []byte
+}
+
+// matchCost returns the estimated bit cost of a match's main-code symbol
+// (and secondary length symbol, if needed), NOT including extra offset
+// bits (the caller adds those separately, since they depend only on the
+// offset slot, not on any Huffman table).
+func (m costModel) matchCost(slot, length int) int {
+	lengthField := length - minMatchLen
+	header := lengthField
+	if header > numPrimaryLens {
+		header = numPrimaryLens
+	}
+	mainBits := flatMainBits
+	if m.mainLens != nil {
+		mainSym := numChars + slot*numLenHeaders + header
+		mainBits = int(m.mainLens[mainSym])
+	}
+	if header != numPrimaryLens {
+		return mainBits
+	}
+	lenBits := flatLenBits
+	if m.lenLens != nil {
+		lsym := lengthField - numPrimaryLens
+		lenBits = int(m.lenLens[lsym])
+	}
+	return mainBits + lenBits
+}
+
+// matchValue estimates how many bits a match of the given slot/length/
+// extraBits saves versus emitting length literals instead, using
+// flatLiteralBits per literal. Higher is better; a value <= 0 means the
+// match is not worth using at all.
+func (m costModel) matchValue(slot, length, extraBits int) int {
+	return length*flatLiteralBits - m.matchCost(slot, length) - extraBits
+}
 
 // candidateMatch is the single best match (repeat-offset or fresh) found at
 // one position, as chosen by chooseMatch below.
@@ -39,6 +94,7 @@ type candidateMatch struct {
 	offset int
 	length int
 	repeat int // -1 if fresh
+	value  int // costModel.matchValue of this candidate; only valid if found
 }
 
 // findMatches runs a lazy LZ77 parse over data using a bounded hash-chain
@@ -46,15 +102,19 @@ type candidateMatch struct {
 // repeat-offset LRU queue (the three most recently used match offsets) at
 // every position. Per this package's documented encoder scope (see lzx.go
 // and compress() in encode.go), this is a one-step lazy parse, not a full
-// optimal/DP parse: at each position it finds the best match (preferring a
-// repeat-offset match within repeatBonus bytes of the best fresh match,
-// since it is cheaper to encode), then checks whether a strictly longer
-// match exists starting one byte later using the *same* repeat-offset queue
-// state (valid because emitting a literal never changes the queue) -- if
-// so, it emits a literal now and takes the better match next iteration,
-// exactly the classic "lazy matching" technique (as used by, e.g., zlib's
-// deflate and wimlib's own non-near-optimal compression levels), rather
-// than a full iterative bit-cost model.
+// optimal/DP parse: at each position it finds the best-value match (using
+// model to weigh repeat-offset matches, which cost no extra offset bits,
+// against fresh-offset matches of different lengths and offset slots --
+// see costModel above, which replaces a simpler earlier version of this
+// package that used a flat "repeat must be within N bytes of fresh" bonus
+// instead of an actual, if approximate, bit-cost comparison), then checks
+// whether a higher-value match exists starting one byte later using the
+// *same* repeat-offset queue state (valid because emitting a literal never
+// changes the queue) -- if so, it emits a literal now and takes the better
+// match next iteration, the classic "lazy matching" technique (as used by,
+// e.g., zlib's deflate and wimlib's own non-near-optimal compression
+// levels), rather than a full iterative bit-cost model over the whole
+// chunk.
 //
 // The repeat-offset queue is tracked exactly as the decoder maintains it
 // (see decode.go's recentOffsets handling, itself ported from wimlib's
@@ -69,7 +129,7 @@ type candidateMatch struct {
 // there is no separate "split a long match" step: a run longer than
 // maxMatchLen is simply rediscovered on the next iteration, at which point
 // it is a repeat-offset match (queue slot 0), which is exactly as compact.
-func findMatches(data []byte) []token {
+func findMatches(data []byte, model costModel) []token {
 	n := len(data)
 	var toks []token
 	if n == 0 {
@@ -132,25 +192,28 @@ func findMatches(data []byte) []token {
 	// references data[i-off:], which is only valid when off <= i.
 	var queue [numRecentOffsets]int32 = [numRecentOffsets]int32{1, 1, 1}
 
-	// chooseMatch finds the best match at position i given the current
-	// queue, without mutating any state (hash table, chain, or queue), so
-	// it is safe to call speculatively for a lazy-matching peek.
+	// chooseMatch finds the best-value match at position i given the
+	// current queue, without mutating any state (hash table, chain, or
+	// queue), so it is safe to call speculatively for a lazy-matching peek.
 	chooseMatch := func(i int, queue [numRecentOffsets]int32) candidateMatch {
-		bestRepLen := 0
-		bestRepIdx := -1
+		var best candidateMatch
+
 		for k := 0; k < numRecentOffsets; k++ {
 			l := repeatLenAt(i, queue[k])
-			if l > bestRepLen {
-				bestRepLen = l
-				bestRepIdx = k
+			if l < minMatchLen {
+				continue
+			}
+			v := model.matchValue(k, l, 0)
+			if !best.found || v > best.value {
+				best = candidateMatch{found: true, offset: int(queue[k]), length: l, repeat: k, value: v}
 			}
 		}
 
-		bestLen := 0
-		bestOff := 0
 		if i+3 <= n {
 			h := hash(i)
 			cand := head[h]
+			bestLen := 0
+			bestOff := 0
 			depth := 0
 			for cand >= 0 && depth < maxChainLen {
 				c := int(cand)
@@ -162,16 +225,20 @@ func findMatches(data []byte) []token {
 				cand = prev[c]
 				depth++
 			}
+			if bestLen >= minMatch {
+				slot := offsetSlot(uint32(bestOff))
+				extraBits := int(lzxExtraOffsetBits[slot])
+				v := model.matchValue(slot, bestLen, extraBits)
+				if !best.found || v > best.value {
+					best = candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: v}
+				}
+			}
 		}
 
-		switch {
-		case bestRepIdx >= 0 && bestRepLen >= minMatchLen && bestRepLen+repeatBonus >= bestLen:
-			return candidateMatch{found: true, offset: int(queue[bestRepIdx]), length: bestRepLen, repeat: bestRepIdx}
-		case bestLen >= minMatch:
-			return candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1}
-		default:
+		if best.found && best.value <= 0 {
 			return candidateMatch{}
 		}
+		return best
 	}
 
 	advanceQueue := func(m candidateMatch) {
@@ -203,7 +270,7 @@ func findMatches(data []byte) []token {
 
 		if m.found && i+1 < n {
 			peek := chooseMatch(i+1, queue)
-			if peek.found && peek.length > m.length {
+			if peek.found && peek.value > m.value {
 				toks = append(toks, token{literal: data[i], repeat: -1})
 				i++
 				continue

@@ -212,6 +212,53 @@ any compressed output at all.
          the remaining ~4.1% gap is attributed to these, though not
          further decomposed between them.
 
+      A follow-on reverse-engineering pass (2026-08-18) tried to compare
+      against Microsoft's own real encoder (in `wimgapi.dll`, not just
+      wimlib) to see whether it does anything wimlib doesn't -- see the
+      "Further LZX encoder optimizations" list right below for what that
+      found and why it didn't change the plan: confirmed wimgapi.dll
+      implements LZX itself (not delegated to Cabinet.dll/ntdll) with the
+      exact same offset-slot table, block-type constants, and E8-filter
+      constant as documented LZX/gowim; traced its LZX coder-object down to
+      an unambiguous bitstream *reader* refill routine
+      (`setup_wimgapi.dll+0x180029660`) -- i.e. found the real decompressor,
+      not the compressor. The actual encoder was not located even with
+      radare2 (r2ghidra decompilation was attempted but doesn't build
+      against the installed r2 5.5.0 -- real API breakage in r2ghidra's
+      source, not a config issue) within the effort spent; whether MS's own
+      parse strategy beats wimlib's near-optimal DP parser remains
+      genuinely unanswered.
+
+      **Further LZX encoder optimizations (2026-08-18, second round, from
+      first-principles brainstorming rather than reference-implementation
+      comparison):**
+      1. **[x] Cost-aware match/offset selection.** Replaced the old flat
+         `repeatBonus` heuristic (see cause 1 above) with a real (if
+         approximate) bit-cost comparison: `costModel.matchValue` in
+         `matcher.go` estimates `length*8 - matchCost - extraOffsetBits`
+         for every candidate (each repeat-offset slot and the best fresh
+         match), so a shorter match at a much cheaper offset can now beat a
+         longer one at an expensive offset, not just "repeat within N
+         bytes of fresh." Guarded by `TestCostModelPrefersCheaperOffset`.
+      2. **[x] Two-pass Huffman refinement.** `compress()` in `encode.go`
+         now parses twice: pass 1 uses `costModel{}`'s flat per-symbol bit
+         estimates (no real Huffman table exists yet); its resulting token
+         frequencies build a first Huffman table, which becomes pass 2's
+         cost model for a refined re-parse against this chunk's *actual*
+         codeword-length costs. This is the standard two-pass technique
+         approximating joint parse/code optimization without a full
+         iterative optimal parser. Literal cost stays at the flat estimate
+         in both passes (only match cost is refined) since it varies far
+         less than match cost's 0-17 extra-bit range -- see `costModel`'s
+         doc in `matcher.go` for the reasoning.
+
+         Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+         combined with items 1+2, total dropped from 6,929,560 to
+         6,864,532 bytes (a further 0.94% reduction), narrowing the gap to
+         wimlib's level-100 output from +4.1% to +3.12%. Also ran an
+         800-trial round-trip stress test with no failures, plus the full
+         existing suite.
+
       All three are already accurately described as scope limitations in
       gowim's own package docs (`lzx.go`, `matcher.go`, `encode.go`) -- what
       this investigation adds is the ground-truthed size of the gap and the

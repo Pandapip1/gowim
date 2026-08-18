@@ -230,7 +230,7 @@ func TestFindMatchesUsesRepeatOffsetQueue(t *testing.T) {
 	data := append(append([]byte{}, pattern...), pattern...)
 	data = append(data, pattern...)
 
-	toks := findMatches(data)
+	toks := findMatches(data, costModel{})
 	sawFreshLargeOffset := false
 	sawRepeat := false
 	for _, tok := range toks {
@@ -295,7 +295,7 @@ func TestCompressAllZerosMatchesWimlibSize(t *testing.T) {
 // pattern reproduces this at position 0.
 func TestFindMatchesNeverSelfMatchesAtPositionZero(t *testing.T) {
 	data := bytes.Repeat([]byte("AB"), 50)
-	toks := findMatches(data)
+	toks := findMatches(data, costModel{})
 	if len(toks) == 0 {
 		t.Fatal("expected at least one token")
 	}
@@ -307,6 +307,48 @@ func TestFindMatchesNeverSelfMatchesAtPositionZero(t *testing.T) {
 			t.Fatalf("found match with non-positive offset: %+v", tok)
 		}
 	}
+}
+
+// TestCostModelPrefersCheaperOffset guards the cost-aware match selection
+// added to chooseMatch (2026-08-18, see gowim's own TODO.md): candidates
+// are now ranked by an estimated bit value (length saved minus offset/
+// symbol cost) rather than raw match length, so a shorter match at a much
+// cheaper offset should be preferred over a longer match at a very
+// expensive (many-extra-bits) offset when the value works out that way.
+func TestCostModelPrefersCheaperOffset(t *testing.T) {
+	m := costModel{}
+	// Same match length, different offset slots: value must strictly
+	// decrease as the slot's extra-bit cost increases, isolating the
+	// offset-cost effect from length.
+	cheapSlot := 4   // lzxExtraOffsetBits[4] == 1
+	costlySlot := 34 // lzxExtraOffsetBits[34] == 16
+	const length = 10
+	cheapValue := m.matchValue(cheapSlot, length, int(lzxExtraOffsetBits[cheapSlot]))
+	costlyValue := m.matchValue(costlySlot, length, int(lzxExtraOffsetBits[costlySlot]))
+	if cheapValue <= costlyValue {
+		t.Fatalf("expected cheap-offset match to have higher value at equal length: cheap=%d costly=%d", cheapValue, costlyValue)
+	}
+
+	// A length-10 match at a cheap offset should also beat a slightly
+	// longer (length-11) match at the costly offset, since the extra-bit
+	// cost difference (15 bits) dwarfs one byte's worth of length (8 bits).
+	costlyLonger := m.matchValue(costlySlot, length+1, int(lzxExtraOffsetBits[costlySlot]))
+	if cheapValue <= costlyLonger {
+		t.Fatalf("expected cheap-offset match to beat a slightly longer costly-offset match: cheap=%d costlyLonger=%d", cheapValue, costlyLonger)
+	}
+}
+
+// TestTwoPassRefinementRunsWithoutPanicking guards the two-pass encode
+// (2026-08-18): pass 2's costModel is built from pass 1's Huffman lengths,
+// which must be indexable by every main/length symbol pass 2's parse can
+// produce (in particular, an all-zero Huffman freq table would leave a
+// short mainLens slice if buildLengths ever changed its output size --
+// this pins the assumption that mainLens1/lenLens1 are always exactly
+// numMainSyms(order)/lenCodeNumSymbols long).
+func TestTwoPassRefinementRunsWithoutPanicking(t *testing.T) {
+	roundTrip(t, "two-pass small", []byte("hello, world! hello, world! hello, world!"))
+	roundTrip(t, "two-pass empty-ish", []byte{0})
+	roundTrip(t, "two-pass single-symbol", bytes.Repeat([]byte{0x7A}, 5000))
 }
 
 func TestCompressExceedsMaxWindow(t *testing.T) {
