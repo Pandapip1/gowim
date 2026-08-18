@@ -509,6 +509,75 @@ any compressed output at all.
       or only a small further slice of it is genuinely unknown -- unlike
       every other step in this investigation, this was not measured,
       since it was not attempted.
+
+      **Item 9 (2026-08-18, tried anyway after the above): a bounded
+      multi-state beam DP, replacing item 8's single-queue-trajectory
+      simplification.** `findMatchesOptimal` (`optimal.go`) was rewritten
+      to track up to `beamWidth` (4) distinct (cost, queue-state)
+      hypotheses per position instead of only the single cheapest
+      arrival, closer in spirit to wimlib's `lzx_compress_near_optimal`
+      exploring multiple live queue-state hypotheses -- a higher-cost
+      path that carries a different, more useful queue state is no
+      longer discarded outright, as long as it's among the 4 cheapest
+      distinct-queue arrivals at that position. Mechanically: `states[pos]`
+      is now a slice of `(cost, queue, edge)` entries instead of a single
+      `cost[pos]`/`queueAt[pos]` pair; `mergeState` folds a new arrival in
+      (replacing an existing same-queue entry only if cheaper, else
+      appending), and `pruneState` trims to the `beamWidth` cheapest
+      entries once a position's incoming edges are all known (guaranteed
+      once the forward scan reaches that position as `i`, since all
+      edges go strictly forward). Path reconstruction walks back through
+      `(from position, fromState index)` pairs rather than a flat
+      position chain. This is still explicitly NOT wimlib's own parser --
+      wimlib's near-optimal parser is not beam-limited in the same way
+      and explores a larger edge set per position -- so the doc comment
+      in `optimal.go` was rewritten to describe this honestly as a
+      bounded beam-search approximation, not "wimlib's algorithm."
+      Guarded by the same `TestFindMatchesOptimalRoundTrips` and
+      `TestFindMatchesOptimalStress` (200-trial) tests as item 8, both of
+      which passed unmodified against the new multi-state implementation
+      (no test changes were needed since they only check tokens are real
+      matches, cover the whole chunk, and round-trip against the true
+      original data -- properties the beam version preserves).
+
+      Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test
+      (re-extracted fresh from the same `boot.wim` this round, and a
+      fresh wimlib-imagex LZX:100 capture of the same file for the
+      reference number, rather than reusing item 8's cached figures):
+      total dropped from 6,752,430 to 6,731,684 bytes -- a further 0.31%
+      reduction, smaller than item 8's own 0.92% win but a genuine further
+      improvement, not noise (the beam DP's tokens still round-trip
+      correctly across the full stress suite). Cumulatively: 7,169,604
+      down to 6,731,684 bytes (6.11% total reduction from the post-3-cause
+      baseline). The freshly-measured wimlib LZX:100 reference for this
+      same file came out to 6,659,122 bytes (vs item 8's previously-cited
+      6,657,082 -- the ~2KB difference is attributed to this being an
+      independent re-capture, not a regression in either encoder), putting
+      the gap at **+1.09%**, down from item 8's +1.43%. Real, honestly-
+      reported cost: whole-file encode time roughly doubled again on top
+      of item 8, from ~7.1s to ~14.1s for this 13MB test file (~0.9MB/s
+      throughput) -- the beam width directly multiplies the DP's inner-loop
+      work (4x the states, each considering the same edge set), and this
+      is exactly that cost showing up as measured, not estimated.
+
+      Diminishing returns are now visible within the DP-parse line of
+      work itself, not just across the whole 9-item list: item 8 (single
+      trajectory to unbounded-fresh-length exploration) bought 0.92% for
+      roughly a 2x time cost; item 9 (single trajectory to 4-way beam)
+      bought a further 0.31% for another roughly 2x time cost. Whether a
+      wider beam (8, 16...) continues that same pattern of shrinking
+      returns per doubling, or whether beam width 4 happened to sit past
+      most of the real benefit already, was not tested -- doing so would
+      be the natural next step if this line of work continues, rather
+      than guessing which is true.
+
+      What remains unclosed, same as item 8: a fully faithful,
+      unbounded-state DP matching wimlib's own `lzx_compress_near_optimal`
+      exactly (no beam-width cap, and a larger edge set per position).
+      Whether that would close most of the remaining ~1.09% gap or only a
+      small further slice is still genuinely unknown, for the same reason
+      as before -- it has not been attempted, only approximated at
+      increasing (and increasingly expensive) levels of fidelity.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.

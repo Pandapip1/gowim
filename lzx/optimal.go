@@ -1,11 +1,13 @@
 package lzx
 
+import "sort"
+
 // findMatchesOptimal runs a forward shortest-path DP over the whole chunk,
 // using the same binary-tree match finder as findMatches (see matcher.go),
 // as an attempt at a genuinely more "optimal" parse than the bounded 3-way
 // lookahead there.
 //
-// # Honest scope: this is NOT wimlib's full near-optimal parser
+// # Honest scope: a bounded multi-state beam, not wimlib's full parser
 //
 // A fully faithful optimal parse with LZX's repeat-offset queue needs to
 // explore the combinatorics of every distinct queue *state* (which of the
@@ -13,33 +15,28 @@ package lzx
 // since a higher-cost path to some position might carry a queue state that
 // enables much cheaper matches later -- e.g. wimlib's
 // lzx_compress_near_optimal tracks multiple live queue-state hypotheses
-// per position for exactly this reason. That is a substantially larger
-// undertaking (and a much larger surface for subtle bugs) than this
-// package has attempted elsewhere.
+// per position for exactly this reason.
 //
-// This function instead tracks a SINGLE queue trajectory per position: the
-// queue state associated with whichever predecessor gives the minimum
-// cost to reach that position. This is a real approximation, not a
-// footnote -- a slightly costlier path to position i might in principle
-// carry a queue state that enables a much cheaper match from i onward,
-// and this DP would never discover that trade-off, since it only ever
-// remembers the single cheapest arrival at each position. What this DP
-// does still do that findMatches' bounded lookahead does not: explore
-// every match length (not just the longest) for repeat-offset candidates,
-// and choose the true shortest path across the WHOLE chunk under that
-// single-trajectory model, rather than only ever looking 1-2 positions
-// ahead.
+// This function now does the same in spirit, but bounded: at each position
+// it keeps up to beamWidth distinct (cost, queue-state) hypotheses (a beam
+// search over queue states, not just the single cheapest arrival). A
+// higher-cost path that carries a different, more useful queue state is no
+// longer thrown away outright -- it survives as long as it's one of the
+// beamWidth cheapest distinct-queue hypotheses at that position. This is
+// still not wimlib's approach: wimlib's near-optimal parser is not beam
+// limited in the same way and additionally considers a much larger edge
+// set per position (near-exhaustive length/offset exploration plus
+// multiple forward passes). What follows is a genuine, bounded
+// approximation of the same idea, not a full reimplementation.
 //
-// # Bounded edge counts
+// # Bounded edge and state counts
 //
-// Trying every possible (position, length) pair without bounds is what
-// makes real optimal parsers expensive; this function bounds the edges
-// considered per position to keep worst-case cost roughly comparable to
-// the other passes in this package (see repeatLengthSamples and
-// maxFreshCandidates below), rather than the unbounded "try every length
-// at every candidate offset" a from-scratch optimal parser would use.
-// Real-world measurements of this bounding's actual cost/benefit are in
-// gowim's own TODO.md.
+// Both the number of queue-state hypotheses kept per position (beamWidth)
+// and the number of edges considered per hypothesis (see
+// repeatLengthSamples and maxFreshCandidates below) are bounded, to keep
+// worst-case cost from blowing up on pathological (e.g. highly
+// repetitive) input. Real-world measurements of this bounding's actual
+// cost/benefit are in gowim's own TODO.md.
 func findMatchesOptimal(data []byte, model costModel) []token {
 	n := len(data)
 	if n == 0 {
@@ -152,34 +149,69 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 		head[h] = int32(pos)
 	}
 
-	const inf = 1 << 30
+	// beamWidth bounds how many distinct queue-state hypotheses survive at
+	// each position. A higher-cost arrival is kept only if it carries a
+	// queue state not already covered by a cheaper arrival, and only if
+	// it's among the beamWidth cheapest such distinct-queue arrivals.
+	const beamWidth = 4
 
-	// dpEdge records how the shortest path reached one position: either a
-	// literal (isMatch false) or a match, plus the predecessor position.
+	// dpEdge records how one state at one position was reached: either a
+	// literal (isMatch false) or a match, plus the predecessor position
+	// and which of that predecessor's states it came from.
 	type dpEdge struct {
-		isMatch bool
-		literal byte
-		offset  int
-		length  int
-		repeat  int
-		from    int
+		isMatch   bool
+		literal   byte
+		offset    int
+		length    int
+		repeat    int
+		from      int
+		fromState int
 	}
 
-	cost := make([]int, n+1)
-	for i := range cost {
-		cost[i] = inf
+	type dpState struct {
+		cost  int
+		queue [numRecentOffsets]int32
+		edge  dpEdge
 	}
-	cost[0] = 0
-	queueAt := make([][numRecentOffsets]int32, n+1)
-	queueAt[0] = [numRecentOffsets]int32{1, 1, 1}
-	edgeInto := make([]dpEdge, n+1)
 
-	relax := func(to, newCost int, e dpEdge, newQueue [numRecentOffsets]int32) {
-		if newCost < cost[to] {
-			cost[to] = newCost
-			edgeInto[to] = e
-			queueAt[to] = newQueue
+	states := make([][]dpState, n+1)
+	states[0] = []dpState{{
+		cost:  0,
+		queue: [numRecentOffsets]int32{1, 1, 1},
+		edge:  dpEdge{from: -1, fromState: -1},
+	}}
+
+	// mergeState folds a newly-relaxed (cost, queue) arrival into
+	// states[to]: if a hypothesis with the same queue state already
+	// exists there, it's replaced only if the new arrival is cheaper;
+	// otherwise the new hypothesis is appended as a distinct candidate.
+	// Bounding to beamWidth happens later, in pruneState, once all
+	// arrivals into a position have been folded in.
+	mergeState := func(to int, newCost int, newQueue [numRecentOffsets]int32, edge dpEdge) {
+		for idx := range states[to] {
+			if states[to][idx].queue == newQueue {
+				if newCost < states[to][idx].cost {
+					states[to][idx].cost = newCost
+					states[to][idx].edge = edge
+				}
+				return
+			}
 		}
+		states[to] = append(states[to], dpState{cost: newCost, queue: newQueue, edge: edge})
+	}
+
+	// pruneState trims states[pos] down to the beamWidth cheapest distinct
+	// queue-state hypotheses. It's called on position i right before i is
+	// used as a source of outgoing edges, by which point every edge that
+	// could ever land on i (all of which come from positions < i) has
+	// already been folded in via mergeState.
+	pruneState := func(pos int) {
+		s := states[pos]
+		if len(s) <= beamWidth {
+			return
+		}
+		sort.Slice(s, func(a, b int) bool { return s[a].cost < s[b].cost })
+		states[pos] = append([]dpState(nil), s[:beamWidth]...)
 	}
 
 	literalCost := func(b byte) int {
@@ -207,57 +239,72 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	}
 
 	for i := 0; i < n; i++ {
-		if cost[i] >= inf {
+		pruneState(i)
+		cur := states[i]
+		if len(cur) == 0 {
 			// Unreachable: cannot happen in practice since every position
 			// is reachable via a chain of literal edges from 0, but guard
-			// defensively against ever indexing queueAt[i] uninitialized.
+			// defensively rather than index an empty slice below.
 			bstInsert(i)
 			continue
 		}
-		q := queueAt[i]
 
-		relax(i+1, cost[i]+literalCost(data[i]), dpEdge{literal: data[i], repeat: -1, from: i}, q)
+		freshCands := bstSearchAll(i)
+		litCost := literalCost(data[i])
 
-		for k := 0; k < numRecentOffsets; k++ {
-			off := q[k]
-			j := i - int(off)
-			if j < 0 {
-				continue
-			}
-			l, _ := matchLenCapped(j, i)
-			if l < minMatchLen {
-				continue
-			}
-			for _, length := range repeatLengthSamples(l) {
-				if length < minMatchLen {
+		for si, s := range cur {
+			mergeState(i+1, s.cost+litCost, s.queue, dpEdge{literal: data[i], repeat: -1, from: i, fromState: si})
+
+			for k := 0; k < numRecentOffsets; k++ {
+				off := s.queue[k]
+				j := i - int(off)
+				if j < 0 {
 					continue
 				}
-				c := model.matchCost(k, length)
-				nq := applyMatch(q, k, int(off))
-				relax(i+length, cost[i]+c, dpEdge{isMatch: true, offset: int(off), length: length, repeat: k, from: i}, nq)
+				l, _ := matchLenCapped(j, i)
+				if l < minMatchLen {
+					continue
+				}
+				for _, length := range repeatLengthSamples(l) {
+					if length < minMatchLen {
+						continue
+					}
+					c := model.matchCost(k, length)
+					nq := applyMatch(s.queue, k, int(off))
+					mergeState(i+length, s.cost+c, nq, dpEdge{isMatch: true, offset: int(off), length: length, repeat: k, from: i, fromState: si})
+				}
 			}
-		}
 
-		for _, cand := range bstSearchAll(i) {
-			slot := offsetSlot(uint32(cand.offset))
-			extraBits := int(lzxExtraOffsetBits[slot])
-			c := model.matchCost(slot, cand.length) + extraBits
-			nq := applyMatch(q, -1, cand.offset)
-			relax(i+cand.length, cost[i]+c, dpEdge{isMatch: true, offset: cand.offset, length: cand.length, repeat: -1, from: i}, nq)
+			for _, cand := range freshCands {
+				slot := offsetSlot(uint32(cand.offset))
+				extraBits := int(lzxExtraOffsetBits[slot])
+				c := model.matchCost(slot, cand.length) + extraBits
+				nq := applyMatch(s.queue, -1, cand.offset)
+				mergeState(i+cand.length, s.cost+c, nq, dpEdge{isMatch: true, offset: cand.offset, length: cand.length, repeat: -1, from: i, fromState: si})
+			}
 		}
 
 		bstInsert(i)
 	}
 
+	finalStates := states[n]
+	bestIdx := 0
+	for idx := 1; idx < len(finalStates); idx++ {
+		if finalStates[idx].cost < finalStates[bestIdx].cost {
+			bestIdx = idx
+		}
+	}
+
 	var toks []token
-	for pos := n; pos > 0; {
-		e := edgeInto[pos]
+	pos, si := n, bestIdx
+	for pos > 0 {
+		e := states[pos][si].edge
 		if e.isMatch {
 			toks = append(toks, token{isMatch: true, offset: e.offset, length: e.length, repeat: e.repeat})
 		} else {
 			toks = append(toks, token{literal: e.literal, repeat: -1})
 		}
-		pos = e.from
+		pos, si = e.from, e.fromState
 	}
 	for l, r := 0, len(toks)-1; l < r; l, r = l+1, r-1 {
 		toks[l], toks[r] = toks[r], toks[l]

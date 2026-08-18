@@ -80,12 +80,13 @@
 //   - Compression-ratio or match-finding optimality. The encoder uses a
 //     bounded 3-way-lookahead LZ77 match finder (binary-tree based, bounded
 //     search depth, plus a direct check of the repeat-offset LRU queue --
-//     see lzx/matcher.go), and additionally tries a bounded, single-queue-
-//     trajectory DP parse (lzx/optimal.go's findMatchesOptimal, kept only
-//     if it encodes smaller than the lookahead parse) -- neither is wimlib's
+//     see lzx/matcher.go), and additionally tries a bounded multi-state
+//     beam DP parse (lzx/optimal.go's findMatchesOptimal, kept only if it
+//     encodes smaller than the lookahead parse) -- neither is wimlib's
 //     full near-optimal parser, which explores every reachable repeat-
-//     offset-queue state; see optimal.go's own doc for exactly where this
-//     package's DP falls short of that. compress() emits either 1 or 2
+//     offset-queue state without a beam-width cap; see optimal.go's own
+//     doc for exactly where this package's DP falls short of that.
+//     compress() emits either 1 or 2
 //     blocks per call (it tries a 2-block split at the token boundary
 //     closest to the midpoint and keeps it only if smaller -- see
 //     encode.go's trySplitChunk -- never more than 2, i.e. not a general

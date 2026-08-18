@@ -9,9 +9,9 @@ package lzx
 //     (see encodeBlock/writeBlockInto/buildAlignedTable below); it never
 //     emits an uncompressed block;
 //   - uses a bounded 3-way-lookahead binary-tree LZ77 match finder, plus a
-//     bounded single-queue-trajectory DP parse tried as an alternative
-//     (see optimal.go's findMatchesOptimal, kept only if smaller) -- both
-//     bounded search depth, not a full optimal/DP parse with real
+//     bounded multi-state beam DP parse tried as an alternative (see
+//     optimal.go's findMatchesOptimal, kept only if smaller) -- both
+//     bounded search depth, not a full optimal/DP parse with unbounded
 //     repeat-offset-state exploration (see optimal.go's own doc for the
 //     precise gap between this and wimlib's lzx_compress_near_optimal),
 //     though both do track and prefer the repeat-offset LRU queue (see
@@ -81,17 +81,17 @@ func compress(input []byte) []byte {
 		best = split
 	}
 
-	// Try the bounded single-queue-trajectory DP parse too (findMatchesOptimal
-	// in optimal.go), using the same pass-1-informed cost model as the
+	// Try the bounded multi-state beam DP parse too (findMatchesOptimal in
+	// optimal.go), using the same pass-1-informed cost model as the
 	// bounded-lookahead parse above, and keep it only if it's actually
 	// smaller. This is deliberately a "try both, keep smaller" addition
-	// rather than a replacement: findMatchesOptimal's single-queue-
-	// trajectory simplification means it is NOT guaranteed to beat the
-	// bounded lookahead on every input (see optimal.go's doc for the
-	// precise scope/limitation), so falling back to whichever already-
-	// verified path is smaller keeps this a strict quality improvement
-	// (at the cost of the DP's own, real, additional CPU time -- see
-	// gowim's own TODO.md for the measured tradeoff).
+	// rather than a replacement: findMatchesOptimal's beam-width cap means
+	// it is NOT guaranteed to beat the bounded lookahead on every input
+	// (see optimal.go's doc for the precise scope/limitation), so falling
+	// back to whichever already-verified path is smaller keeps this a
+	// strict quality improvement (at the cost of the DP's own, real,
+	// additional CPU time -- see gowim's own TODO.md for the measured
+	// tradeoff).
 	optToks := findMatchesOptimal(data, costModel{mainLens: mainLens1, lenLens: lenLens1})
 	optMainLens, optLenLens := buildTables(optToks, nMainSyms)
 	optMainCodes := canonicalCodewords(optMainLens, maxMainCodewordLen)
