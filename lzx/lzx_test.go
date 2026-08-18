@@ -729,6 +729,39 @@ func TestGreedyHash2RoundTrips(t *testing.T) {
 	}
 }
 
+// TestHash2BoundaryOffsetDoesNotCrash guards a real crash bug, found by an
+// independent review agent's fuzz/integration run (2026-08-18): a length-2
+// hash2 candidate's offset can reach windowSize-2 (a match at the very end
+// of the window referencing the window's first two bytes), but
+// numOffsetSlots/numMainSyms (lzx.go) size the main-symbol alphabet
+// assuming the smallest match ever encoded is length minMatch=3 (the
+// normal fresh-match finder's own floor), whose largest possible offset is
+// only windowSize-3 -- one slot short of what a length-2 candidate can
+// reach. On an exactly-power-of-two-sized chunk (the routine case for
+// 32768-byte WIM chunks), this produced a genuine out-of-range index into
+// the main Huffman-length table. Fixed in findHash2Candidates by rejecting
+// any candidate whose computed main symbol doesn't fit within nMainSyms.
+func TestHash2BoundaryOffsetDoesNotCrash(t *testing.T) {
+	n := 32768
+	r := rand.New(rand.NewSource(1))
+	data := make([]byte, n)
+	r.Read(data)
+	// Force the last 2 bytes to equal the first 2 bytes: a length-2
+	// candidate at the maximum possible offset (n-2), landing one
+	// main-symbol slot past the table's bounds before the fix.
+	data[n-2] = data[0]
+	data[n-1] = data[1]
+
+	out := compress(data)
+	got, err := decompress(out, len(data))
+	if err != nil {
+		t.Fatalf("decompress: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("round trip mismatch")
+	}
+}
+
 func pseudoASCIIText(n int, seed int64) []byte {
 	const letters = "abcdefghijklmnopqrstuvwxyz "
 	r := rand.New(rand.NewSource(seed))

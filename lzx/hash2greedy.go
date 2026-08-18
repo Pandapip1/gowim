@@ -26,7 +26,20 @@ type hash2Candidate struct {
 // deliberately restricted to swapping a single pair of literal tokens for
 // one length-2 match, never re-deciding any match findMatches already
 // chose, so it can never invalidate an existing match's byte range.
-func findHash2Candidates(data []byte, toks []token) []hash2Candidate {
+//
+// nMainSyms bounds which offset slots are actually valid for this chunk's
+// main alphabet: numOffsetSlots/numMainSyms (lzx.go) size that alphabet
+// assuming the smallest match ever encoded is length minMatch=3 (the
+// normal fresh-match finder's own floor -- see matcher.go), whose largest
+// possible offset is windowSize-3. A length-2 hash2 match's largest
+// possible offset is windowSize-2, one slot beyond what that table was
+// ever sized for, which crashed with an out-of-range index on a
+// power-of-two-sized chunk (a real bug, found 2026-08-18 by a review
+// agent's fuzz/integration run -- see gowim's own TODO.md). Any candidate
+// whose slot doesn't fit within nMainSyms is skipped outright: it would
+// need a main symbol the decoder's own table (sized the same way, from
+// the same numMainSyms) has no codeword for at all.
+func findHash2Candidates(data []byte, toks []token, nMainSyms int) []hash2Candidate {
 	n := len(data)
 	lastPos := make([]int32, 1<<16)
 	for i := range lastPos {
@@ -47,16 +60,19 @@ func findHash2Candidates(data []byte, toks []token) []hash2Candidate {
 			if q := prevOcc[pos]; q >= 0 {
 				offset := pos - int(q)
 				slot := offsetSlot(uint32(offset))
-				cands = append(cands, hash2Candidate{
-					tokIdx:    i,
-					pos:       pos,
-					offset:    offset,
-					slot:      slot,
-					extraBits: int(lzxExtraOffsetBits[slot]),
-					litA:      t0.literal,
-					litB:      toks[i+1].literal,
-					matchSym:  numChars + slot*numLenHeaders, // header 0 => lengthField 0 => length 2 (minMatchLen)
-				})
+				matchSym := numChars + slot*numLenHeaders // header 0 => lengthField 0 => length 2 (minMatchLen)
+				if matchSym < nMainSyms {
+					cands = append(cands, hash2Candidate{
+						tokIdx:    i,
+						pos:       pos,
+						offset:    offset,
+						slot:      slot,
+						extraBits: int(lzxExtraOffsetBits[slot]),
+						litA:      t0.literal,
+						litB:      toks[i+1].literal,
+						matchSym:  matchSym,
+					})
+				}
 			}
 		}
 		if t0.isMatch {
@@ -112,7 +128,7 @@ func hash2CandidateValue(mainLens []byte, c hash2Candidate) int {
 // anyway (see compressLookahead's established "try both, keep smaller"
 // pattern) rather than trusting this pass blindly.
 func greedyApplyHash2(data []byte, toks []token, nMainSyms int) []token {
-	cands := findHash2Candidates(data, toks)
+	cands := findHash2Candidates(data, toks, nMainSyms)
 	if len(cands) == 0 {
 		return toks
 	}
