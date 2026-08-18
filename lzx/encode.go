@@ -39,7 +39,7 @@ import "sync"
 //     package's own compressed output round-trips through a real WIM/LZX
 //     decoder (e.g. wimlib) as well as through this package's own
 //     Decompress.
-func compress(input []byte) []byte {
+func compress(input []byte, o encodeOptions) []byte {
 	// Work on a private copy: E8 preprocessing mutates the buffer in place,
 	// and the caller must not see their slice modified. Both goroutines
 	// below only ever read data/order/nMainSyms after this point -- no
@@ -64,7 +64,7 @@ func compress(input []byte) []byte {
 	// optimization a full iterative optimal parser would do (see
 	// matcher.go's costModel doc and gowim's own TODO.md for why this
 	// package doesn't implement the latter).
-	toks1 := findMatches(data, costModel{})
+	toks1 := findMatchesWith(data, costModel{}, o)
 	mainLens1, lenLens1 := buildTables(toks1, nMainSyms)
 	pass1Model := costModel{mainLens: mainLens1, lenLens: lenLens1}
 
@@ -74,16 +74,24 @@ func compress(input []byte) []byte {
 	// parse in particular is the most expensive single step in compress()
 	// (see gowim's own TODO.md's measured time cost), making this the
 	// highest-value place in the encoder to overlap work.
+	// Options.DisableDP (see options.go) skips the DP half entirely: it is
+	// the single biggest speed lever this encoder has, since the DP parse
+	// dominates compress()'s cost. With it set there is nothing to overlap,
+	// so the lookahead parse simply runs on this goroutine.
+	if !o.dp {
+		return compressLookahead(data, order, nMainSyms, pass1Model, o)
+	}
+
 	var lookaheadBest, optBest []byte
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		lookaheadBest = compressLookahead(data, order, nMainSyms, pass1Model)
+		lookaheadBest = compressLookahead(data, order, nMainSyms, pass1Model, o)
 	}()
 	go func() {
 		defer wg.Done()
-		optBest = compressOptimal(data, order, nMainSyms, pass1Model)
+		optBest = compressOptimal(data, order, nMainSyms, pass1Model, o)
 	}()
 	wg.Wait()
 
@@ -118,6 +126,10 @@ func compress(input []byte) []byte {
 // benchmark, patience=6 measured a real full-benchmark wall-time cost of
 // 61s -> 234s (~3.8x) for a further 5,436-byte gain over the
 // beam-widened baseline -- too steep a trade to keep as the default.
+//
+// This is now the *default* for Options.RefinePatience (options.go), not a
+// hard-wired constant: a caller who wants the patience=6 trade (or the
+// patience=1 speed) can ask for it per call.
 const refinePatience = 2
 
 // maxRefineItersHardCap is an absolute safety ceiling on refineParseWith's
@@ -130,15 +142,18 @@ const refinePatience = 2
 // refinePatience now at 2, this ceiling is rarely relevant in practice
 // (it would take a chunk finding a new best every third round, sustained
 // for 32 rounds straight, to ever reach it) but is kept generous since it
-// costs nothing unless actually hit.
+// costs nothing unless actually hit. Now the default for
+// Options.MaxRefineIters (options.go).
 const maxRefineItersHardCap = 32
 
 // refineParse runs findMatches through refineParseWith below -- see that
 // function's doc for the actual iteration logic. Factored out from
 // refineParseWith only so callers that always want findMatches don't need
 // to name it explicitly.
-func refineParse(data []byte, order, nMainSyms int, initial costModel) (toks []token, mainLens, lenLens []byte, encoded []byte) {
-	return refineParseWith(data, order, nMainSyms, initial, findMatches)
+func refineParse(data []byte, order, nMainSyms int, initial costModel, o encodeOptions) (toks []token, mainLens, lenLens []byte, encoded []byte) {
+	return refineParseWith(data, order, nMainSyms, initial, func(d []byte, m costModel) []token {
+		return findMatchesWith(d, m, o)
+	}, o)
 }
 
 // refineParseWith runs the given parse function (findMatches' bounded
@@ -186,7 +201,7 @@ func refineParse(data []byte, order, nMainSyms int, initial costModel) (toks []t
 // place. The best result seen across all attempted rounds (which may
 // not be the last one) is what's returned, keeping the same "try both,
 // keep smaller" safety property as everywhere else in this encoder.
-func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse func([]byte, costModel) []token) (toks []token, mainLens, lenLens []byte, encoded []byte) {
+func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse func([]byte, costModel) []token, o encodeOptions) (toks []token, mainLens, lenLens []byte, encoded []byte) {
 	bestToks := parse(data, initial)
 	bestMainLens, bestLenLens := buildTables(bestToks, nMainSyms)
 	bestEncoded := encodeBlock(data, order, bestToks, bestMainLens, bestLenLens,
@@ -204,7 +219,7 @@ func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse
 	alignedLens, _ := buildAlignedTable(bestToks)
 	model := costModel{mainLens: bestMainLens, lenLens: bestLenLens, alignedLens: alignedLens}
 	noImprove := 0
-	for i := 0; i < maxRefineItersHardCap && noImprove < refinePatience; i++ {
+	for i := 0; i < o.maxRefineIters && noImprove < o.refinePatience; i++ {
 		nt := parse(data, model)
 		fp := tokensFingerprint(nt)
 		nMainLens, nLenLens := buildTables(nt, nMainSyms)
@@ -262,8 +277,8 @@ func tokensFingerprint(toks []token) uint64 {
 // smallest of its VERBATIM, ALIGNED, 2-block-split, and splitStats
 // encodings -- the non-DP half of compress()'s work, split out so it can
 // run concurrently with compressOptimal (see compress above).
-func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) []byte {
-	toks, mainLens, lenLens, refinedVerbatim := refineParse(data, order, nMainSyms, pass1Model)
+func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel, o encodeOptions) []byte {
+	toks, mainLens, lenLens, refinedVerbatim := refineParse(data, order, nMainSyms, pass1Model, o)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
@@ -278,7 +293,15 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 	verbatim := refinedVerbatim // refineParse already measured this exact encoding while converging
 	var aligned, split, splitStats []byte
 	var wg sync.WaitGroup
-	wg.Add(3)
+	// Options.DisableBlockSplit (options.go) drops both split trials --
+	// each is a further full re-encode (trySplitChunkStats potentially
+	// several) of the token stream -- keeping only the VERBATIM and
+	// ALIGNED candidates.
+	nTrials := 3
+	if !o.blockSplit {
+		nTrials = 1
+	}
+	wg.Add(nTrials)
 	go func() {
 		defer wg.Done()
 		// Try an ALIGNED-offset block too: it costs 24 extra header bits
@@ -293,30 +316,32 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 		alignedLens, alignedCodes := buildAlignedTable(toks)
 		aligned = encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 	}()
-	go func() {
-		defer wg.Done()
-		// Try splitting into 2 blocks too: real data's statistics can vary
-		// enough within one 32768-byte chunk (e.g. text vs binary content)
-		// that giving each half its own Huffman table beats one table for
-		// the whole chunk, even after paying a second block's header
-		// overhead. See trySplitChunk for why this is a single, bounded
-		// 2-block attempt (not a general multi-way search) and gowim's
-		// own TODO.md for how much (or little) this actually saved on
-		// real content.
-		split = trySplitChunk(data, order, toks, nMainSyms)
-	}()
-	go func() {
-		defer wg.Done()
-		// Also try wimlib's own real, statistics-driven block-splitting
-		// heuristic (splitstats.go, ported directly from wimlib's source),
-		// which can produce zero, one, or several split points based on
-		// actual content shifts rather than trySplitChunk's single
-		// midpoint-only attempt. See gowim's own TODO.md for why this
-		// (block layout) was tried as a separate lever from this
-		// package's several already-tried-and-measured parse/cost-model
-		// changes.
-		splitStats = trySplitChunkStats(data, order, nMainSyms, toks)
-	}()
+	if o.blockSplit {
+		go func() {
+			defer wg.Done()
+			// Try splitting into 2 blocks too: real data's statistics can vary
+			// enough within one 32768-byte chunk (e.g. text vs binary content)
+			// that giving each half its own Huffman table beats one table for
+			// the whole chunk, even after paying a second block's header
+			// overhead. See trySplitChunk for why this is a single, bounded
+			// 2-block attempt (not a general multi-way search) and gowim's
+			// own TODO.md for how much (or little) this actually saved on
+			// real content.
+			split = trySplitChunk(data, order, toks, nMainSyms)
+		}()
+		go func() {
+			defer wg.Done()
+			// Also try wimlib's own real, statistics-driven block-splitting
+			// heuristic (splitstats.go, ported directly from wimlib's source),
+			// which can produce zero, one, or several split points based on
+			// actual content shifts rather than trySplitChunk's single
+			// midpoint-only attempt. See gowim's own TODO.md for why this
+			// (block layout) was tried as a separate lever from this
+			// package's several already-tried-and-measured parse/cost-model
+			// changes.
+			splitStats = trySplitChunkStats(data, order, nMainSyms, toks)
+		}()
+	}
 	wg.Wait()
 
 	best := verbatim
@@ -341,8 +366,10 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 // input (see optimal.go's doc for the precise scope/limitation), so
 // compress() keeps whichever of the two is actually smaller rather than
 // assuming this one wins.
-func compressOptimal(data []byte, order, nMainSyms int, pass1Model costModel) []byte {
-	_, _, _, best := refineParseWith(data, order, nMainSyms, pass1Model, findMatchesOptimal)
+func compressOptimal(data []byte, order, nMainSyms int, pass1Model costModel, o encodeOptions) []byte {
+	_, _, _, best := refineParseWith(data, order, nMainSyms, pass1Model, func(d []byte, m costModel) []token {
+		return findMatchesOptimalWith(d, m, o)
+	}, o)
 	return best
 }
 

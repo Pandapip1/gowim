@@ -711,7 +711,7 @@ func TestGreedyHash2RoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := compress(data)
+	out := compress(data, defaultEncodeOptions())
 	got, err := decompress(out, len(data))
 	if err != nil {
 		t.Fatalf("decompress: %v", err)
@@ -753,7 +753,7 @@ func TestHash2BoundaryOffsetDoesNotCrash(t *testing.T) {
 	data[n-2] = data[0]
 	data[n-1] = data[1]
 
-	out := compress(data)
+	out := compress(data, defaultEncodeOptions())
 	got, err := decompress(out, len(data))
 	if err != nil {
 		t.Fatalf("decompress: %v", err)

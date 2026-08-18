@@ -296,7 +296,15 @@ func hash2Candidate(prevOcc2 []int32, model costModel, litPrefix []int, nMainSym
 // there is no separate "split a long match" step: a run longer than
 // maxMatchLen is simply rediscovered on the next iteration, at which point
 // it is a repeat-offset match (queue slot 0), which is exactly as compact.
+//
+// findMatches is the default-tuned entry point; findMatchesWith takes the
+// resolved caller-facing knobs (see Options in options.go) -- of which only
+// MaxChainLen affects this parser, the rest being DP-specific.
 func findMatches(data []byte, model costModel) []token {
+	return findMatchesWith(data, model, defaultEncodeOptions())
+}
+
+func findMatchesWith(data []byte, model costModel, o encodeOptions) []token {
 	n := len(data)
 	var toks []token
 	if n == 0 {
@@ -358,7 +366,7 @@ func findMatches(data []byte, model costModel) []token {
 		}
 		cur := head[hash(pos)]
 		depth := 0
-		for cur >= 0 && depth < maxChainLen {
+		for cur >= 0 && depth < o.maxChainLen {
 			c := int(cur)
 			l, limit := matchLenCapped(c, pos)
 			if l > bestLen {
@@ -396,7 +404,7 @@ func findMatches(data []byte, model costModel) []token {
 		ptrLo := &left[pos]
 		ptrHi := &right[pos]
 		depth := 0
-		for cur >= 0 && depth < maxChainLen {
+		for cur >= 0 && depth < o.maxChainLen {
 			c := int(cur)
 			l, limit := matchLenCapped(c, pos)
 			if l >= limit || data[c+l] < data[pos+l] {

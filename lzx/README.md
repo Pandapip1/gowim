@@ -25,8 +25,14 @@ of conflict.
 
 ```go
 func Compress(data []byte) []byte
+func CompressWith(data []byte, opts Options) []byte
 func Decompress(data []byte, expectedSize int) ([]byte, error)
 ```
+
+`Compress` is `CompressWith(data, Options{})`: the zero `Options` is this
+package's default tuning, byte for byte. See
+[Speed/ratio presets](#speedratio-presets) for what `Options` lets a caller
+trade.
 
 Each call is one independent, stateless "chunk": no state (Huffman tables,
 window contents, x86-filter position) is carried between calls, matching how
@@ -115,7 +121,10 @@ for this package:
 | `e8filter.go` | the x86 CALL-instruction (`0xE8`) address-translation filter, ported directly from wimlib's scalar reference implementation |
 | `decode.go` | block-header parsing, block decoding (`VERBATIM`/`ALIGNED`/`UNCOMPRESSED`), LZ77 match copying |
 | `encode.go` | block writing (`VERBATIM` only), codeword-length delta encoding |
-| `matcher.go` | the greedy hash-chain LZ77 match finder |
+| `matcher.go` | the bounded-lookahead binary-tree LZ77 match finder, the repeat-offset queue, and the cost model |
+| `optimal.go` | the bounded multi-state beam DP parse tried alongside the lookahead parse |
+| `splitstats.go` | wimlib's statistics-driven block-splitting heuristic |
+| `options.go` | `Options`, its zero-means-default resolution, and the `Fastest`/`Fast`/`Balanced`/`DefaultOptions`/`Max` preset ladder |
 
 ## Usage
 
@@ -136,6 +145,48 @@ future `wim`-level integration) needs to slice out exactly that chunk's
 compressed bytes using the resource's chunk offset table, and knows the
 chunk's uncompressed size from the resource header / chunk size convention;
 this package does not do that slicing itself (see [Scope](#scope)).
+
+### Speed/ratio presets
+
+The encoder's search effort is a caller-visible knob, because the range is
+enormous: the same 4 MiB corpus takes 20.8s or 0.21s to compress depending
+on the preset, for a 2.9% difference in output size. `CompressWith` takes an
+`Options` whose zero value is exactly what `Compress` does, so a caller
+overrides only the knobs it cares about:
+
+```go
+compressed := lzx.CompressWith(original, lzx.Fast())      // a named ladder rung
+compressed = lzx.CompressWith(original, lzx.Options{      // or tune directly
+    BeamWidth:      4,
+    RefinePatience: 1,
+})
+```
+
+Measured 2026-08-18 on a 24-core x86-64 Linux machine (Go 1.26.5), 32 KiB
+chunks: "serial" is total time for an 832 KiB / 26-chunk mixed corpus
+compressed one chunk at a time; "parallel", "output" and "alloc" are for a
+4 MiB / 128-chunk corpus compressed across all cores, the way the `wim`
+package drives this encoder.
+
+| preset | serial | parallel | output | alloc | vs default |
+|---|---|---|---|---|---|
+| `Fastest()` | 0.54s | 20.2 MB/s | 1617878 | 1.5 GB | +2.91% |
+| `Fast()` | 0.80s | 13.8 MB/s | 1617228 | 2.2 GB | +2.87% |
+| `Balanced()` | 2.33s | 2.9 MB/s | 1580330 | 13.2 GB | +0.52% |
+| `DefaultOptions()` | 15.34s | 0.51 MB/s | 1572132 | 74.7 GB | — |
+| `Max()` | 47.84s | 0.20 MB/s | 1571204 | 153.8 GB | −0.06% |
+
+The parallel column is not simply 24x the serial one: at the default
+settings this encoder allocates fast enough (measured 9.1 GB/s) that GC,
+not compute, is what limits a many-core run. That is also why `Fast`'s
+parallel speedup (27x) exceeds its serial one (19x) — turning off the DP
+parser removes almost all of the allocation, not just the CPU.
+
+Every preset produces a valid LZX chunk; the format never changes. Both the
+default and the `DisableDP` path were verified byte-for-byte through real
+wimlib (`wimlib-imagex verify` plus `wimextract` and `diff -r` over a
+3.5 MB / ~110-chunk LZX WIM built by this workspace's `wim` package), not
+just through this package's own decoder.
 
 ### A note on incompressible data
 

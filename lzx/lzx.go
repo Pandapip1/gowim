@@ -256,14 +256,34 @@ func numMainSyms(order int) int {
 //
 // The returned data decodes back to an identical copy of data via
 // Decompress(result, len(data)).
+//
+// Compress uses this package's default speed/ratio tuning. Use CompressWith
+// to pick a different point on that tradeoff (see Options and its preset
+// ladder in options.go); Compress(data) is exactly CompressWith(data,
+// Options{}).
 func Compress(data []byte) []byte {
+	return CompressWith(data, Options{})
+}
+
+// CompressWith is Compress with an explicit speed/compression-ratio
+// tradeoff. See Options for the individual knobs and Fastest/Fast/
+// DefaultOptions/Max for the measured preset ladder most callers should
+// use; the zero Options is the default tuning, so CompressWith(data,
+// Options{}) and Compress(data) produce identical bytes.
+//
+// Every preset and every combination of fields produces a valid LZX chunk:
+// opts only affects how hard the encoder searches, never the format, so the
+// result always decodes back to an identical copy of data via
+// Decompress(result, len(data)) -- and through a real independent decoder
+// (wimlib) just the same.
+func CompressWith(data []byte, opts Options) []byte {
 	if len(data) == 0 {
 		return []byte{}
 	}
 	if len(data) > maxWindowSize {
 		panic("lzx: Compress: input exceeds maximum supported LZX window (2097152 bytes)")
 	}
-	return compress(data)
+	return compress(data, opts.resolve())
 }
 
 // Decompress decompresses a single LZX chunk produced by Compress (or by a

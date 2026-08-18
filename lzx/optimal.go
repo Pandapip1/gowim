@@ -52,7 +52,15 @@ package lzx
 // worst-case cost from blowing up on pathological (e.g. highly
 // repetitive) input. Real-world measurements of this bounding's actual
 // cost/benefit are in gowim's own TODO.md.
+//
+// findMatchesOptimal is the default-tuned entry point; findMatchesOptimalWith
+// takes the resolved caller-facing knobs (see Options in options.go), which
+// is what compressOptimal threads through.
 func findMatchesOptimal(data []byte, model costModel) []token {
+	return findMatchesOptimalWith(data, model, defaultEncodeOptions())
+}
+
+func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []token {
 	n := len(data)
 	if n == 0 {
 		return nil
@@ -105,8 +113,10 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	// gowim's own TODO.md) -- found while investigating why gowim still
 	// trailed wimlib's real encoder despite its match discovery being
 	// verified non-worse; this alone was not the dominant cause (see the
-	// same TODO.md entry for what was).
-	const maxFreshCandidates = 24
+	// same TODO.md entry for what was). Now the default value of
+	// Options.MaxFreshCandidates (options.go) rather than a hard constant:
+	// it is one of the knobs the preset ladder turns down for speed.
+	maxFreshCandidates := o.maxFreshCandidates
 
 	// bstSearchAll walks the BST rooted at head[hash(pos)] exactly as
 	// bstSearch does (matcher.go), but instead of keeping only the single
@@ -123,7 +133,7 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 		bestLen := 0
 		cur := head[hash(pos)]
 		depth := 0
-		for cur >= 0 && depth < maxChainLen {
+		for cur >= 0 && depth < o.maxChainLen {
 			c := int(cur)
 			l, limit := matchLenCapped(c, pos)
 			if l > bestLen && l >= minMatch {
@@ -152,7 +162,7 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 		ptrLo := &left[pos]
 		ptrHi := &right[pos]
 		depth := 0
-		for cur >= 0 && depth < maxChainLen {
+		for cur >= 0 && depth < o.maxChainLen {
 			c := int(cur)
 			l, limit := matchLenCapped(c, pos)
 			if l >= limit || data[c+l] < data[pos+l] {
@@ -174,8 +184,11 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	// beamWidth bounds how many distinct queue-state hypotheses survive at
 	// each position. A higher-cost arrival is kept only if it carries a
 	// queue state not already covered by a cheaper arrival, and only if
-	// it's among the beamWidth cheapest such distinct-queue arrivals.
-	const beamWidth = 10
+	// it's among the beamWidth cheapest such distinct-queue arrivals. Now
+	// the default value of Options.BeamWidth (options.go) rather than a
+	// hard constant, since it multiplies both states kept per position and
+	// edges relaxed per state and is thus a direct speed/ratio knob.
+	beamWidth := o.beamWidth
 
 	// dpEdge records how one state at one position was reached: either a
 	// literal (isMatch false) or a match, plus the predecessor position
@@ -293,9 +306,11 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 	// from minMatchLen up to the full length -- trying every length is
 	// what a from-scratch optimal parser would do, but is unbounded cost
 	// for highly repetitive input (a run of identical bytes can have a
-	// repeat length up to maxMatchLen at nearly every position).
+	// repeat length up to maxMatchLen at nearly every position). How many
+	// samples to take is Options.DPRepeatLengthSamples (options.go): at 1
+	// only the full length is tried, halving the repeat-edge count.
 	repeatLengthSamples := func(full int) []int {
-		if full <= minMatchLen+4 {
+		if full <= minMatchLen+4 || o.repeatLengthSamples < 2 {
 			return []int{full}
 		}
 		return []int{full, full / 2}
@@ -322,7 +337,7 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 		// from position i, so this is computed once per position, not
 		// once per state.
 		hash2Offset, hash2OK := -1, false
-		if q := prevOcc2[i]; q >= 0 {
+		if q := prevOcc2[i]; o.dpHash2 && q >= 0 {
 			off2 := i - int(q)
 			slot2 := offsetSlot(uint32(off2))
 			if numChars+slot2*numLenHeaders < nMainSyms {
