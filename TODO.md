@@ -429,6 +429,86 @@ any compressed output at all.
       not attempted here given the risk/complexity judged not worthwhile
       relative to the diminishing returns already measured on cheaper,
       bounded steps (items 4 and 6 in particular).
+
+      **Item 8 (2026-08-18, attempted anyway after the above): a bounded
+      DP parse, deliberately NOT wimlib's full near-optimal parser.**
+      `findMatchesOptimal` (`optimal.go`) is a forward shortest-path DP
+      over the whole chunk using the same binary-tree match finder, but
+      tracks a SINGLE repeat-offset queue trajectory per position (the
+      queue state belonging to whichever predecessor gives the minimum
+      cost to reach that position) rather than exploring every reachable
+      queue-state hypothesis the way wimlib's `lzx_compress_near_optimal`
+      does -- a real, acknowledged approximation: a slightly costlier path
+      to some position might in principle carry a queue state enabling a
+      much cheaper match afterward, and this DP would never discover that
+      trade-off. Edge counts are explicitly bounded per position
+      (`repeatLengthSamples`: full length + one midpoint length per
+      repeat-offset candidate, not every length from `minMatchLen` up;
+      `maxFreshCandidates`: at most 8 Pareto-frontier fresh-offset
+      candidates from the binary-tree walk) specifically to avoid
+      unbounded worst-case cost on highly repetitive input, given this
+      project's own already-documented performance sensitivity on
+      multi-GB real WIM files (see "Performance: concurrency
+      opportunities" below). Wired into `compress()` as an additional
+      "try it, keep it only if smaller" candidate alongside the existing
+      bounded-lookahead/ALIGNED/split candidates (not a replacement --
+      the single-queue-trajectory approximation is not guaranteed to beat
+      the bounded lookahead on every input).
+
+      **A real bug was found and fixed in the test harness while
+      verifying this, not in the DP itself** -- worth recording since it
+      cost real debugging time: an early ad hoc round-trip check compared
+      the decoder's output against the *preprocessed* (post-E8-filter)
+      buffer instead of the true original data. `Decompress`/`decompress`
+      always reverses the E8 filter internally when it sees a literal
+      0xE8 symbol in the main tree, so that comparison was structurally
+      wrong regardless of encoder correctness -- it happened to surface
+      only for inputs where a real (or coincidental, since the filter is
+      unconditional and does not check for genuine x86 code) 0xE8 byte
+      occurred, which is exactly why it looked like a rare, DP-specific
+      correctness bug at first. Diagnosed by: (1) verifying tokens are
+      real matches with full coverage (passed -- ruled out the DP itself
+      producing invalid matches), (2) adding a temporary decode-side
+      trace hook and confirming the decoded event sequence matched the
+      token list exactly (passed -- ruled out an encode/decode bitstream
+      desync), which left only the test's own comparison buffer as the
+      remaining suspect, per this project's standing discipline of
+      verifying against real, independently-checked ground truth at each
+      step rather than guessing at the next hypothesis. `TestFindMatches
+      OptimalRoundTrips`/`TestFindMatchesOptimalStress` (200-trial) now
+      encode this lesson directly: they always compare against the true
+      original data, never the preprocessed intermediate.
+
+      Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+      combined with items 1-7 and this DP trial, total dropped from
+      6,815,102 to 6,752,430 bytes -- a further 0.92% reduction, notably
+      the best single-item size win of this whole second round (items 4,
+      6, and 7 each landed under 0.4%). Cumulatively: 7,169,604 down to
+      6,752,430 bytes (5.82% total reduction from the post-3-cause
+      baseline), narrowing the gap to wimlib's level-100 output from the
+      original +7.7% down to **+1.43%**. Real, honestly-reported cost:
+      whole-file encode time roughly doubled again on top of the other 7
+      items, from ~4s to ~7.1s for this 13MB test file (~1.8MB/s
+      throughput) -- confirming the up-front concern that a DP-based pass
+      is a real performance tradeoff, not a free win, though the
+      size-per-time-cost ratio was still better than items 4-7
+      individually delivered. Given this project's own documented
+      performance sensitivity on multi-GB real WIM images (several
+      minutes single-threaded even before this change -- see "Performance:
+      concurrency opportunities" below), anyone wiring this up for bulk
+      real-world use should weigh that cost against the 0.92% marginal
+      size win for their own use case; it is left wired in by default
+      here since gowim's own test suite and this project's own explicit
+      request prioritized "try it and measure honestly" over pre-emptively
+      gating it behind a flag.
+
+      What remains unclosed (per the single-queue-trajectory
+      approximation and the bounded edge counts above): a fully faithful
+      multi-state DP matching wimlib's own `lzx_compress_near_optimal`
+      exactly. Whether that would close most of the remaining ~1.43% gap
+      or only a small further slice of it is genuinely unknown -- unlike
+      every other step in this investigation, this was not measured,
+      since it was not attempted.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.

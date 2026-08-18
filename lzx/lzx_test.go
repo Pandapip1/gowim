@@ -558,6 +558,116 @@ func TestTrySplitChunkProducesValidSplit(t *testing.T) {
 	}
 }
 
+// findMatchesOptimalRoundTrip verifies findMatchesOptimal's tokens are all
+// real matches with full coverage, then round-trips them through the real
+// encoder/decoder (via the public Compress/Decompress path is NOT used
+// here since that exercises the bounded-lookahead parse too -- this
+// isolates findMatchesOptimal specifically by building its own Huffman
+// tables and calling encodeBlock/Decompress directly).
+func findMatchesOptimalRoundTrip(t *testing.T, name string, orig []byte) {
+	t.Helper()
+	pre := append([]byte{}, orig...)
+	lzxPreprocess(pre)
+
+	toks := findMatchesOptimal(pre, costModel{})
+
+	pos := 0
+	for ti, tok := range toks {
+		if !tok.isMatch {
+			pos++
+			continue
+		}
+		src := pos - tok.offset
+		if src < 0 || pos+tok.length > len(pre) {
+			t.Fatalf("%s: tok[%d] pos=%d out of bounds off=%d len=%d", name, ti, pos, tok.offset, tok.length)
+		}
+		for k := 0; k < tok.length; k++ {
+			if pre[src+k] != pre[pos+k] {
+				t.Fatalf("%s: tok[%d] pos=%d not a real match at byte %d", name, ti, pos, k)
+			}
+		}
+		pos += tok.length
+	}
+	if pos != len(pre) {
+		t.Fatalf("%s: coverage mismatch got=%d want=%d", name, pos, len(pre))
+	}
+
+	order, _ := windowOrder(len(pre))
+	nMainSyms := numMainSyms(order)
+	mainLens, lenLens := buildTables(toks, nMainSyms)
+	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
+	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
+	out := encodeBlock(pre, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+
+	got, err := Decompress(out, len(orig))
+	if err != nil {
+		t.Fatalf("%s: decompress error: %v", name, err)
+	}
+	if !bytes.Equal(got, orig) {
+		t.Fatalf("%s: round-trip mismatch", name)
+	}
+}
+
+// TestFindMatchesOptimalRoundTrips guards findMatchesOptimal (the bounded
+// single-queue-trajectory DP parse added 2026-08-18, see optimal.go and
+// gowim's own TODO.md) directly against a handful of representative
+// inputs. A real bug was found and fixed while adding this (not in
+// findMatchesOptimal itself, but in an early ad hoc test harness that
+// compared decoded output against the *preprocessed* buffer instead of
+// the original pre-E8-filter data -- decompress() always reverses the E8
+// filter internally, so that comparison was structurally wrong regardless
+// of encoder correctness; the lesson generalized into this helper always
+// comparing against the true original).
+func TestFindMatchesOptimalRoundTrips(t *testing.T) {
+	findMatchesOptimalRoundTrip(t, "all zeros", make([]byte, 32768))
+	findMatchesOptimalRoundTrip(t, "repetitive", bytes.Repeat([]byte("AB"), 5000))
+
+	r := rand.New(rand.NewSource(7))
+	rnd := make([]byte, 20000)
+	r.Read(rnd)
+	findMatchesOptimalRoundTrip(t, "random", rnd)
+
+	pattern := []byte("the quick brown fox jumps over the lazy dog")
+	patterned := make([]byte, 20000)
+	for i := range patterned {
+		patterned[i] = pattern[i%len(pattern)]
+	}
+	findMatchesOptimalRoundTrip(t, "patterned", patterned)
+}
+
+// TestFindMatchesOptimalStress runs findMatchesOptimalRoundTrip across many
+// random/patterned/mixed inputs of varying sizes -- the same style of
+// stress coverage the other parser passes (repeat-offset queue,
+// binary-tree finder, bounded lookahead) each got when added.
+func TestFindMatchesOptimalStress(t *testing.T) {
+	r := rand.New(rand.NewSource(999))
+	for trial := 0; trial < 200; trial++ {
+		n := r.Intn(4000) + 1
+		data := make([]byte, n)
+		switch trial % 4 {
+		case 0:
+			r.Read(data)
+		case 1:
+			for i := range data {
+				data[i] = byte(r.Intn(4))
+			}
+		case 2:
+			pattern := make([]byte, r.Intn(50)+1)
+			r.Read(pattern)
+			for i := range data {
+				data[i] = pattern[i%len(pattern)]
+			}
+		case 3:
+			for i := range data {
+				if r.Intn(10) == 0 {
+					data[i] = byte(r.Intn(256))
+				}
+			}
+		}
+		findMatchesOptimalRoundTrip(t, "stress", data)
+	}
+}
+
 func TestCompressExceedsMaxWindow(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

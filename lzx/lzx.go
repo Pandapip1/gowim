@@ -80,17 +80,22 @@
 //   - Compression-ratio or match-finding optimality. The encoder uses a
 //     bounded 3-way-lookahead LZ77 match finder (binary-tree based, bounded
 //     search depth, plus a direct check of the repeat-offset LRU queue --
-//     see lzx/matcher.go) and emits either 1 or 2 blocks per call
-//     (compress() tries a 2-block split at the token boundary closest to
-//     the midpoint and keeps it only if smaller -- see encode.go's
-//     trySplitChunk -- never more than 2, i.e. not a general multi-way
-//     block-split search), each block independently VERBATIM or ALIGNED
-//     (whichever a same-tokens trial encoding of each comes out smaller as
-//     -- see encode.go's encodeBlock/writeBlockInto/buildAlignedTable) --
-//     it never emits an uncompressed block, nor does it use a full
-//     optimal/DP parse or an iterative bit-cost model (beyond the two-pass
-//     Huffman-informed re-parse in compress(), which is not the same as a
-//     full iterative optimizer). This is a valid, spec-compliant subset (block
+//     see lzx/matcher.go), and additionally tries a bounded, single-queue-
+//     trajectory DP parse (lzx/optimal.go's findMatchesOptimal, kept only
+//     if it encodes smaller than the lookahead parse) -- neither is wimlib's
+//     full near-optimal parser, which explores every reachable repeat-
+//     offset-queue state; see optimal.go's own doc for exactly where this
+//     package's DP falls short of that. compress() emits either 1 or 2
+//     blocks per call (it tries a 2-block split at the token boundary
+//     closest to the midpoint and keeps it only if smaller -- see
+//     encode.go's trySplitChunk -- never more than 2, i.e. not a general
+//     multi-way block-split search), each block independently VERBATIM or
+//     ALIGNED (whichever a same-tokens trial encoding of each comes out
+//     smaller as -- see encode.go's encodeBlock/writeBlockInto/
+//     buildAlignedTable) -- it never emits an uncompressed block, nor does
+//     it use a full iterative bit-cost model across the whole file (beyond
+//     the two-pass Huffman-informed re-parse in compress(), which is not
+//     the same as a full iterative optimizer). This is a valid, spec-compliant subset (block
 //     type is signaled per-block, and wimlib's own compressor already
 //     demonstrates that a real decoder must accept an all-verbatim stream)
 //     that a compliant decoder, including wimlib, must decode correctly;

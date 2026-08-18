@@ -97,6 +97,27 @@ type candidateMatch struct {
 	value  int // costModel.matchValue of this candidate; only valid if found
 }
 
+// applyMatch returns the recent-offsets queue that results from choosing a
+// match with the given repeat/offset fields, without mutating q (queue is
+// a fixed-size array, an ordinary Go value type, so this returns an
+// independent copy). Shared by findMatches' bounded lookahead and
+// findMatchesOptimal's DP (see optimal.go), both of which need to evaluate
+// a candidate's effect on the queue without necessarily committing to it.
+func applyMatch(q [numRecentOffsets]int32, repeat, offset int) [numRecentOffsets]int32 {
+	if repeat >= 0 {
+		if repeat != 0 {
+			used := q[repeat]
+			q[repeat] = q[0]
+			q[0] = used
+		}
+		return q
+	}
+	q[2] = q[1]
+	q[1] = q[0]
+	q[0] = int32(offset)
+	return q
+}
+
 // findMatches runs a bounded 3-way lookahead LZ77 parse over data using a
 // binary-tree match finder for fresh offsets, plus a direct check of the
 // LZX repeat-offset LRU queue (the three most recently used match offsets)
@@ -319,26 +340,6 @@ func findMatches(data []byte, model costModel) []token {
 		return best
 	}
 
-	// applyMatch returns the recent-offsets queue that results from
-	// choosing m, without mutating q (queue is a fixed-size array, an
-	// ordinary Go value type, so this returns an independent copy) --
-	// used by the bounded lookahead below to evaluate a candidate's
-	// continuation without committing to it.
-	applyMatch := func(q [numRecentOffsets]int32, m candidateMatch) [numRecentOffsets]int32 {
-		if m.repeat >= 0 {
-			if m.repeat != 0 {
-				used := q[m.repeat]
-				q[m.repeat] = q[0]
-				q[0] = used
-			}
-			return q
-		}
-		q[2] = q[1]
-		q[1] = q[0]
-		q[0] = int32(m.offset)
-		return q
-	}
-
 	insertRange := func(start, end int) {
 		for p := start; p < end; p++ {
 			bstInsert(p)
@@ -399,10 +400,10 @@ func findMatches(data []byte, model costModel) []token {
 
 		consider(lookaheadOption{total: continuationValue(i+1, queue)}) // literal now
 		if rep.found && rep.value > 0 {
-			consider(lookaheadOption{cand: rep, total: rep.value + continuationValue(i+rep.length, applyMatch(queue, rep))})
+			consider(lookaheadOption{cand: rep, total: rep.value + continuationValue(i+rep.length, applyMatch(queue, rep.repeat, rep.offset))})
 		}
 		if fresh.found && fresh.value > 0 {
-			consider(lookaheadOption{cand: fresh, total: fresh.value + continuationValue(i+fresh.length, applyMatch(queue, fresh))})
+			consider(lookaheadOption{cand: fresh, total: fresh.value + continuationValue(i+fresh.length, applyMatch(queue, fresh.repeat, fresh.offset))})
 		}
 
 		if !best.cand.found {
@@ -413,7 +414,7 @@ func findMatches(data []byte, model costModel) []token {
 
 		m := best.cand
 		toks = append(toks, token{isMatch: true, offset: m.offset, length: m.length, repeat: m.repeat})
-		queue = applyMatch(queue, m)
+		queue = applyMatch(queue, m.repeat, m.offset)
 		insertRange(i, i+m.length)
 		i += m.length
 	}
