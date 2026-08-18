@@ -467,6 +467,43 @@ func TestFindMatchesBSTFindsGlobalBestWithinSmallBuffer(t *testing.T) {
 	}
 }
 
+// TestCodewordLenTokensUsesSymbol19 guards the precode symbol 19 support
+// added to codewordLenTokens (2026-08-18, see gowim's own TODO.md): a run
+// of 4-5 consecutive equal nonzero deltas should collapse into one symbol
+// 19 token (plus its shared delta value) instead of 4-5 individual symbols.
+func TestCodewordLenTokensUsesSymbol19(t *testing.T) {
+	deltas := make([]byte, 100)
+	for i := 10; i < 15; i++ {
+		deltas[i] = 5
+	}
+	toks := codewordLenTokens(deltas)
+	found19 := false
+	for _, tok := range toks {
+		if tok.presym == 19 {
+			found19 = true
+			if tok.runLen != 5 || tok.sym2 != 5 {
+				t.Fatalf("bad symbol19 token: %+v", tok)
+			}
+		}
+	}
+	if !found19 {
+		t.Fatalf("expected a symbol19 token, tokens=%+v", toks)
+	}
+}
+
+// TestRoundTripExercisesSymbol19Indirectly checks that data likely to
+// produce runs of equal nonzero main-tree codeword lengths still round-
+// trips correctly through the real bit writer/reader (an indirect but
+// real exercise of symbol 19's actual encode/decode path, not just token
+// generation in isolation).
+func TestRoundTripExercisesSymbol19Indirectly(t *testing.T) {
+	data := make([]byte, 32768)
+	for i := range data {
+		data[i] = byte(i % 20)
+	}
+	roundTrip(t, "symbol19-ish", data)
+}
+
 func TestCompressExceedsMaxWindow(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

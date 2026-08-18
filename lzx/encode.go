@@ -219,51 +219,77 @@ func offsetSlot(offset uint32) int {
 }
 
 // codewordLenToken is one symbol emitted while transmitting a run of
-// codeword lengths via the precode: either a single delta value (presym
-// 0-16) or a compressed run of consecutive zero-delta ("no change from
-// prevLens") entries using precode symbol 17 (a run of 4-19) or 18 (a run
-// of 20-51), matching wimlib's lzx_write_compressed_code /
+// codeword lengths via the precode: a single delta value (presym 0-16), a
+// compressed run of consecutive zero-delta ("no change from prevLens")
+// entries using precode symbol 17 (a run of 4-19) or 18 (a run of 20-51),
+// or a short run of 4-5 consecutive *equal nonzero* deltas using precode
+// symbol 19 (sym2 carries the shared delta value, itself precode-encoded
+// from the same alphabet) -- matching wimlib's lzx_write_compressed_code /
 // LZX_PRECODE_NUM_SYMBOLS run-length convention (this package's decoder
 // already implements the read side -- see decode.go's readCodewordLens).
-// Symbol 19 (a short run of identical *nonzero* deltas) is not produced
-// here: it is a secondary optimization on top of this one, of much smaller
-// value, and is left for a future pass -- see gowim's own TODO.md.
 type codewordLenToken struct {
 	presym int
-	runLen int // only meaningful when presym is 17 or 18
+	runLen int // meaningful when presym is 17, 18, or 19
+	sym2   int // meaningful when presym is 19: the shared delta value (a plain 0-16 symbol)
 }
 
 func codewordLenTokens(deltas []byte) []codewordLenToken {
 	var toks []codewordLenToken
 	i := 0
 	for i < len(deltas) {
-		if deltas[i] != 0 {
-			toks = append(toks, codewordLenToken{presym: int(deltas[i])})
-			i++
+		if deltas[i] == 0 {
+			j := i
+			for j < len(deltas) && deltas[j] == 0 {
+				j++
+			}
+			run := j - i
+			for run >= 4 {
+				if run >= 20 {
+					l := run
+					if l > 51 {
+						l = 51
+					}
+					toks = append(toks, codewordLenToken{presym: 18, runLen: l})
+					run -= l
+				} else {
+					toks = append(toks, codewordLenToken{presym: 17, runLen: run})
+					run = 0
+				}
+			}
+			for k := 0; k < run; k++ {
+				toks = append(toks, codewordLenToken{presym: 0})
+			}
+			i = j
 			continue
 		}
+
+		// A run of 4-5 consecutive equal *nonzero* deltas collapses into 2
+		// symbols (19 plus the shared delta) instead of 4-5 individual
+		// symbols. Valid here specifically because this package's encoder
+		// always transmits codeword lengths against an all-zero "previous
+		// block" baseline (see writeCodewordLens' prevLens argument being
+		// all-zero at every call site in compress()), so a run of equal
+		// deltas is exactly a run of equal actual codeword lengths, which
+		// is what symbol 19's decode side (decode.go's readCodewordLens,
+		// case 19) assumes when it applies the same resolved length to
+		// every position in the run.
 		j := i
-		for j < len(deltas) && deltas[j] == 0 {
+		for j < len(deltas) && deltas[j] == deltas[i] {
 			j++
 		}
 		run := j - i
-		for run >= 4 {
-			if run >= 20 {
-				l := run
-				if l > 51 {
-					l = 51
-				}
-				toks = append(toks, codewordLenToken{presym: 18, runLen: l})
-				run -= l
-			} else {
-				toks = append(toks, codewordLenToken{presym: 17, runLen: run})
-				run = 0
+		if run >= 4 {
+			rl := 5
+			if run < 5 {
+				rl = 4
 			}
+			toks = append(toks, codewordLenToken{presym: 19, runLen: rl, sym2: int(deltas[i])})
+			i += rl
+			continue
 		}
-		for k := 0; k < run; k++ {
-			toks = append(toks, codewordLenToken{presym: 0})
-		}
-		i = j
+
+		toks = append(toks, codewordLenToken{presym: int(deltas[i])})
+		i++
 	}
 	return toks
 }
@@ -291,6 +317,12 @@ func writeCodewordLens(w *bitWriter, lens, prevLens []byte) {
 	freqs := make([]uint32, precodeNumSymbols)
 	for _, t := range toks {
 		freqs[t.presym]++
+		if t.presym == 19 {
+			// sym2 is itself precode-encoded from the same alphabet (see
+			// decode.go's readCodewordLens, case 19), so it needs its own
+			// frequency contribution alongside every top-level symbol.
+			freqs[t.sym2]++
+		}
 	}
 	precodeLens := buildLengths(freqs, maxPrecodeCodewordLen)
 	precodeCodes := canonicalCodewords(precodeLens, maxPrecodeCodewordLen)
@@ -305,6 +337,9 @@ func writeCodewordLens(w *bitWriter, lens, prevLens []byte) {
 			w.writeBits(uint32(t.runLen-4), 4)
 		case 18:
 			w.writeBits(uint32(t.runLen-20), 5)
+		case 19:
+			w.writeBits(uint32(t.runLen-4), 1)
+			w.writeBits(uint32(precodeCodes[t.sym2]), uint(precodeLens[t.sym2]))
 		}
 	}
 }

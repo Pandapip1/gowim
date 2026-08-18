@@ -349,6 +349,30 @@ any compressed output at all.
          A full optimal/DP parse with real repeat-offset-state exploration
          remains unimplemented; this bounded lookahead is presented
          honestly as a partial step, not a substitute for it.
+      6. **[x] Precode symbol 19 (short runs of identical nonzero deltas).**
+         `codewordLenTokens` in `encode.go` now also collapses a run of 4-5
+         consecutive *equal nonzero* deltas into one symbol-19 token
+         (itself plus the shared delta value, which is separately precode-
+         encoded -- see decode.go's `readCodewordLens`, case 19, already
+         implementing the read side) instead of 4-5 individual symbols.
+         Valid specifically because this package's encoder always
+         transmits codeword lengths against an all-zero "previous block"
+         baseline, so a run of equal deltas is exactly a run of equal
+         actual codeword lengths, which is what symbol 19's decode side
+         assumes. Guarded by `TestCodewordLenTokensUsesSymbol19` (direct
+         token-level check) and `TestRoundTripExercisesSymbol19Indirectly`
+         (a real encode/decode round-trip on data likely to trigger it).
+
+         Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+         combined with items 1-6, total dropped from 6,818,710 to
+         6,818,486 bytes -- a negligible 224-byte (~0.003%) reduction,
+         exactly matching the prediction that this was the smallest-value
+         item on the list (most of the precode's real-world saving was
+         already captured by symbols 17/18 in an earlier commit; real main-
+         tree codeword lengths apparently don't have many runs of 4-5
+         *identical nonzero* values back to back). Implemented anyway per
+         explicit instruction to go down the full list; kept since it's
+         correctness-verified and adds negligible risk or complexity.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.
