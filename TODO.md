@@ -828,6 +828,56 @@ any codec's actual algorithm.
         where the profitable boundary sits between those and "too fine to
         bother."
 
+        **SIMD investigation (2026-08-18): word-at-a-time (SWAR) kept,
+        Go 1.26's experimental `simd`/`archsimd` package tried and
+        removed.** The match finder's hottest inner loop --
+        `matchLenCapped`/`matchLenAt`'s common-prefix-length comparison,
+        called on nearly every candidate during a parse -- was a naive
+        byte-by-byte loop. Replaced with `commonPrefixLen`
+        (`lzx/matchlen.go`), comparing 8 bytes at a time via a single XOR
+        plus `math/bits.TrailingZeros64` ("SWAR" -- SIMD-within-a-register
+        -- the same technique real encoders like zstd's `ZSTD_count` use
+        for this exact operation), portable to every Go-supported
+        architecture with no build tags or CPU-feature checks. Verified
+        byte-identical output (6,730,928 bytes) and a real further
+        speedup: ~11.7s -> ~9.8s on the same real benchmark.
+
+        Also tried real AVX2 vector instructions via Go 1.26's
+        `simd/archsimd` package (`goexperiment.simd` build tag,
+        `GOEXPERIMENT=simd`), comparing 32 bytes at a time. This surfaced
+        a real, checked (not assumed) Go-compiler fact worth recording:
+        this compiler's inliner has a fixed per-call cost floor of
+        roughly 60-72 (confirmed via isolated minimal reproductions, not
+        estimated) against its default budget of 80, so `commonPrefixLen`
+        can never be inlined at its call sites once it needs to call out
+        to extend a match at all -- no amount of restructuring closes
+        that gap, since the mere presence of a function call already
+        consumes most of the budget before counting anything else. This
+        applies equally to the plain SWAR version (also never inlined),
+        yet SWAR still measured faster than the byte-loop baseline -- so
+        inlining was a red herring for *this* speedup; the real win was
+        just doing less work per comparison.
+
+        The AVX2 version's real problem was different: on the initial
+        attempt, it always ran the `archsimd.X86.AVX2()` check and set up
+        vector registers on every single call, even for short comparisons
+        that mismatch or terminate well under 32 bytes -- the common case
+        for real binary data. Measured result: ~18.5s, *worse* than even
+        the original byte-loop baseline (~11.7s). Restructuring to defer
+        all AVX2 machinery into a separate function reached only once an
+        8-byte fast path confirms a real match worth extending brought it
+        down to ~10.7-10.8s -- much closer to, but still measurably worse
+        than, plain SWAR's ~9.8s. Raising the threshold before even
+        attempting AVX2 (requiring at least 2 full 32-byte blocks'
+        remaining length) barely moved that number. Given further tuning
+        would need real CPU profiling to make progress (rather than more
+        parameter guessing) and the practical downsides of shipping it at
+        all -- `GOEXPERIMENT=simd`-only, AMD64-only, and an explicitly
+        unstable API not covered by Go's compatibility promise, none of
+        which SWAR has -- it was removed rather than kept as an
+        unused-by-default option. `lzx/matchlen.go` is the sole
+        remaining implementation; there is no build-tag split anymore.
+
 ## In-memory WIM filesystem operations
 
 Replaces what the script does via a real DISM mount, by operating on the

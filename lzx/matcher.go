@@ -212,10 +212,7 @@ func findMatches(data []byte, model costModel) []token {
 		if limit > maxMatchLen {
 			limit = maxMatchLen
 		}
-		for l < limit && data[c+l] == data[pos+l] {
-			l++
-		}
-		return l, limit
+		return commonPrefixLen(data, c, pos, limit), limit
 	}
 
 	// bstSearch finds the best match for the suffix starting at pos among
@@ -295,11 +292,7 @@ func findMatches(data []byte, model costModel) []token {
 		if limit > maxMatchLen {
 			limit = maxMatchLen
 		}
-		l := 0
-		for l < limit && data[i+l] == data[j+l] {
-			l++
-		}
-		return l
+		return commonPrefixLen(data, i, j, limit)
 	}
 
 	repeatLenAt := func(i int, off int32) int {

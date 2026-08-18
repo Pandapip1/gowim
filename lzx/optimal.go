@@ -73,10 +73,7 @@ func findMatchesOptimal(data []byte, model costModel) []token {
 		if limit > maxMatchLen {
 			limit = maxMatchLen
 		}
-		for l < limit && data[c+l] == data[pos+l] {
-			l++
-		}
-		return l, limit
+		return commonPrefixLen(data, c, pos, limit), limit
 	}
 
 	// freshCandidate is one Pareto-frontier (length, offset) pair found by
