@@ -804,6 +804,30 @@ any codec's actual algorithm.
           independent work, so there is no risk of the "more exploration
           under an approximate model backfires" failure mode from item 10.
 
+        **A further, tried-and-reverted experiment (2026-08-18):**
+        parallelizing `findMatchesOptimal`'s up-to-`beamWidth` (4) states
+        *within a single position* -- i.e. spawning goroutines for each of
+        the up to 4 queue-state hypotheses' relax work at every position,
+        collecting each into a private slice, then merging serially
+        (avoiding any data race on the shared `states` array). Correctness
+        held (same byte-identical 6,730,928-byte output), but real
+        wall-clock got dramatically *worse*: ~11.7s -> ~39.8s (over 3x
+        slower) on the same real benchmark. This is the expected result of
+        parallelizing at the wrong granularity, now confirmed rather than
+        assumed: the DP visits on the order of 32768 positions per chunk
+        across 398 chunks, each spawning up to 4 goroutines for work that
+        is itself only a handful of arithmetic operations and slice
+        appends -- goroutine creation/scheduling overhead (order of
+        100ns-1us each) vastly exceeds the nanoseconds-scale work being
+        parallelized, at tens of millions of spawns total. Reverted
+        immediately; not kept even behind a flag, since there's no
+        plausible input size where this granularity would pay off. The
+        earlier items in this list parallelize substantial, coarse units
+        of work (a whole chunk's worth of parsing, or a whole alternate
+        parse strategy) -- this experiment is a concrete data point for
+        where the profitable boundary sits between those and "too fine to
+        bother."
+
 ## In-memory WIM filesystem operations
 
 Replaces what the script does via a real DISM mount, by operating on the
