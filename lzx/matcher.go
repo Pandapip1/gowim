@@ -1,6 +1,6 @@
 package lzx
 
-// token is one literal or match emitted by the greedy match finder.
+// token is one literal or match emitted by the match finder.
 type token struct {
 	isMatch bool
 	literal byte
@@ -28,20 +28,33 @@ const (
 	// cheaper once Huffman-coded. This fixed margin is a conservative
 	// heuristic (matching the kind of tradeoff wimlib's own non-optimal-
 	// parse compression levels make), not a full bit-cost model, consistent
-	// with this package's documented greedy-parse scope.
+	// with this package's documented greedy/lazy-parse scope.
 	repeatBonus = 2
 )
 
-// findMatches runs a greedy LZ77 parse over data using a bounded hash-chain
+// candidateMatch is the single best match (repeat-offset or fresh) found at
+// one position, as chosen by chooseMatch below.
+type candidateMatch struct {
+	found  bool
+	offset int
+	length int
+	repeat int // -1 if fresh
+}
+
+// findMatches runs a lazy LZ77 parse over data using a bounded hash-chain
 // match finder for fresh offsets, plus a direct check of the LZX
 // repeat-offset LRU queue (the three most recently used match offsets) at
 // every position. Per this package's documented encoder scope (see lzx.go
-// and compress() in encode.go), this is intentionally a plain greedy parse
-// (no lazy matching, no optimal parse): at each position it takes the
-// longer of "best fresh-offset match" and "best repeat-offset match" (with a
-// small bonus favoring the repeat, since it is cheaper to encode -- see
-// repeatBonus above), never looking ahead to see whether a literal now would
-// let a better match start one byte later.
+// and compress() in encode.go), this is a one-step lazy parse, not a full
+// optimal/DP parse: at each position it finds the best match (preferring a
+// repeat-offset match within repeatBonus bytes of the best fresh match,
+// since it is cheaper to encode), then checks whether a strictly longer
+// match exists starting one byte later using the *same* repeat-offset queue
+// state (valid because emitting a literal never changes the queue) -- if
+// so, it emits a literal now and takes the better match next iteration,
+// exactly the classic "lazy matching" technique (as used by, e.g., zlib's
+// deflate and wimlib's own non-near-optimal compression levels), rather
+// than a full iterative bit-cost model.
 //
 // The repeat-offset queue is tracked exactly as the decoder maintains it
 // (see decode.go's recentOffsets handling, itself ported from wimlib's
@@ -68,13 +81,24 @@ func findMatches(data []byte) []token {
 		head[i] = -1
 	}
 	prev := make([]int32, n)
+	inserted := make([]bool, n)
 
 	hash := func(i int) uint32 {
 		v := uint32(data[i]) | uint32(data[i+1])<<8 | uint32(data[i+2])<<16
 		return (v * 2654435761) >> (32 - hashBits)
 	}
 
-	insert := func(i int) {
+	// insertOnce records position i's hash entry the first time any code
+	// path visits it, whether it ends up part of a match or a literal, so a
+	// later lazy-matching peek at position i+1 can find i as a candidate.
+	// It is idempotent since the lazy peek at i+1 and the real processing
+	// of i+1 (once the loop cursor reaches it) would otherwise both try to
+	// insert it.
+	insertOnce := func(i int) {
+		if i+3 > n || inserted[i] {
+			return
+		}
+		inserted[i] = true
 		h := hash(i)
 		prev[i] = head[h]
 		head[h] = int32(i)
@@ -95,11 +119,6 @@ func findMatches(data []byte) []token {
 		return l
 	}
 
-	// queue mirrors the decoder's recentOffsets, starting at {1, 1, 1} (see
-	// decode.go). A repeat-offset match at position i and queue value off
-	// references data[i-off:], which is only valid when off <= i.
-	var queue [numRecentOffsets]int32 = [numRecentOffsets]int32{1, 1, 1}
-
 	repeatLenAt := func(i int, off int32) int {
 		j := i - int(off)
 		if j < 0 {
@@ -108,16 +127,15 @@ func findMatches(data []byte) []token {
 		return matchLenAt(j, i)
 	}
 
-	insertRange := func(start, end int) {
-		for p := start; p < end; p++ {
-			if p+3 <= n {
-				insert(p)
-			}
-		}
-	}
+	// queue mirrors the decoder's recentOffsets, starting at {1, 1, 1} (see
+	// decode.go). A repeat-offset match at position i and queue value off
+	// references data[i-off:], which is only valid when off <= i.
+	var queue [numRecentOffsets]int32 = [numRecentOffsets]int32{1, 1, 1}
 
-	i := 0
-	for i < n {
+	// chooseMatch finds the best match at position i given the current
+	// queue, without mutating any state (hash table, chain, or queue), so
+	// it is safe to call speculatively for a lazy-matching peek.
+	chooseMatch := func(i int, queue [numRecentOffsets]int32) candidateMatch {
 		bestRepLen := 0
 		bestRepIdx := -1
 		for k := 0; k < numRecentOffsets; k++ {
@@ -148,30 +166,60 @@ func findMatches(data []byte) []token {
 
 		switch {
 		case bestRepIdx >= 0 && bestRepLen >= minMatchLen && bestRepLen+repeatBonus >= bestLen:
-			toks = append(toks, token{isMatch: true, offset: int(queue[bestRepIdx]), length: bestRepLen, repeat: bestRepIdx})
-			if bestRepIdx != 0 {
-				used := queue[bestRepIdx]
-				queue[bestRepIdx] = queue[0]
+			return candidateMatch{found: true, offset: int(queue[bestRepIdx]), length: bestRepLen, repeat: bestRepIdx}
+		case bestLen >= minMatch:
+			return candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1}
+		default:
+			return candidateMatch{}
+		}
+	}
+
+	advanceQueue := func(m candidateMatch) {
+		if m.repeat >= 0 {
+			if m.repeat != 0 {
+				used := queue[m.repeat]
+				queue[m.repeat] = queue[0]
 				queue[0] = used
 			}
-			insertRange(i, i+bestRepLen)
-			i += bestRepLen
-
-		case bestLen >= minMatch:
-			toks = append(toks, token{isMatch: true, offset: bestOff, length: bestLen, repeat: -1})
-			queue[2] = queue[1]
-			queue[1] = queue[0]
-			queue[0] = int32(bestOff)
-			insertRange(i, i+bestLen)
-			i += bestLen
-
-		default:
-			toks = append(toks, token{literal: data[i], repeat: -1})
-			if i+3 <= n {
-				insert(i)
-			}
-			i++
+			return
 		}
+		queue[2] = queue[1]
+		queue[1] = queue[0]
+		queue[0] = int32(m.offset)
+	}
+
+	insertRange := func(start, end int) {
+		for p := start; p < end; p++ {
+			insertOnce(p)
+		}
+	}
+
+	i := 0
+	for i < n {
+		// chooseMatch must run before insertOnce(i): inserting i's own hash
+		// entry first would let it match against itself at offset 0.
+		m := chooseMatch(i, queue)
+		insertOnce(i)
+
+		if m.found && i+1 < n {
+			peek := chooseMatch(i+1, queue)
+			if peek.found && peek.length > m.length {
+				toks = append(toks, token{literal: data[i], repeat: -1})
+				i++
+				continue
+			}
+		}
+
+		if !m.found {
+			toks = append(toks, token{literal: data[i], repeat: -1})
+			i++
+			continue
+		}
+
+		toks = append(toks, token{isMatch: true, offset: m.offset, length: m.length, repeat: m.repeat})
+		advanceQueue(m)
+		insertRange(i, i+m.length)
+		i += m.length
 	}
 
 	return toks

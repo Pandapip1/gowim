@@ -78,12 +78,12 @@
 //     filter enable bit, or LZX DELTA's reference-data extensions -- none
 //     of these are used by WIM.
 //   - Compression-ratio or match-finding optimality. The encoder uses a
-//     straightforward greedy LZ77 match finder (hash-chain based, bounded
-//     search depth, plus a direct check of the repeat-offset LRU queue --
-//     see lzx/matcher.go) and always emits LZX_BLOCKTYPE_VERBATIM blocks --
-//     it never builds or emits an "aligned offset" Huffman tree, nor an
-//     uncompressed block, nor does it use lazy or optimal-parse matching or
-//     an iterative bit-cost model. This is a valid, spec-compliant subset (block
+//     one-step lazy LZ77 match finder (hash-chain based, bounded search
+//     depth, plus a direct check of the repeat-offset LRU queue -- see
+//     lzx/matcher.go) and always emits LZX_BLOCKTYPE_VERBATIM blocks -- it
+//     never builds or emits an "aligned offset" Huffman tree, nor an
+//     uncompressed block, nor does it use a full optimal/DP parse or an
+//     iterative bit-cost model. This is a valid, spec-compliant subset (block
 //     type is signaled per-block, and wimlib's own compressor already
 //     demonstrates that a real decoder must accept an all-verbatim stream)
 //     that a compliant decoder, including wimlib, must decode correctly;

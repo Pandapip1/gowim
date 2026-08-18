@@ -7,11 +7,11 @@ package lzx
 //     (valid since window orders here never require more than 24 bits to
 //     represent the block size, and 2^maxWindowOrder always fits);
 //   - never emits an "aligned offset" tree or an uncompressed block;
-//   - uses a simple greedy hash-chain LZ77 match finder with a bounded
-//     search depth, not an optimal parse, though it does track and prefer
-//     the repeat-offset LRU queue (see matcher.go) since that is nearly
-//     free to do in a greedy parser and a real, measured source of gowim's
-//     compression-ratio gap against wimlib (see gowim's own TODO.md);
+//   - uses a one-step lazy hash-chain LZ77 match finder with a bounded
+//     search depth, not a full optimal/DP parse, though it does track and
+//     prefer the repeat-offset LRU queue (see matcher.go) -- both were real,
+//     measured sources of gowim's compression-ratio gap against wimlib (see
+//     gowim's own TODO.md);
 //   - applies the E8 call-translation filter unconditionally, exactly as
 //     real WIM encoders do (see lzx.go's WIM-vs-CAB notes), so that this
 //     package's own compressed output round-trips through a real WIM/LZX

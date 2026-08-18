@@ -286,6 +286,29 @@ func TestCompressAllZerosMatchesWimlibSize(t *testing.T) {
 	}
 }
 
+// TestFindMatchesNeverSelfMatchesAtPositionZero guards a real bug found
+// while adding lazy (one-step lookahead) matching (2026-08-18): inserting a
+// position's own hash entry *before* searching for its match let position 0
+// match against itself at offset 0 (an immediately invalid match, since a
+// match offset must be >= 1) whenever findMatches was restructured to
+// insert eagerly to support the lazy peek at i+1. Any repeated short
+// pattern reproduces this at position 0.
+func TestFindMatchesNeverSelfMatchesAtPositionZero(t *testing.T) {
+	data := bytes.Repeat([]byte("AB"), 50)
+	toks := findMatches(data)
+	if len(toks) == 0 {
+		t.Fatal("expected at least one token")
+	}
+	if toks[0].isMatch && toks[0].offset == 0 {
+		t.Fatalf("first token is an invalid offset-0 self-match: %+v", toks[0])
+	}
+	for _, tok := range toks {
+		if tok.isMatch && tok.offset <= 0 {
+			t.Fatalf("found match with non-positive offset: %+v", tok)
+		}
+	}
+}
+
 func TestCompressExceedsMaxWindow(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

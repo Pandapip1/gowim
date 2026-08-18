@@ -68,11 +68,14 @@ any compressed output at all.
       content verbatim (via `innerxml`) while renumbering indices, supports
       recompressing to a different codec than the source. Verified against
       real files plus `wimlib-imagex info`/`extract`/`verify`.
-- [ ] **Partially fixed (2/3 causes, 2026-08-18):** `lzx`'s encoder was
-      measurably less space-efficient than wimlib's, by design, not by bug.
-      Two of the three causes below are now fixed (repeat-offset queue,
-      precode run-length compression); the third (greedy-only parsing, no
-      cost model) remains and is a substantially bigger change. Found while
+- [ ] **Partially fixed (2026-08-18):** `lzx`'s encoder was measurably less
+      space-efficient than wimlib's, by design, not by bug. All three causes
+      below now have at least a partial fix (repeat-offset queue, precode
+      run-length compression, one-step lazy matching), narrowing the real
+      398-chunk/`ntoskrnl.exe` gap to wimlib's own encoder from the original
+      +7.7% to +4.1%. What remains -- a full optimal/DP parse and
+      ALIGNED-offset block support -- is a substantially bigger change; see
+      cause 4's closing note. Found while
       investigating boot.wim size reduction for the out-of-tree nano11-go
       debloat harness (2026-08-17/18, see its own TODO.md): a real stock
       Windows 11 25H2 `boot.wim`, re-exported through `wim.ExportImage`/
@@ -167,14 +170,47 @@ any compressed output at all.
          with cause 1's fix, total dropped from the original 7,169,604 to
          7,008,666 bytes (2.24% total reduction), narrowing the gap to
          wimlib's level-100 output from the original +7.7% to +5.3%.
-      4. **Remaining gap (~5.3%): greedy-only parsing + no iterative
-         cost model.** What's left after causes 1 and 3 above is fixed is
-         squarely cause 2: `findMatches` still takes the single longest
-         match at the current position with no lazy/optimal parse or
-         per-pass cost-model feedback, and the encoder still never emits
-         ALIGNED-offset blocks. This is a substantially bigger change (a
-         real parser rewrite, likely with its own cost-model iteration)
-         than either fix above and is not yet attempted.
+      4. **[x] Greedy-only parsing -- partially fixed 2026-08-18 (one-step
+         lazy matching added).** `findMatches` used to always take the
+         single longest match at the current position with no lookahead.
+         Added a one-step lazy parse (`matcher.go`'s `findMatches`,
+         `chooseMatch`/`candidateMatch`): at each position, compute the
+         best match (repeat-offset-aware, as cause 1 added), then check
+         whether a strictly longer match exists one byte later using the
+         *same* repeat-offset queue state (valid since a literal never
+         changes it) -- if so, emit a literal now and take the better
+         match next iteration. This is the same "lazy matching" technique
+         real encoders like zlib's deflate and wimlib's own non-near-
+         optimal levels use, not a full optimal/DP parse (wimlib's
+         `lzx_compress_near_optimal`, used above `MAX_FAST_LEVEL`=34,
+         remains unmatched -- see below) or an iterative bit-cost model,
+         and the encoder still never emits ALIGNED-offset blocks.
+
+         Found and fixed a real bug while implementing this: the initial
+         version inserted a position's own hash-chain entry *before*
+         searching for its match (needed so the lazy peek at the *next*
+         position could reference the current one), which let position 0
+         match against its own freshly-inserted entry at offset 0 -- an
+         immediately invalid match. Any short repeated pattern reproduced
+         it (`bytes.Repeat([]byte("AB"), 50)` was enough to break
+         round-tripping). Fixed by computing the match *before* inserting
+         the position's own hash entry; guarded by
+         `TestFindMatchesNeverSelfMatchesAtPositionZero`.
+
+         Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+         combined with causes 1 and 3's fixes, total dropped from the
+         original 7,169,604 to 6,929,560 bytes (3.35% total reduction),
+         narrowing the gap to wimlib's level-100 output from the original
+         +7.7% to +4.1%. Also ran an 800-trial round-trip stress test
+         (random/low-alphabet/patterned/mixed data, various sizes) with no
+         failures, plus the existing full test suite.
+
+         What's left of cause 2 (not attempted): a real optimal/DP parse
+         (wimlib's `lzx_compress_near_optimal`, `wimlib/src/
+         lzx_compress.c:301`) and ALIGNED-offset block support. Both are
+         substantially bigger changes than the lazy-matching step above;
+         the remaining ~4.1% gap is attributed to these, though not
+         further decomposed between them.
 
       All three are already accurately described as scope limitations in
       gowim's own package docs (`lzx.go`, `matcher.go`, `encode.go`) -- what
