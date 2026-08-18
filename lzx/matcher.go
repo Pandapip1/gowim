@@ -97,7 +97,7 @@ type candidateMatch struct {
 	value  int // costModel.matchValue of this candidate; only valid if found
 }
 
-// findMatches runs a lazy LZ77 parse over data using a bounded hash-chain
+// findMatches runs a lazy LZ77 parse over data using a bounded binary-tree
 // match finder for fresh offsets, plus a direct check of the LZX
 // repeat-offset LRU queue (the three most recently used match offsets) at
 // every position. Per this package's documented encoder scope (see lzx.go
@@ -140,7 +140,19 @@ func findMatches(data []byte, model costModel) []token {
 	for i := range head {
 		head[i] = -1
 	}
-	prev := make([]int32, n)
+	// left/right are per-position child links for a binary search tree
+	// rooted at head[hash(pos)], ordered lexicographically by each
+	// position's suffix -- see bstSearch/bstInsert below. This replaces an
+	// earlier version of this package that used a simple hash-chain
+	// (recency-ordered linked list) here: a BST gives meaningfully better
+	// candidates within the same bounded comparison budget (maxChainLen),
+	// since it can discard whole subtrees known to be lexicographically on
+	// the wrong side rather than walking a flat recency list, the same
+	// technique used by real encoders' "bt" match finders (e.g. the LZMA
+	// SDK's bt4). See gowim's own TODO.md for the real, measured
+	// improvement this made.
+	left := make([]int32, n)
+	right := make([]int32, n)
 	inserted := make([]bool, n)
 
 	hash := func(i int) uint32 {
@@ -148,20 +160,91 @@ func findMatches(data []byte, model costModel) []token {
 		return (v * 2654435761) >> (32 - hashBits)
 	}
 
-	// insertOnce records position i's hash entry the first time any code
-	// path visits it, whether it ends up part of a match or a literal, so a
-	// later lazy-matching peek at position i+1 can find i as a candidate.
-	// It is idempotent since the lazy peek at i+1 and the real processing
-	// of i+1 (once the loop cursor reaches it) would otherwise both try to
-	// insert it.
-	insertOnce := func(i int) {
-		if i+3 > n || inserted[i] {
+	// matchLenCapped returns the common-prefix length between data[c:] and
+	// data[pos:], and the length limit it was capped against (buffer end
+	// or maxMatchLen) -- callers use l >= limit to know it's safe to stop
+	// without reading data[c+l]/data[pos+l] (which may be out of bounds).
+	matchLenCapped := func(c, pos int) (l, limit int) {
+		limit = n - pos
+		if n-c < limit {
+			limit = n - c
+		}
+		if limit > maxMatchLen {
+			limit = maxMatchLen
+		}
+		for l < limit && data[c+l] == data[pos+l] {
+			l++
+		}
+		return l, limit
+	}
+
+	// bstSearch finds the best match for the suffix starting at pos among
+	// all previously-inserted positions, without inserting pos itself, so
+	// it is safe to call speculatively for a lazy-matching peek (see
+	// chooseMatch below). It walks the BST rooted at head[hash(pos)],
+	// following the same left/right comparison logic bstInsert uses to
+	// place new nodes, bounded to maxChainLen comparisons.
+	bstSearch := func(pos int) (bestLen, bestOff int) {
+		if pos+3 > n {
+			return 0, 0
+		}
+		cur := head[hash(pos)]
+		depth := 0
+		for cur >= 0 && depth < maxChainLen {
+			c := int(cur)
+			l, limit := matchLenCapped(c, pos)
+			if l > bestLen {
+				bestLen = l
+				bestOff = pos - c
+			}
+			if l >= limit || data[c+l] < data[pos+l] {
+				cur = right[c]
+			} else {
+				cur = left[c]
+			}
+			depth++
+		}
+		return bestLen, bestOff
+	}
+
+	// bstInsert links position pos into the BST rooted at head[hash(pos)],
+	// per the standard "insert while descending" binary-tree match-finder
+	// algorithm: pos becomes the new root for its hash bucket, with the
+	// old tree split into pos's left/right subtrees by lexicographic
+	// comparison against pos's own suffix as we descend (bounded to
+	// maxChainLen comparisons, same budget as bstSearch, so very deep
+	// buckets are simply cut off rather than fully rebalanced). Idempotent
+	// (guarded by inserted[]) since a position may be visited once by the
+	// lazy peek's read-only bstSearch and later actually committed by the
+	// main loop.
+	bstInsert := func(pos int) {
+		if pos+3 > n || inserted[pos] {
 			return
 		}
-		inserted[i] = true
-		h := hash(i)
-		prev[i] = head[h]
-		head[h] = int32(i)
+		inserted[pos] = true
+
+		h := hash(pos)
+		cur := head[h]
+		ptrLo := &left[pos]
+		ptrHi := &right[pos]
+		depth := 0
+		for cur >= 0 && depth < maxChainLen {
+			c := int(cur)
+			l, limit := matchLenCapped(c, pos)
+			if l >= limit || data[c+l] < data[pos+l] {
+				*ptrLo = int32(c)
+				ptrLo = &right[c]
+				cur = right[c]
+			} else {
+				*ptrHi = int32(c)
+				ptrHi = &left[c]
+				cur = left[c]
+			}
+			depth++
+		}
+		*ptrLo = -1
+		*ptrHi = -1
+		head[h] = int32(pos)
 	}
 
 	matchLenAt := func(i, j int) int {
@@ -209,29 +292,13 @@ func findMatches(data []byte, model costModel) []token {
 			}
 		}
 
-		if i+3 <= n {
-			h := hash(i)
-			cand := head[h]
-			bestLen := 0
-			bestOff := 0
-			depth := 0
-			for cand >= 0 && depth < maxChainLen {
-				c := int(cand)
-				l := matchLenAt(c, i)
-				if l > bestLen {
-					bestLen = l
-					bestOff = i - c
-				}
-				cand = prev[c]
-				depth++
-			}
-			if bestLen >= minMatch {
-				slot := offsetSlot(uint32(bestOff))
-				extraBits := int(lzxExtraOffsetBits[slot])
-				v := model.matchValue(slot, bestLen, extraBits)
-				if !best.found || v > best.value {
-					best = candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: v}
-				}
+		bestLen, bestOff := bstSearch(i)
+		if bestLen >= minMatch {
+			slot := offsetSlot(uint32(bestOff))
+			extraBits := int(lzxExtraOffsetBits[slot])
+			v := model.matchValue(slot, bestLen, extraBits)
+			if !best.found || v > best.value {
+				best = candidateMatch{found: true, offset: bestOff, length: bestLen, repeat: -1, value: v}
 			}
 		}
 
@@ -257,16 +324,16 @@ func findMatches(data []byte, model costModel) []token {
 
 	insertRange := func(start, end int) {
 		for p := start; p < end; p++ {
-			insertOnce(p)
+			bstInsert(p)
 		}
 	}
 
 	i := 0
 	for i < n {
-		// chooseMatch must run before insertOnce(i): inserting i's own hash
+		// chooseMatch must run before bstInsert(i): inserting i's own hash
 		// entry first would let it match against itself at offset 0.
 		m := chooseMatch(i, queue)
-		insertOnce(i)
+		bstInsert(i)
 
 		if m.found && i+1 < n {
 			peek := chooseMatch(i+1, queue)

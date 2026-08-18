@@ -8,7 +8,7 @@ package lzx
 //     and 2^maxWindowOrder always fits) -- either VERBATIM or ALIGNED,
 //     whichever encodes smaller for this chunk (see encodeBlock/
 //     buildAlignedTable below); it never emits an uncompressed block;
-//   - uses a one-step lazy hash-chain LZ77 match finder with a bounded
+//   - uses a one-step lazy binary-tree LZ77 match finder with a bounded
 //     search depth, not a full optimal/DP parse, though it does track and
 //     prefer the repeat-offset LRU queue (see matcher.go) -- both were real,
 //     measured sources of gowim's compression-ratio gap against wimlib (see

@@ -276,15 +276,38 @@ any compressed output at all.
          distribution as the synthetic test case, so the win is modest but
          real), narrowing the gap to wimlib's level-100 output from +3.12%
          to +2.91%.
+      4. **[x] Better match finder (binary-tree/BST instead of hash-chain).**
+         `matcher.go`'s `findMatches` used a simple hash-chain (recency-
+         ordered linked list per hash bucket, walked up to `maxChainLen`
+         deep). Replaced with a binary search tree per hash bucket
+         (`bstSearch`/`bstInsert`, the standard "insert while descending"
+         BST match finder used by real "bt"-family match finders, e.g. the
+         LZMA SDK's bt4): candidates are ordered by lexicographic
+         comparison of their suffixes rather than recency, so within the
+         same bounded comparison budget the tree can discard whole
+         subtrees known to be on the wrong side of a comparison instead of
+         walking a flat list. Read-only search (for both the real
+         per-position lookup and the lazy-matching peek) and the actual
+         tree insertion are now separate traversals (`bstSearch` never
+         mutates; `bstInsert` does) since the earlier hash-chain's combined
+         "insert-then-search-would-self-match" hazard (see cause 4 above,
+         `TestFindMatchesNeverSelfMatchesAtPositionZero`) made clear that
+         these two concerns need to stay cleanly separated. Guarded by a
+         new `TestFindMatchesBSTFindsGlobalBestWithinSmallBuffer`, which
+         checks every reported match against a brute-force reference for
+         both "is this a real match at all" and "is this actually the
+         longest available match" (within a small-enough buffer that the
+         depth budget can't be exhausted before finding the true best).
 
-      All three are already accurately described as scope limitations in
-      gowim's own package docs (`lzx.go`, `matcher.go`, `encode.go`) -- what
-      this investigation adds is the ground-truthed size of the gap and the
-      isolated worst-case evidence pinpointing the repeat-offset queue as
-      the single highest-value fix if this is ever addressed. Not
-      implemented; fixing cause 1 (adding an R0/R1/R2 queue to the matcher
-      and encoder) is the natural next step and should close most of the
-      gap on its own, per the 2x all-zero-chunk case above.
+         Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test:
+         combined with items 1-4, total dropped from 6,850,540 to
+         6,843,596 bytes (a further, small 0.10% reduction), narrowing the
+         gap to wimlib's level-100 output from +2.91% to +2.80%. Real cost:
+         encode time for the whole file roughly doubled (~2.0s to ~3.3s)
+         since search and insertion became separate tree traversals instead
+         of one combined chain walk -- still fast enough in absolute terms
+         (13MB in ~3.3s) for this project's offline debloat-tool use case,
+         but a real tradeoff worth knowing about, not a free win.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.

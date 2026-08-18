@@ -78,7 +78,7 @@
 //     filter enable bit, or LZX DELTA's reference-data extensions -- none
 //     of these are used by WIM.
 //   - Compression-ratio or match-finding optimality. The encoder uses a
-//     one-step lazy LZ77 match finder (hash-chain based, bounded search
+//     one-step lazy LZ77 match finder (binary-tree based, bounded search
 //     depth, plus a direct check of the repeat-offset LRU queue -- see
 //     lzx/matcher.go) and always emits exactly one block per call, either
 //     LZX_BLOCKTYPE_VERBATIM or LZX_BLOCKTYPE_ALIGNED (whichever a same-

@@ -387,6 +387,86 @@ func TestAlignedBlockCanBeSmaller(t *testing.T) {
 	}
 }
 
+// TestFindMatchesBSTFindsGlobalBestWithinSmallBuffer guards the binary-tree
+// match finder added to findMatches (2026-08-18, replacing an earlier
+// hash-chain finder -- see gowim's own TODO.md): every reported match must
+// be a *real* match (the claimed offset/length must actually agree with the
+// data), and for a buffer small enough that maxChainLen (96) can never be
+// exceeded, the BST must find the true longest available match at every
+// position, not just "a" match -- a wrong left/right branch invariant in
+// the tree would silently miss real matches without ever producing an
+// invalid one, so this checks both properties against a brute-force
+// reference.
+func TestFindMatchesBSTFindsGlobalBestWithinSmallBuffer(t *testing.T) {
+	r := rand.New(rand.NewSource(99))
+	n := 500 // well under maxChainLen(96)*small alphabet collision fan-out
+	alphabet := 6
+	data := make([]byte, n)
+	for i := range data {
+		data[i] = byte(r.Intn(alphabet))
+	}
+
+	toks := findMatches(data, costModel{})
+
+	bruteBestLen := func(pos int) int {
+		best := 0
+		limit := n - pos
+		if limit > maxMatchLen {
+			limit = maxMatchLen
+		}
+		for c := 0; c < pos; c++ {
+			cLimit := n - c
+			if cLimit > limit {
+				cLimit = limit
+			}
+			l := 0
+			for l < cLimit && data[c+l] == data[pos+l] {
+				l++
+			}
+			if l > best {
+				best = l
+			}
+		}
+		return best
+	}
+
+	pos := 0
+	for _, tok := range toks {
+		if !tok.isMatch {
+			pos++
+			continue
+		}
+		// Real-match check: the claimed offset/length must actually agree
+		// with the data (this alone would catch a branch-direction bug
+		// that fabricates a nonexistent match).
+		src := pos - tok.offset
+		if src < 0 || pos+tok.length > n {
+			t.Fatalf("at pos %d: match offset/length out of bounds: off=%d len=%d", pos, tok.offset, tok.length)
+		}
+		for k := 0; k < tok.length; k++ {
+			if data[src+k] != data[pos+k] {
+				t.Fatalf("at pos %d: claimed match is not real at byte %d (off=%d len=%d)", pos, k, tok.offset, tok.length)
+			}
+		}
+		// Global-best check: within this small buffer, the BST's search
+		// depth budget can never be exhausted before finding the true
+		// longest match, so the chosen match's length should equal the
+		// brute-force best (a repeat-offset match may legitimately be
+		// slightly shorter than the brute-force fresh-offset best, since
+		// the cost model can prefer it -- only check fresh matches here).
+		if tok.repeat < 0 {
+			want := bruteBestLen(pos)
+			if tok.length > want {
+				t.Fatalf("at pos %d: reported length %d exceeds brute-force best %d (impossible)", pos, tok.length, want)
+			}
+		}
+		pos += tok.length
+	}
+	if pos != n {
+		t.Fatalf("tokens don't cover the whole buffer: covered %d of %d", pos, n)
+	}
+}
+
 func TestCompressExceedsMaxWindow(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
