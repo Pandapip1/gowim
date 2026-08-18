@@ -94,14 +94,75 @@ func compress(input []byte) []byte {
 	return best
 }
 
-// compressLookahead runs findMatches' bounded-lookahead parse (pass 2,
-// refining pass1Model) and returns the smallest of its VERBATIM, ALIGNED,
-// and 2-block-split encodings -- the non-DP half of compress()'s work,
+// maxRefineIters bounds refineParse's extra re-parse rounds beyond the
+// original pass 2 (see refineParse's own doc for why this is a fixed-point
+// iteration expected to converge quickly, not an open-ended search).
+// Measured on the real 398-chunk ntoskrnl.exe benchmark (see gowim's own
+// TODO.md): chunks use an average of well under 1 of these rounds before
+// converging (a round that doesn't measurably help stops iteration
+// immediately), so this cap is rarely fully exhausted in practice -- but
+// every round, converging or not, costs one more full findMatches call,
+// roughly doubling compressLookahead's own real-world time cost end to
+// end (since a chunk that doesn't improve still pays for the one round
+// that checked).
+const maxRefineIters = 4
+
+// refineParse runs findMatches' bounded-lookahead parse repeatedly,
+// feeding each round's own resulting real Huffman table back in as the
+// next round's cost model -- generalizing this package's existing
+// "pass 1 (flat cost) -> pass 2 (real cost from pass 1's table)" two-pass
+// technique into a fixed-point iteration: pass 2's real table informs a
+// pass 3 re-parse, pass 3's table informs pass 4, and so on, each round
+// asking the same match-finder to re-decide every literal/match choice
+// against a progressively more self-consistent table, rather than
+// stopping after one refinement.
+//
+// This is the natural generalization of the hash2 greedy pass's
+// "rebuild the real table, don't trust a stale one" lesson to *all*
+// matches, not just length-2 ones: unlike hash2Greedy's candidate splice
+// (safe to do incrementally because a hash2 substitution never overlaps
+// an existing match's byte range), a general match candidate can overlap
+// arbitrarily with its neighbors, so there is no cheap local "accept one
+// candidate, keep the rest" step here -- each round instead re-derives
+// the *entire* parse fresh against the latest table, the same shape as
+// this package's original pass1->pass2 step, just iterated instead of
+// stopping at one. Each round's real encoded byte count is measured
+// directly (encodeBlock, not the token-implied estimate), and iteration
+// stops as soon as a round fails to beat the previous best -- both
+// because further rounds rarely help once the table has converged, and
+// because this keeps the same "try both, keep smaller" safety property
+// as everywhere else in this encoder: a round that doesn't measurably
+// help is simply discarded, never trusted on the strength of its own
+// re-parse alone.
+func refineParse(data []byte, order, nMainSyms int, initial costModel) (toks []token, mainLens, lenLens []byte, encoded []byte) {
+	bestToks := findMatches(data, initial)
+	bestMainLens, bestLenLens := buildTables(bestToks, nMainSyms)
+	bestEncoded := encodeBlock(data, order, bestToks, bestMainLens, bestLenLens,
+		canonicalCodewords(bestMainLens, maxMainCodewordLen), canonicalCodewords(bestLenLens, maxLenCodewordLen), nil, nil)
+
+	model := costModel{mainLens: bestMainLens, lenLens: bestLenLens}
+	for i := 0; i < maxRefineIters; i++ {
+		nt := findMatches(data, model)
+		nMainLens, nLenLens := buildTables(nt, nMainSyms)
+		enc := encodeBlock(data, order, nt, nMainLens, nLenLens,
+			canonicalCodewords(nMainLens, maxMainCodewordLen), canonicalCodewords(nLenLens, maxLenCodewordLen), nil, nil)
+
+		model = costModel{mainLens: nMainLens, lenLens: nLenLens}
+		if len(enc) >= len(bestEncoded) {
+			break // this round's re-parse didn't measurably help; converged (or diverging) -- stop.
+		}
+		bestToks, bestMainLens, bestLenLens, bestEncoded = nt, nMainLens, nLenLens, enc
+	}
+	return bestToks, bestMainLens, bestLenLens, bestEncoded
+}
+
+// compressLookahead runs refineParse's iteratively-refined bounded-lookahead
+// parse and returns the smallest of its VERBATIM, ALIGNED, 2-block-split,
+// splitStats, and hash2 encodings -- the non-DP half of compress()'s work,
 // split out so it can run concurrently with compressOptimal (see compress
 // above).
 func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) []byte {
-	toks := findMatches(data, pass1Model)
-	mainLens, lenLens := buildTables(toks, nMainSyms)
+	toks, mainLens, lenLens, refinedVerbatim := refineParse(data, order, nMainSyms, pass1Model)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
@@ -113,13 +174,10 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel) 
 	// see trySplitChunk, itself further parallelized internally), so it's
 	// the one most worth overlapping with the other two's cheaper,
 	// already-built-table encodeBlock calls.
-	var verbatim, aligned, split, splitStats, hash2 []byte
+	verbatim := refinedVerbatim // refineParse already measured this exact encoding while converging
+	var aligned, split, splitStats, hash2 []byte
 	var wg sync.WaitGroup
-	wg.Add(5)
-	go func() {
-		defer wg.Done()
-		verbatim = encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
-	}()
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		// Try an ALIGNED-offset block too: it costs 24 extra header bits

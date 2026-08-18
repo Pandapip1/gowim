@@ -1027,6 +1027,39 @@ any compressed output at all.
       cost O(candidates^2) instead of O(candidates) and wasn't judged
       worth it here); see `greedyApplyHash2`'s own doc for the precise
       scope of what is and isn't exactly measured.
+- [x] **Generalized the "rebuild the real table, don't trust a stale one"
+      lesson from full-match matches, not just hash2 (2026-08-18).** hash2's
+      greedy splice only works because a length-2 substitution never
+      overlaps an existing match's byte range, giving it a trivial,
+      local conflict model; a general match candidate (different offset,
+      different length, extending/shrinking a match already chosen)
+      overlaps its neighbors arbitrarily, so there's no equivalent cheap
+      "accept one candidate, keep the rest" step. The real generalization
+      is iterative re-parsing instead: `refineParse` (`lzx/encode.go`)
+      feeds each round's own resulting real Huffman table back into
+      `findMatches` as the next round's cost model -- extending this
+      package's existing "pass 1 flat cost -> pass 2 real cost" two-pass
+      technique into a fixed-point iteration (pass 2's table informs a
+      pass 3 re-parse, pass 3's informs pass 4, up to `maxRefineIters =
+      4`), stopping as soon as a round's real measured encoded size
+      (not the token-implied estimate) fails to beat the previous best --
+      the same "try both, keep smaller" safety property as everywhere
+      else in this encoder, so a round that doesn't help is simply
+      discarded. Wired into `compressLookahead` in place of the old
+      single pass-2 `findMatches` call.
+
+      Verified via the same real 398-chunk/12.4MB `ntoskrnl.exe` test,
+      decoding every chunk: **0 corrupted chunks, 6,727,462 bytes** -- a
+      further, genuine 1,370-byte improvement over the hash2-only
+      baseline above (6,728,832), narrowing the gap to wimlib's LZX:100
+      reference (6,659,122 bytes) further still. Cost: real chunks
+      converge in under 1 extra round on average (measured: 0.78 of the
+      4-round cap across a 40-chunk sample -- a round that doesn't help
+      stops immediately), but every round, converging or not, is a full
+      extra `findMatches` call, which measurably roughly doubled
+      `compressLookahead`'s own real-world wall time on the full
+      benchmark (11.5s -> 24.0s for all 398 chunks) since even a
+      non-improving chunk pays for the one round that checked.
 - [x] Implement WIM integrity-table (re)computation for newly written files,
       mirroring `DISM /CheckIntegrity`. Done: `WriteOptions.
       ComputeIntegrityTable`, integrated as a single pass into `wim.WriteTo`.
