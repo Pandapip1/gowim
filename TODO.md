@@ -68,8 +68,11 @@ any compressed output at all.
       content verbatim (via `innerxml`) while renumbering indices, supports
       recompressing to a different codec than the source. Verified against
       real files plus `wimlib-imagex info`/`extract`/`verify`.
-- [ ] **Root-caused, not yet fixed:** `lzx`'s encoder is measurably less
-      space-efficient than wimlib's, by design, not by bug. Found while
+- [ ] **Partially fixed (2/3 causes, 2026-08-18):** `lzx`'s encoder was
+      measurably less space-efficient than wimlib's, by design, not by bug.
+      Two of the three causes below are now fixed (repeat-offset queue,
+      precode run-length compression); the third (greedy-only parsing, no
+      cost model) remains and is a substantially bigger change. Found while
       investigating boot.wim size reduction for the out-of-tree nano11-go
       debloat harness (2026-08-17/18, see its own TODO.md): a real stock
       Windows 11 25H2 `boot.wim`, re-exported through `wim.ExportImage`/
@@ -137,28 +140,41 @@ any compressed output at all.
          parsing strategy, not candidate-search breadth. Not yet
          implemented -- a real lazy or DP parse is a substantially bigger
          change than cause 1 above.
-      3. **VERBATIM-only, one block per chunk, no precode run-length
-         compression, no iterative cost model.** `lzx/lzx.go`'s doc
-         (~line 80-96) and `encode.go`'s `writeCodewordLens` (~line 122-
-         153) confirm gowim never emits ALIGNED-offset trees, never splits
-         a chunk into multiple blocks, sends every one of a ~496-symbol
-         main alphabet's codeword lengths individually via the precode
-         instead of using its run-length symbols (17/18/19) for the long
-         runs of unused (zero-length) symbols real data always has, and
-         builds Huffman lengths from raw token frequency with no feedback
-         loop. wimlib builds an explicit per-pass cost model
-         (`lzx_compress.c:338`) across multiple passes scaling with level
-         (`lzx_compress.c:2882-2887`), and its precode encoder collapses
-         zero-length runs (`lzx_write_compressed_code`-adjacent run-length
-         handling in `compress_common.c`). This is now, per the corrected
-         analysis above, the *dominant* known remaining cause for
-         low-entropy/highly-repetitive chunks specifically (where the vast
-         majority of the alphabet goes unused and per-symbol precode
-         overhead swamps everything else) -- worth picking up before
-         cause 2 given it looks cheaper to implement (a table-transmission
-         change, not a parser rewrite) for a potentially large win on
-         exactly the kind of near-zero-entropy content (padding, zero-
-         filled regions) real WIM chunks do contain. Not yet implemented.
+      3. **[x] No precode run-length compression -- fixed 2026-08-18.**
+         `encode.go`'s `writeCodewordLens` used to send every one of a
+         ~496-symbol main alphabet's codeword lengths individually via the
+         precode, instead of using its run-length symbols (17/18) to
+         collapse the long runs of unused (zero-length) symbols real data
+         always has. wimlib's `lzx_write_compressed_code`-adjacent
+         run-length handling in `compress_common.c` does this. Fixed by
+         adding `codewordLenTokens` (`encode.go`), which greedily collapses
+         runs of >= 4 consecutive zero-delta symbols into symbol 17 (a run
+         of 4-19) or 18 (a run of 20-51), matching the read side this
+         package's decoder already implemented (`decode.go`'s
+         `readCodewordLens`). Symbol 19 (a short run of identical *nonzero*
+         deltas) is a smaller secondary optimization, not implemented.
+         Note this package still emits VERBATIM-only single-block chunks
+         with no iterative cost-model feedback (only the *table
+         transmission*, not the block/tree structure, changed) -- those
+         remain real, smaller-value gaps folded into cause 2's scope below
+         rather than reopened as a separate item.
+
+         Verified two ways: (1) the all-zero 32768-byte chunk used as the
+         original "smoking gun" (see the corrected note under cause 1)
+         now compresses to exactly 78 bytes, matching wimlib's real output
+         exactly (was 156) -- codified as `TestCompressAllZerosMatchesWimlibSize`.
+         (2) the same real 398-chunk/12.4MB `ntoskrnl.exe` test: combined
+         with cause 1's fix, total dropped from the original 7,169,604 to
+         7,008,666 bytes (2.24% total reduction), narrowing the gap to
+         wimlib's level-100 output from the original +7.7% to +5.3%.
+      4. **Remaining gap (~5.3%): greedy-only parsing + no iterative
+         cost model.** What's left after causes 1 and 3 above is fixed is
+         squarely cause 2: `findMatches` still takes the single longest
+         match at the current position with no lazy/optimal parse or
+         per-pass cost-model feedback, and the encoder still never emits
+         ALIGNED-offset blocks. This is a substantially bigger change (a
+         real parser rewrite, likely with its own cost-model iteration)
+         than either fix above and is not yet attempted.
 
       All three are already accurately described as scope limitations in
       gowim's own package docs (`lzx.go`, `matcher.go`, `encode.go`) -- what

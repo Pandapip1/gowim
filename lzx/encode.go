@@ -135,14 +135,64 @@ func offsetSlot(offset uint32) int {
 	return slot
 }
 
+// codewordLenToken is one symbol emitted while transmitting a run of
+// codeword lengths via the precode: either a single delta value (presym
+// 0-16) or a compressed run of consecutive zero-delta ("no change from
+// prevLens") entries using precode symbol 17 (a run of 4-19) or 18 (a run
+// of 20-51), matching wimlib's lzx_write_compressed_code /
+// LZX_PRECODE_NUM_SYMBOLS run-length convention (this package's decoder
+// already implements the read side -- see decode.go's readCodewordLens).
+// Symbol 19 (a short run of identical *nonzero* deltas) is not produced
+// here: it is a secondary optimization on top of this one, of much smaller
+// value, and is left for a future pass -- see gowim's own TODO.md.
+type codewordLenToken struct {
+	presym int
+	runLen int // only meaningful when presym is 17 or 18
+}
+
+func codewordLenTokens(deltas []byte) []codewordLenToken {
+	var toks []codewordLenToken
+	i := 0
+	for i < len(deltas) {
+		if deltas[i] != 0 {
+			toks = append(toks, codewordLenToken{presym: int(deltas[i])})
+			i++
+			continue
+		}
+		j := i
+		for j < len(deltas) && deltas[j] == 0 {
+			j++
+		}
+		run := j - i
+		for run >= 4 {
+			if run >= 20 {
+				l := run
+				if l > 51 {
+					l = 51
+				}
+				toks = append(toks, codewordLenToken{presym: 18, runLen: l})
+				run -= l
+			} else {
+				toks = append(toks, codewordLenToken{presym: 17, runLen: run})
+				run = 0
+			}
+		}
+		for k := 0; k < run; k++ {
+			toks = append(toks, codewordLenToken{presym: 0})
+		}
+		i = j
+	}
+	return toks
+}
+
 // writeCodewordLens writes a precode-compressed representation of lens
 // (delta-coded against prevLens, mod 17) to w: the raw 4-bit precode
-// codeword lengths, followed by one precode-encoded delta symbol per
-// element of lens. Unlike wimlib's encoder, this does not use the
-// precode's run-length symbols (17/18/19) -- every length is sent
-// individually -- which is a valid (if less compact) subset of the format,
-// consistent with this package's scope of prioritizing simplicity over
-// optimal compression ratio.
+// codeword lengths, followed by one precode-encoded symbol per element of
+// lens (or one symbol for a whole run of consecutive zero-delta elements,
+// via codewordLenTokens above -- real WIM chunks routinely have most of
+// their ~256-500 symbol main alphabet unused, and this is the dominant
+// saving for such chunks; see gowim's own TODO.md for the ground-truthed
+// comparison against wimlib that found this).
 func writeCodewordLens(w *bitWriter, lens, prevLens []byte) {
 	deltas := make([]byte, len(lens))
 	for i, l := range lens {
@@ -153,9 +203,11 @@ func writeCodewordLens(w *bitWriter, lens, prevLens []byte) {
 		deltas[i] = byte(d)
 	}
 
+	toks := codewordLenTokens(deltas)
+
 	freqs := make([]uint32, precodeNumSymbols)
-	for _, d := range deltas {
-		freqs[d]++
+	for _, t := range toks {
+		freqs[t.presym]++
 	}
 	precodeLens := buildLengths(freqs, maxPrecodeCodewordLen)
 	precodeCodes := canonicalCodewords(precodeLens, maxPrecodeCodewordLen)
@@ -163,7 +215,13 @@ func writeCodewordLens(w *bitWriter, lens, prevLens []byte) {
 	for _, l := range precodeLens {
 		w.writeBits(uint32(l), precodeElementSize)
 	}
-	for _, d := range deltas {
-		w.writeBits(uint32(precodeCodes[d]), uint(precodeLens[d]))
+	for _, t := range toks {
+		w.writeBits(uint32(precodeCodes[t.presym]), uint(precodeLens[t.presym]))
+		switch t.presym {
+		case 17:
+			w.writeBits(uint32(t.runLen-4), 4)
+		case 18:
+			w.writeBits(uint32(t.runLen-20), 5)
+		}
 	}
 }

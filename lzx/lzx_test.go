@@ -268,6 +268,24 @@ func TestRoundTripRepeatOffsetPattern(t *testing.T) {
 	roundTrip(t, "repeat-offset interleaved", data)
 }
 
+// TestCompressAllZerosMatchesWimlibSize guards the precode run-length
+// (symbols 17/18) support added to writeCodewordLens (2026-08-18, see
+// gowim's own TODO.md): before this fix, an all-zero chunk sent every one
+// of its ~496 unused main-alphabet symbols' codeword lengths individually,
+// producing 156 compressed bytes for a case where real wimlib -- which
+// collapses long runs of unused symbols into a couple of precode run-length
+// symbols -- produces exactly 78. This is a strict, exact-value regression
+// guard (not a range check) precisely because 78 is real, ground-truthed
+// wimlib output for this exact input, not an estimate.
+func TestCompressAllZerosMatchesWimlibSize(t *testing.T) {
+	data := make([]byte, 32768)
+	out := Compress(data)
+	const wimlibSize = 78
+	if len(out) != wimlibSize {
+		t.Fatalf("got %d compressed bytes for an all-zero chunk, want exactly %d (wimlib's real output)", len(out), wimlibSize)
+	}
+}
+
 func TestCompressExceedsMaxWindow(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
