@@ -273,11 +273,24 @@ func TestInstallIsIdempotent(t *testing.T) {
 		t.Fatalf("Install #1: %v", err)
 	}
 	before := len(bt.Entries)
-	if _, _, err := Install(md, bt, inst); err != nil {
+	refs := map[wim.Hash]uint32{}
+	for _, e := range bt.Entries {
+		refs[e.Hash] = e.RefCount
+	}
+	_, newBlobs, err := Install(md, bt, inst)
+	if err != nil {
 		t.Fatalf("Install #2: %v", err)
 	}
 	if len(bt.Entries) != before {
 		t.Errorf("second Install added %d blob-table entries, want 0", len(bt.Entries)-before)
+	}
+	if len(newBlobs) != 0 {
+		t.Errorf("second Install reported %d new blobs, want 0", len(newBlobs))
+	}
+	for _, e := range bt.Entries {
+		if e.RefCount != refs[e.Hash] {
+			t.Errorf("blob %x RefCount %d -> %d across a repeated Install", e.Hash[:4], refs[e.Hash], e.RefCount)
+		}
 	}
 	// Same tree, no duplicate children.
 	manifests, err := md.Root.ReadDir(ManifestsDir)

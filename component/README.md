@@ -53,12 +53,112 @@ to delete one's files from an image.
   a `.manifest` file's WinSxS payload directory being optional) were
   verified against a real Windows 11 23H2 image, not assumed -- see
   `remove.go`'s doc comment.
-- Component/package *installation* (the reverse of `Remove`) is a stated
-  future goal but is not implemented -- see `TODO.md`'s "CBS/servicing
-  package subsystem" section for what's still open, including whether a
-  `pa30` encoder ends up being a prerequisite.
+- `Install`/`InstallRegistry` are the reverse direction: given a component's
+  plain-XML `.manifest`, its payload files, and optionally a package's
+  `.mum`/`.cat`, they place the files into an image's directory tree and
+  write the servicing bookkeeping into the `COMPONENTS` and `SOFTWARE`
+  hives. See "Installation" below.
+
+## Installation
+
+`Install` mirrors the sibling `driver` package's `Install`: it mutates an
+image's in-memory directory-entry tree and blob table and returns the new
+blobs the caller must place when it eventually writes the WIM. As there,
+registry work is a second function (`InstallRegistry`) because the hives are
+loaded and saved separately (see the sibling `registry` package).
+
+### Build-once vs serviceable
+
+`Installation.Serviceability` has no usable zero value; the caller must pick
+one, and the two are genuinely different:
+
+| | `BuildOnce` | `Serviceable` |
+|---|---|---|
+| files placed | yes | yes |
+| `COMPONENTS`/`SOFTWARE` hive entries | **no** | yes, via `InstallRegistry` |
+| component works at runtime | yes | yes |
+| image survives a later `DISM /ScanHealth` or update | **no** | intended to |
+
+Nothing at *runtime* reads the `COMPONENTS` hive -- measured, not assumed:
+`ntoskrnl.exe`, `smss.exe`, `csrss.exe`, `winsrv.dll`, `kernel32.dll`,
+`drvstore.dll`, `ntdll.dll`, `sxs.dll` and `sxsstore.dll` in a real image
+contain zero references to `\Registry\Machine\COMPONENTS`; only the
+servicing stack's `wcp.dll` does. So a `BuildOnce` install produces a
+working component.
+
+But an entry-less component is not merely invisible to servicing: CheckSUR
+and `DISM /ScanHealth` emit a named finding for exactly this condition,
+`CSI Missing Winning Component Key`, quoting the WinSxS keyform, and there
+is a reported case of updates failing until the missing
+`DerivedData\Components` keys were restored. `InstallRegistry` therefore
+*refuses* to run for a `BuildOnce` installation (`ErrBuildOnce`) rather than
+letting the choice be made by accident. Full evidence, with grading, is in
+`TODO.md`'s "Component-installation research pass".
+
+### Manifests are written as plain XML, and that is fine
+
+No PA30 encoder is needed. `wcp.dll`'s `GetCompressedFileType` classifies a
+manifest purely from its own first four bytes and `DecompressManifest`
+treats "not compressed" as a success path that returns the buffer untouched;
+401 of the 28069 manifests in a real image are already plain. `Install`
+rejects a `DCM`-prefixed manifest rather than writing one.
+
+### What the caller has to supply, and why
+
+CBS embeds a 16-hex-digit hash of the assembly identity in WinSxS keyforms,
+deployment key names, `SideBySide\Winners` key names, and truncated
+`f!`/`p!`/`s!`/`i!` value names. That hash is undocumented and gowim cannot
+compute it -- the obvious candidates (MD5/SHA-1/SHA-256/SHA-512 of the
+identity in ASCII or UTF-16LE, terminated or not, either case, first or last
+8 bytes, either byte order) were tried against real values and none matches.
+So `ComponentInstall.KeyForm`, `DeploymentInstall.KeyName` and
+`WinnersInstall.KeyForm` are supplied whole by the caller, and a payload file
+name longer than 25 characters is a hard error rather than a guess.
+
+### Known gaps, stated rather than hidden
+
+- **`WinSxS\FileMaps\*.cdf-ms` is not updated.** 3764 binary
+  per-destination-directory index files (magic `PcmH`) whose format was not
+  reverse-engineered, and whose staleness is not known to break anything and
+  not known not to. See `filemaps.go`, `ErrFileMapsNotUpdated`, and
+  `InstallationTouchesFileMaps` for whether the gap is even relevant to a
+  given installation.
+- **`p!`/`s!`/`i!` deployment-to-package links are not written**, because
+  their value names embed the uncomputable hash above.
+- **A third-party `.cat` never chains to a Microsoft root**, so the component
+  can never be validated by CBS regardless of anything written here.
+- **No live confirmation.** Nothing here has been proven by installing a
+  component into a running Windows. Every claim above is from offline
+  measurement, disassembly, or documentation.
+- `Install` and `Remove` are not exact inverses: `Remove` works from a
+  parsed `Entry` and so removes the manifest, the WinSxS payload directory,
+  and a package's `.mum`+`.cat`, but not the `WinSxS\Catalogs` copy nor
+  payload projected into `System32` and friends. Both asymmetries are
+  asserted in the tests so they stay visible.
 
 ## Usage
+
+```go
+// Installation: files, then (for a serviceable image) the hives.
+inst := &component.Installation{
+    Serviceability: component.Serviceable, // or component.BuildOnce
+    Components: []component.ComponentInstall{{
+        KeyForm:  "amd64_contoso.widget_0123456789abcdef_1.0.0.0_none_fedcba9876543210",
+        Manifest: plainXMLManifestBytes,
+        Files: []component.PayloadFile{{
+            Name:     "widget.dll",
+            Data:     widgetDLL,
+            DestDirs: []string{`Windows\System32`},
+        }},
+    }},
+}
+root, newBlobs, err := component.Install(imageMetadata, blobTable, inst)
+// ... then, for Serviceable only:
+err = component.InstallRegistry(&component.Hives{
+    Components: componentsHive.Hive.Root, // from registry.LoadHiveSet
+    Software:   softwareHive.Hive.Root,
+}, inst)
+```
 
 ```go
 // From raw bytes directly (e.g. already extracted from an image):
@@ -89,9 +189,41 @@ for _, e := range store.ByName("Some-Bloat-Package*") {
 
 ```
 go test ./...
+
+# Additionally validate the installation schema against a real image:
+GOWIM_TEST_IMAGE=/path/to/install.wim go test -run TestRealImage -v ./...
 ```
 
-`testdata/` holds real files copied from the sibling `mum`/`pa30` packages'
+The installation schema is entirely undocumented, so the tests that matter
+most for it run against a real, unmodified Windows `install.wim` rather than
+a fixture (`install_realimage_test.go`, skipped unless `GOWIM_TEST_IMAGE` is
+set; `GOWIM_TEST_IMAGE_INDEX` selects an image other than the first). They
+re-derive, as assertions, the same measurements the doc comments cite:
+
+- `WinSxS\Manifests\*.manifest` is 1:1 by name with
+  `COMPONENTS\DerivedData\Components`.
+- `S256H` is the SHA-256 of the manifest's *content* -- of the raw bytes for
+  every plain manifest (the shape `Install` writes), and of the
+  PA30-decompressed XML for the rest.
+- `CanonicalIdentity` reproduces the hive's `identity` value for every
+  component in the image.
+- `f!` value names are verbatim only up to the boundary `fileValueName`
+  enforces.
+- `DeploymentKeyNamePrefix` reproduces the computable field of every
+  deployment key name, checked against that key's own `appid`.
+- `WinSxS\Catalogs\<hex>.cat` is 1:1 with `CanonicalData\Catalogs\<hex>` and
+  the name really is `CatalogThumbprint` of the file.
+- And an end-to-end round trip: install a component into the real image's
+  real directory tree and real `COMPONENTS` hive, check the resulting key's
+  value names and types against what real components in that same hive use,
+  then `Remove` it and check the tree is back. The image file itself is
+  opened read-only and never written.
+
+`testdata/` also holds one real plain-XML manifest
+(`plain_common_controls.manifest`, taken verbatim from that image) whose
+`S256H` and canonical identity are asserted against the values that image's
+own hive records, so the core claims stay covered without the 7.5 GB image.
+The rest of `testdata/` holds real files copied from the sibling `mum`/`pa30` packages'
 own testdata (see their READMEs for full provenance): two real `.mum`
 files, one real `.manifest` file plus the real shared dictionary needed to
 decode it. Tests cover parsing both file kinds, dependency-edge extraction,

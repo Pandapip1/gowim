@@ -485,6 +485,24 @@ type placer struct {
 
 func (p *placer) place(path string, data []byte) error {
 	hash := wim.Hash(sha1.Sum(data))
+
+	// If something is already at this path, account for it before
+	// overwriting, so calling Install twice with the same Installation does
+	// not inflate refcounts (the "safe to call more than once" property the
+	// sibling driver package's InstallRegistry documents, extended here to
+	// the blob table as well as the tree).
+	if prev, err := p.root.Lookup(path); err == nil && !prev.IsDirectory() {
+		prevHash := prev.MainHash()
+		if prevHash == hash {
+			return nil
+		}
+		if desc, ok := p.existing[prevHash]; ok && desc.RefCount > 0 {
+			desc.RefCount--
+		}
+	} else if err != nil && !errors.Is(err, wim.ErrNotFound) {
+		return fmt.Errorf("component: install %q: %w", path, err)
+	}
+
 	if desc, ok := p.existing[hash]; ok {
 		desc.RefCount++
 	} else {
