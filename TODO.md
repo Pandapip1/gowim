@@ -3315,13 +3315,87 @@ next step depends on them, same discipline as the research above.
       (so one file is capped at 234 GB, and a larger one is rejected
       rather than mis-recorded), the Virtual Allocation Table, and any
       UDF revision other than 1.02.
-- [ ] Implement El Torito boot catalog support with two boot entries (BIOS
+- [x] Implement El Torito boot catalog support with two boot entries (BIOS
       boot sector + no-emulation UEFI boot image), matching `oscdimg`'s
-      `-bootdata:2#p0,e,b<bios-boot>#pEF,e,b<efisys.bin>`. The boot-sector
-      blobs (`etfsboot.com`, `efisys.bin`) are reused verbatim from the
-      source image, not generated — and, per the finding above, we should
-      keep them genuinely verbatim by not emitting a boot info table,
-      which is what oscdimg does.
+      `-bootdata:2#p0,e,b<bios-boot>#pEF,e,b<efisys.bin>`. Done
+      (2026-08-19), in `iso/eltorito.go` plus `Options.BootEntries` and one
+      fragment in `buildLayout`. The El Torito 1.0 spec PDF is now cached at
+      `/tmp/claude/repos/specs/eltorito-1.0.pdf`.
+
+      Written: the Boot Record Volume Descriptor (ECMA-119 8.2, whose
+      BP 72-2048 "Boot System Use" field El Torito 1.0 Figure 7 claims) at
+      sector 17, and a boot catalog holding a Validation Entry (Figure 2),
+      an Initial/Default Entry (Figure 3) and, per further platform, a
+      Section Header (Figure 4) plus Section Entry (Figure 5). The catalog
+      is an ordinary one-sector file in the tree, exactly as genisoimage's
+      `insert_boot_cat` makes it; only its contents are generated, after
+      the sizing pass, because they are nothing but LBAs. Phase 1's
+      prediction held again: El Torito was one fragment plus a Source whose
+      bytes are produced late, and nothing about extent assignment changed.
+
+      **The TODO's own advice above was wrong on one point and is
+      superseded.** It said we should not emit a boot info table. We do
+      emit one, under `BootEntry.BootInfoTable`, because reproducing the
+      reference image field-for-field is worth more than avoiding it, and
+      because the reason to avoid it turned out to be avoidable. The
+      genisoimage bug is not the table; it is that `fill_boot_desc` opens
+      the boot image `O_RDWR` and writes the table into the **caller's file
+      on disk**, then copies the file it just mutated. gowim splices the
+      table into the output stream instead (`applyBootInfoTable`), so
+      inputs stay byte-for-byte untouched. The scheme survives this because
+      the checksum deliberately treats the first 64 bytes — precisely the
+      bytes the table overwrites — as zero, so it does not matter whether
+      it is computed before or after the table lands.
+      `TestBootImageSourceIsNotModified` asserts the property, and
+      `TestCompareBootWithGenisoimage` asserts genisoimage's mutation, so
+      the contrast is checked rather than merely described.
+
+      **External validation** (self-consistency proves nothing): **xorriso
+      1.5.6** `-report_el_torito` reports both images with the right
+      platform, emulation, load segment, load sizes 8 and 2880 and the
+      `boot-info-table` flag, with no FAILURE/SORRY events; **isoinfo**
+      (cdrkit) `-d` reports the catalog sector, `Key 55 AA`, `Bootid 88`,
+      `Boot media 0` and `Nsect 8`; **7z** lists the same 1045-entry tree.
+      `dumpet` and `udfinfo` are not installed on this machine and there is
+      no root to install them, so neither was used.
+
+      ### Structural comparison against the known-good reference
+
+      Against `nano11go_test10.iso` (genisoimage, verified to boot and
+      install), building the same tree `isox_test10` with gowim:
+
+      | Structure | Result |
+      | --- | --- |
+      | Boot Record VD | both at LBA 17; identical except the catalog pointer |
+      | Boot catalog, all four 32-byte entries | **byte-identical except the two Load RBAs** |
+      | Boot info table | identical except `bi_file`; **`bi_csum` matches exactly** (`0x46eda81c`), computed by gowim from the untouched source and by genisoimage from the file it was about to patch |
+      | Path list (UDF, via `7z l`) | identical, 1045 entries |
+      | SHA-256 of install.wim, boot.wim, bootmgr, bootmgr.efi, autounattend.xml, efisys_noprompt.bin | all match |
+      | `boot/etfsboot.com` | differs, and must: bytes 0-7 and 64-4095 identical, only `bi_file` differs (2263 vs 3166) |
+      | Size | 1 848 945 vs 1 849 097 sectors; the 152 are genisoimage's 150-sector run-out, its version block and its even-block path table rounding |
+      | `boot.catalog` size in UDF | genisoimage records 0, gowim 2048; **ours is right**, the ISO 9660 record says 2048 in both |
+
+      ### End-to-end boot test
+
+      `/mnt/extra/isos/nano11go_gowimiso.iso`, 3 786 639 360 bytes, written
+      by gowim from `isox_test10` with volume ID `Nano11GoISO`.
+
+      **UEFI: works.** Booted in libvirt domain `nano11go-isotest` (q35,
+      OVMF with secure boot and enrolled keys, emulated TPM 2.0) and
+      reached Windows Setup's "Select language settings" page with clean
+      rendering in about 25 seconds, then advanced to "Select keyboard
+      settings" on Alt+N. That exercises the Section Header with platform
+      `0xEF`, its Section Entry, and the UDF filesystem.
+
+      **BIOS: inconclusive, and identically so on the reference.** Under
+      SeaBIOS (i440fx) the firmware reports "Booting from DVD/CD...", i.e.
+      it accepted the Validation Entry and the Initial/Default Entry and
+      loaded `etfsboot.com`, but nothing further appears. The **known-good
+      genisoimage image behaves identically** under the same domain
+      configuration, so this is a property of this debloated tree's BIOS
+      boot path, not of gowim's catalog. Not chased further; flagged as
+      **UNVERIFIED** rather than claimed working.
+
 
 ## Top-level orchestration
 
