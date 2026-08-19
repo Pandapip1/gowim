@@ -1,0 +1,391 @@
+package iso
+
+import (
+	"fmt"
+	"math"
+)
+
+// fragment is one contiguous, sector-aligned region of the image.
+//
+// The image is described as an ordered list of fragments. Layout runs in
+// two passes over that list: the first asks each fragment how many Logical
+// Sectors it occupies and assigns it a start LBA; the second asks each
+// fragment to produce its bytes, by which time every LBA in the image is
+// known and cross-references can be filled in.
+//
+// This is deliberately the same shape as genisoimage's output_fragment list
+// (cdrkit-1.1.11/genisoimage/write.c, and the outputlist_insert sequence in
+// genisoimage.c around line 3517), for the reason given in the package doc:
+// a UDF phase must be able to reserve its fixed early sectors by inserting
+// fragments ahead of the path tables and file data, without changing how
+// anything else is allocated.
+type fragment struct {
+	// name identifies the fragment in error messages and in the layout
+	// dump that tests use to compare against genisoimage's own
+	// "Total extents" accounting.
+	name string
+	// sectors is the fragment's length in Logical Sectors, filled in by
+	// the sizing pass.
+	sectors uint32
+	// start is the Logical Sector Number of the fragment's first sector,
+	// filled in by the assignment pass.
+	start uint32
+	// size computes sectors. It runs before any LBA is known, so it must
+	// not depend on the position of any other fragment.
+	size func(*layout) (uint32, error)
+	// write emits exactly sectors*LogicalSectorSize bytes. It runs after
+	// every LBA is assigned.
+	write func(*layout, *sectorWriter) error
+}
+
+// layout holds the state shared by the sizing and writing passes.
+type layout struct {
+	b     *Builder
+	dirs  []*node
+	files []*node
+
+	frags []*fragment
+	// cur is the fragment currently being sized; see currentFragmentStart.
+	cur *fragment
+
+	// Filled in by the sizing pass, because the Primary Volume Descriptor
+	// has to record them (ECMA-119 8.4.13 to 8.4.17).
+	pathTableSize uint32
+
+	// totalSectors is the Volume Space Size in Logical Blocks (8.4.8),
+	// known once every fragment has been assigned.
+	totalSectors uint32
+}
+
+// buildLayout assembles the ordered fragment list for the image.
+//
+// The order below is normative in places and conventional in others:
+//
+//   - The System Area must be sectors 0 to 15 (ECMA-119 6.2.1) and the
+//     Volume Descriptor Set must start at sector 16 (6.3). Those are fixed.
+//   - The Volume Descriptor Set must end with a Volume Descriptor Set
+//     Terminator (8.3).
+//   - Everything after that is at the producer's discretion. The order used
+//     here — path tables, then directory extents, then file data — is
+//     genisoimage's, so that the two producers' images can be compared
+//     fragment by fragment.
+//
+// The commented insertion points are where the deferred phases go. They are
+// written out explicitly rather than left implicit because the *position*
+// is the part that is easy to get wrong later: genisoimage notes in
+// genisoimage.c that the El Torito Boot Record "MUST be immediately after
+// the PVD", and its UDF fragments are all inserted before the path tables.
+func buildLayout(b *Builder) *layout {
+	l := &layout{b: b, dirs: b.dirs(), files: b.files()}
+
+	l.add(&fragment{
+		name: "System Area",
+		size: func(*layout) (uint32, error) { return systemAreaSectors, nil },
+		// ECMA-119 6.2.1 leaves the content unspecified; zero-filled here.
+		write: func(_ *layout, w *sectorWriter) error { return w.zeroSectors(systemAreaSectors) },
+	})
+
+	l.add(&fragment{
+		name:  "Primary Volume Descriptor",
+		size:  oneSector,
+		write: (*layout).writePVD,
+	})
+
+	// Deferred phase insertion points, in the order they must appear:
+	//
+	//   - El Torito Boot Record Volume Descriptor (ECMA-119 8.2, type 0).
+	//     genisoimage places it immediately after the PVD.
+	//   - ISO 9660:1999 Enhanced Volume Descriptor (8.5, File Structure
+	//     Version 2 per 8.4.30), what genisoimage -iso-level 4 emits.
+	//   - Joliet Supplementary Volume Descriptor (8.5 with a UCS-2 escape
+	//     sequence per 8.5.6).
+
+	l.add(&fragment{
+		name:  "Volume Descriptor Set Terminator",
+		size:  oneSector,
+		write: (*layout).writeTerminator,
+	})
+
+	// Deferred: the UDF Volume Recognition Sequence goes here, directly
+	// after the ISO 9660 Volume Descriptor Set, followed by the UDF main
+	// and reserve Volume Descriptor Sequences and the anchor at sector 256.
+	// All of that must be reserved before any file data is placed.
+
+	l.add(&fragment{
+		name:  "Type L Path Table",
+		size:  pathTableSectors,
+		write: func(l *layout, w *sectorWriter) error { return l.writePathTable(w, false) },
+	})
+	l.add(&fragment{
+		name:  "Type M Path Table",
+		size:  pathTableSectors,
+		write: func(l *layout, w *sectorWriter) error { return l.writePathTable(w, true) },
+	})
+
+	l.add(&fragment{
+		name:  "Directory tree",
+		size:  directorySectors,
+		write: (*layout).writeDirectories,
+	})
+
+	l.add(&fragment{
+		name:  "File data",
+		size:  fileDataSectors,
+		write: (*layout).writeFileData,
+	})
+
+	if b.opts.PadSectors > 0 {
+		pad := b.opts.PadSectors
+		l.add(&fragment{
+			name:  "Trailing pad",
+			size:  func(*layout) (uint32, error) { return pad, nil },
+			write: func(_ *layout, w *sectorWriter) error { return w.zeroSectors(pad) },
+		})
+	}
+
+	return l
+}
+
+func (l *layout) add(f *fragment) { l.frags = append(l.frags, f) }
+
+func oneSector(*layout) (uint32, error) { return 1, nil }
+
+// assign runs the sizing pass and fixes every fragment's start LBA.
+//
+// The sizing functions for the path tables, the directory tree and the file
+// data have a side effect: they also assign the per-directory and per-file
+// extents. That is safe because each of those fragments is sized exactly
+// once and in list order, so by the time a fragment is sized every fragment
+// before it already has a start LBA. Extents therefore have to be handed
+// out relative to the fragment's own base, which is why the sizing
+// functions take the layout rather than being pure.
+func (l *layout) assign() error {
+	var next uint32
+	for _, f := range l.frags {
+		f.start = next
+		l.cur = f
+		n, err := f.size(l)
+		if err != nil {
+			return err
+		}
+		f.sectors = n
+		if next+n < next {
+			return fmt.Errorf("iso: image exceeds the 32-bit Logical Block Number space of ECMA-119 8.4.8")
+		}
+		next += n
+	}
+	l.totalSectors = next
+	return nil
+}
+
+// pathTableSectors sizes one Path Table.
+//
+// A Path Table Record is 8 bytes of fixed fields plus the Directory
+// Identifier, plus a (00) padding byte when the identifier length is odd
+// (ECMA-119 9.4, 9.4.6). Unlike Directory Records, Path Table Records are
+// *not* forbidden from spanning a Logical Sector boundary — 6.8.1.1's
+// end-in-the-same-sector rule is stated for directories only — so the table
+// is simply a byte stream padded out to a whole number of sectors.
+//
+// Both Type L and Type M tables have the same size, so the value is
+// computed once and cached for the Primary Volume Descriptor's Path Table
+// Size field (8.4.13), which records the size in bytes, not sectors.
+func pathTableSectors(l *layout) (uint32, error) {
+	if l.pathTableSize == 0 {
+		var total uint64
+		for _, d := range l.dirs {
+			total += uint64(pathTableRecordLen(d))
+		}
+		if total > math.MaxUint32 {
+			return 0, fmt.Errorf("iso: path table too large")
+		}
+		l.pathTableSize = uint32(total)
+	}
+	return sectorsFor(uint64(l.pathTableSize)), nil
+}
+
+func pathTableRecordLen(d *node) int {
+	n := len(pathTableID(d))
+	return 8 + n + n%2
+}
+
+// pathTableID returns the Directory Identifier for a Path Table Record.
+//
+// ECMA-119 6.8.2.2 and 9.4.5: the record for the Root Directory carries a
+// Directory Identifier consisting of a single (00) byte, the same reserved
+// identifier the Root Directory's own first Directory Record uses.
+func pathTableID(d *node) string {
+	if d.parent == nil {
+		return "\x00"
+	}
+	return d.id
+}
+
+// directorySectors sizes the directory tree and assigns each directory its
+// extent.
+//
+// Each directory's extent begins with the two reserved records of ECMA-119
+// 6.8.2.2 — "." identifying the directory itself, with a Directory
+// Identifier of a single (00) byte, and ".." identifying its Parent
+// Directory, with a single (01) byte — followed by one Directory Record per
+// child in 9.3 order.
+//
+// Records are packed into Logical Sectors under 6.8.1.1: a record that
+// would not fit in the remainder of the current sector starts the next
+// sector instead, and the unused bytes are set to (00). Per 6.8.1.3 the
+// recorded length of the directory includes that trailing slack, so
+// dirLength is always a whole number of sectors.
+func directorySectors(l *layout) (uint32, error) {
+	base := l.currentFragmentStart()
+	next := base
+	for _, d := range l.dirs {
+		n, err := directoryExtentSectors(d)
+		if err != nil {
+			return 0, err
+		}
+		d.dirExtent = next
+		d.dirLength = n * LogicalSectorSize
+		next += n
+	}
+	return next - base, nil
+}
+
+func directoryExtentSectors(d *node) (uint32, error) {
+	// The "." and ".." records: LEN_FI is 1 (odd), so 9.1.12's padding
+	// field is absent and LEN_DR is 33 + 1 = 34. That is exactly the size
+	// of the "Directory Record for Root Directory" field of the Primary
+	// Volume Descriptor (8.4.18, BP 157 to 190).
+	used := uint32(34 + 34)
+	sectors := uint32(1)
+	for _, c := range d.children {
+		for i := 0; i < numSections(c); i++ {
+			n := uint32(directoryRecordLen(c))
+			if used+n > LogicalSectorSize {
+				sectors++
+				used = 0
+			}
+			used += n
+		}
+	}
+	return sectors, nil
+}
+
+// numSections reports how many Directory Records a node needs: one per File
+// Section (ECMA-119 6.5.1). Directories and files small enough to fit one
+// section need exactly one. This must agree with the sections actually
+// allocated in fileDataSectors, so both go through sectionLengths.
+func numSections(n *node) int {
+	if n.isDir {
+		return 1
+	}
+	if len(n.sections) > 0 {
+		return len(n.sections)
+	}
+	return 1
+}
+
+// directoryRecordLen computes LEN_DR for a node's Directory Record.
+//
+// ECMA-119 9.1: BP 1 to 33 are fixed fields, BP 34 onwards is the File
+// Identifier of length LEN_FI, and 9.1.12 adds a single (00) Padding Field
+// "only if the number in the Length of the File Identifier field is an even
+// number" — which keeps LEN_DR even. This package writes no System Use
+// field (9.1.13), so nothing follows the padding.
+func directoryRecordLen(n *node) int {
+	fi := len(fileIdentifier(n))
+	return 33 + fi + (1 - fi%2)
+}
+
+// fileIdentifier returns the File Identifier field content for a node.
+//
+// For a directory this is the Directory Identifier (ECMA-119 7.6, 9.1.11).
+// For a file it is the full File Identifier of 7.5.1, which always ends in
+// SEPARATOR 2 (';') and a File Version Number; 7.5.1 requires that number
+// to be in the range 1 to 32767 and there is no way to omit it in a
+// hierarchy identified by a Primary Volume Descriptor. This package always
+// writes version 1, which is what every producer does.
+func fileIdentifier(n *node) string {
+	if n.isDir {
+		return n.id
+	}
+	return n.id + ";1"
+}
+
+// fileDataSectors allocates an extent for every file and returns the total.
+//
+// A file is split into as many File Sections as its size requires, each no
+// larger than Options.MaxSectionSize (ECMA-119 6.5.1; the 32-bit Data
+// Length field of 9.1.4 is the reason a split is ever necessary). Splitting
+// is only legal at interchange Level 3, since Levels 1 and 2 both state
+// that "each file shall consist of only one File Section" (10.1, 10.2), so
+// a file that would need splitting at a lower level is rejected rather than
+// silently truncated.
+//
+// Note for the later UDF phase: nothing about this allocation is
+// ISO 9660-specific. UDF file entries in a bridge volume describe these
+// same extents, so the UDF layer will read node.sections rather than
+// allocating anything of its own.
+func fileDataSectors(l *layout) (uint32, error) {
+	base := l.currentFragmentStart()
+	next := base
+	for _, f := range l.files {
+		size, err := f.src.Size()
+		if err != nil {
+			return 0, fmt.Errorf("iso: sizing %q: %w", f.hostName, err)
+		}
+		if size < 0 {
+			return 0, fmt.Errorf("iso: %q reports a negative size", f.hostName)
+		}
+		lens := sectionLengths(uint64(size), l.b.opts.MaxSectionSize)
+		if len(lens) > 1 && l.b.opts.Level < Level3 {
+			return 0, fmt.Errorf("iso: %q is %d bytes, which needs %d File Sections, "+
+				"but ECMA-119 10.%d states that at this interchange level each file shall consist "+
+				"of only one File Section; use Level3", f.hostName, size, len(lens), l.b.opts.Level)
+		}
+		f.sections = f.sections[:0]
+		for _, n := range lens {
+			f.sections = append(f.sections, section{extent: next, length: n})
+			next += sectorsFor(uint64(n))
+		}
+	}
+	return next - base, nil
+}
+
+// sectionLengths splits a file size into File Section data lengths.
+//
+// Every section but the last is exactly max bytes long. max is a multiple
+// of LogicalSectorSize (enforced in New), so each section ends on an Extent
+// boundary and the next can start at the first byte of a Logical Block, as
+// ECMA-119 6.4.1 requires of an Extent.
+//
+// A zero-length file yields a single zero-length section: 6.4.5 explicitly
+// allows a File Section's data length to be zero, and a file still needs a
+// Directory Record.
+func sectionLengths(size uint64, max uint32) []uint32 {
+	if size == 0 {
+		return []uint32{0}
+	}
+	var out []uint32
+	for size > 0 {
+		n := uint64(max)
+		if size < n {
+			n = size
+		}
+		out = append(out, uint32(n))
+		size -= n
+	}
+	return out
+}
+
+// currentFragmentStart returns the start LBA of the fragment currently
+// being sized. assign records that fragment in l.cur after setting its
+// start LBA and before calling its size function, so a sizing function that
+// hands out extents (the directory tree and the file data) can allocate
+// relative to its own base without needing to know its position in the
+// list.
+func (l *layout) currentFragmentStart() uint32 {
+	if l.cur == nil {
+		return 0
+	}
+	return l.cur.start
+}
