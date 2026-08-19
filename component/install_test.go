@@ -119,6 +119,16 @@ func TestCanonicalIdentityOptionalFields(t *testing.T) {
 				"PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=msil",
 		},
 		{
+			// Real manifests spell this three ways; the hive spells it one.
+			name: "versionScope spelling is normalized",
+			id: mum.AssemblyIdentity{
+				Name: "X", Version: "1.0.0.0", PublicKeyToken: "0000000000000000",
+				ProcessorArchitecture: "amd64", VersionScope: "nonSXS",
+			},
+			want: "X, Culture=neutral, Version=1.0.0.0, PublicKeyToken=0000000000000000, " +
+				"ProcessorArchitecture=amd64, versionScope=NonSxS",
+		},
+		{
 			name: "buildType is never canonicalized",
 			id: mum.AssemblyIdentity{
 				Name: "X", Version: "1.0.0.0", BuildType: "release",

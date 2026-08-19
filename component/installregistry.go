@@ -458,9 +458,35 @@ func CanonicalIdentity(id mum.AssemblyIdentity) string {
 	b.WriteString(id.ProcessorArchitecture)
 	if id.VersionScope != "" {
 		b.WriteString(", versionScope=")
-		b.WriteString(id.VersionScope)
+		b.WriteString(canonicalVersionScope(id.VersionScope))
 	}
 	return b.String()
+}
+
+// canonicalVersionScope normalizes a manifest's `versionScope` spelling to
+// the one the hive records.
+//
+// This is the one field CBS does *not* copy through verbatim, and it was
+// found by a real-image test failing rather than by reading anything: real
+// manifests spell the value three different ways -- `nonSxS` (67106
+// occurrences), `nonSXS` (28) and `nonSxs` (12) -- while every one of the
+// 25796 hive identities that carries the field spells it `NonSxS`. Cross-
+// tabulating manifest attribute against hive field over all 28069
+// components, `versionScope` is the *only* identity field with any
+// normalization at all: name, version, publicKeyToken, processorArchitecture
+// and type are byte-identical in both places, and `language` passes through
+// unchanged too (`en-us` stays `en-us`; only an absent language becomes
+// `Culture=neutral`).
+//
+// Only the one token was ever observed, so only the one token is
+// normalized -- anything else is passed through unchanged rather than run
+// through a guessed general capitalization rule, since there is no evidence
+// for what such a rule would be.
+func canonicalVersionScope(s string) string {
+	if strings.EqualFold(s, "NonSxS") {
+		return "NonSxS"
+	}
+	return s
 }
 
 // DeploymentKeyNamePrefix returns the leading, computable field of a

@@ -197,8 +197,10 @@ GOWIM_TEST_IMAGE=/path/to/install.wim go test -run TestRealImage -v ./...
 The installation schema is entirely undocumented, so the tests that matter
 most for it run against a real, unmodified Windows `install.wim` rather than
 a fixture (`install_realimage_test.go`, skipped unless `GOWIM_TEST_IMAGE` is
-set; `GOWIM_TEST_IMAGE_INDEX` selects an image other than the first). They
-re-derive, as assertions, the same measurements the doc comments cite:
+set; `GOWIM_TEST_IMAGE_INDEX` selects an image other than the first; expect
+about ten minutes, most of it decompressing all 28069 manifest resources
+twice). They re-derive, as assertions, the same measurements the doc
+comments cite:
 
 - `WinSxS\Manifests\*.manifest` is 1:1 by name with
   `COMPONENTS\DerivedData\Components`.
@@ -206,7 +208,11 @@ re-derive, as assertions, the same measurements the doc comments cite:
   every plain manifest (the shape `Install` writes), and of the
   PA30-decompressed XML for the rest.
 - `CanonicalIdentity` reproduces the hive's `identity` value for every
-  component in the image.
+  component in the image, including the one identity field CBS does *not*
+  copy through verbatim: real manifests spell `versionScope` three ways
+  (`nonSxS`, `nonSXS`, `nonSxs`) and the hive always spells it `NonSxS`.
+  That normalization was found by this test failing, not by reading
+  anything.
 - `f!` value names are verbatim only up to the boundary `fileValueName`
   enforces.
 - `DeploymentKeyNamePrefix` reproduces the computable field of every

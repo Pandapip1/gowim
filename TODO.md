@@ -3541,13 +3541,16 @@ this pass. If empirical confirmation is wanted, the minimal decisive test is:
 Both variants mutate a real installation and should only be run on a
 snapshotted VM, at the user's explicit direction.
 
-- [ ] **Future goal, low priority, not currently being worked on:**
-      component *installation* (the reverse of the removal above) — given a
+- [x] Component *installation* (the reverse of the removal above) — given a
       new component's `.manifest`/`.mum`/`.cat`/payload files, add them to
       `WinSxS\Manifests`/`servicing\Packages`/the payload directory tree,
       mirroring `driver.Install`'s shape for driver packages. In scope for
-      this project eventually (stated 2026-07-14), but explicitly not
-      started and not blocking anything else. **The "research first" pass this
+      this project eventually (stated 2026-07-14). **Implemented 2026-08-19**
+      as `component.Install` / `component.InstallRegistry` /
+      `component.InstallWinners`, against the research below; see
+      `component/README.md`'s "Installation" section and the sub-item
+      "What was implemented, and what is still open" further down.
+      **The "research first" pass this
       item demanded is now DONE (2026-08-19)** — see the
       "Component-installation research pass" section immediately above for the
       evidence, sources and confidence grading. What it settled, for this
@@ -3578,6 +3581,130 @@ snapshotted VM, at the user's explicit direction.
         end-to-end confirmation of the plain-manifest verdict on a real
         system (a low-risk two-step VM experiment is written up at the end of
         the research section, deliberately not run).
+
+#### What was implemented, and what is still open (2026-08-19)
+
+The API is `component.Install(md, bt, *Installation) (*wim.DirEntry,
+[]NewBlob, error)` for files, `component.InstallRegistry(*Hives,
+*Installation) error` for the hives, and `component.InstallWinners` for the
+runtime SxS index — the same Install/InstallRegistry split, and the same
+"return the new blobs, let the caller write the WIM" contract, the `driver`
+package already uses.
+
+The build-once/serviceable split from Q3 is expressed as
+`Installation.Serviceability`, a type **with no usable zero value**:
+`ServiceabilityUnset` is always an error, `BuildOnce` places files and makes
+`InstallRegistry` return `ErrBuildOnce`, `Serviceable` requires the caller to
+run `InstallRegistry` too. Q3 established the two are not interchangeable, so
+neither is the default.
+
+The schema was measured, not guessed, against the same real image the
+research used (`fresh/install.wim` image 1, build 10.0.26200), read with this
+repo's own `regf`, and the measurements are re-run as assertions by
+`component/install_realimage_test.go` (skipped unless `GOWIM_TEST_IMAGE`
+points at an `install.wim`; about ten minutes against this one, most of it
+decompressing all 28,069 manifest resources twice). Result on that image:
+5 of 5 tests pass, with `S256H` and `CanonicalIdentity` checked against the
+hive for **28,069 of 28,069** components. New measurements made
+while implementing, beyond the ones already recorded above:
+
+- `S256H` == SHA-256 of the raw file, **401 of 401** plain manifests
+  (independently reproduced), and == SHA-256 of the PA30-decompressed XML for
+  all 28,069 (the whole corpus decodes: 28,069 decoded, 0 failures, using
+  this repo's `pa30`).
+- The canonical `identity` string's field order is fixed and *not*
+  alphabetical — name, `Culture`, `Type`, `Version`, `PublicKeyToken`,
+  `ProcessorArchitecture`, `versionScope` — with only four orderings across
+  all 28,069 values, all of them that one sequence with `Type`/`versionScope`
+  present or absent (24,905 / 1,879 / 891 / 394). `buildType` never appears.
+  A manifest's `language` becomes `Culture`; absent becomes `Culture=neutral`.
+  Implemented as `component.CanonicalIdentity`, and this is what forced
+  `mum` to start modeling the `type=` attribute.
+- **`versionScope` is the only identity field CBS does not copy through
+  verbatim**, and this was found by the real-image test failing, not by
+  reading anything — which is the argument for having written that test at
+  all. Real manifests spell the value three ways (`nonSxS` 67,106,
+  `nonSXS` 28, `nonSxs` 12); every one of the 25,796 hive identities that
+  carries the field spells it `NonSxS`. Cross-tabulating every identity
+  attribute against its hive field over all 28,069 components afterwards:
+  name, version, publicKeyToken, processorArchitecture and type are
+  byte-identical on both sides, and `language` passes through unchanged too
+  (`en-us` stays `en-us`) — only an absent language becomes
+  `Culture=neutral`. Only the one token is normalized, since only the one
+  was observed and there is no evidence for a general capitalization rule.
+- `identity` and `appid` are REG_BINARY **ASCII, not NUL-terminated**
+  (28,069 and 3,983 of themselves). `CatalogThumbprint` and the `SOFTWARE`
+  package values *are* NUL-terminated REG_SZ (a 64-character thumbprint is
+  130 bytes, not 128) — note `regf.EncodeSZ` deliberately does not
+  terminate, so the package has its own `encodeSZZ`.
+- `f!<file>` value names are verbatim **only up to 25 characters**. Pairing
+  every manifest's `<file name=...>` against its hive key's `f!` values
+  across all 28,069 components: 23,097 names appear verbatim and the longest
+  of those is exactly 25 (`AssignedAccessRuntime.dll`); 10,874 are truncated
+  and the shortest of *those* is exactly 26. The boundary is sharp, with no
+  overlap in either direction. A truncated name is a 25-character prefix +
+  `_` + a 16-hex hash, always exactly 42 characters. `Install` therefore
+  *errors* on a longer payload file name rather than writing a name CBS
+  would not look up.
+- Deployment key names: `<name capped at 24 as first-11 + ".." + last-11>_
+  <publicKeyToken>_<version>_<16-hex>`. The truncation is exact — checked
+  against all **3,983** deployment keys' own `appid` values, 3,983 matches, 0
+  mismatches (3,096 actually truncated). Exposed as
+  `component.DeploymentKeyNamePrefix`.
+- `SideBySide\Winners` shape: `Winners\<version-less keyform>\<major.minor>`
+  with an unnamed REG_SZ holding the winning full version plus a REG_BINARY
+  `01` named for that version. Measured on a 16,216-key tree.
+- `p!`/`s!`/`i!` data format on a deployment: u32 string length, u32 flag (0
+  or 1), that many ASCII bytes, then **one** extra byte only when the flag is
+  1 (14,394 values; the 1,783 with flag 1 are exactly the 1,783 with a
+  trailing byte, always `0x38` or `0x39`).
+
+**The one thing that blocks the rest, and is now a tested negative:** CBS's
+16-hex identity hash. It appears in WinSxS keyforms, deployment key names,
+`Winners` key names (a *different* hash from the keyform's for the same
+component — `_87ebc5097a2f9e52` vs `_62fe57338acfab7a`), and in every
+truncated `f!`/`p!`/`s!`/`i!` value name. It was searched for, not assumed
+unreachable: MD5/SHA-1/SHA-256/SHA-512 of the identity string in ASCII and
+UTF-16LE, with and without a NUL terminator, in original/lower/upper case,
+taking the first or last 8 bytes in either byte order — 96 candidates, none
+reproduces a real value. So every such name is caller-supplied, and
+`p!`/`s!`/`i!` are **not written at all**, because a wrong name would be
+worse than none. That is the main remaining incompleteness of the Serviceable
+path and the obvious next thing to attack.
+
+Still open, unchanged or newly recorded:
+
+- **`WinSxS\FileMaps\*.cdf-ms` is still not updated.** It was looked at this
+  time rather than only named: 3,764 files, one per *destination directory*
+  (`$$_appcompat_appraiser_<16hex>.cdf-ms` for `%SystemRoot%\AppCompat\
+  Appraiser`), smallest 544 bytes, magic `PcmH` + a `01 00 00 00` version
+  word + a 16-byte identifier + count/offset tables over a string pool that
+  holds assembly-identity attribute names and values as bare NUL-padded
+  ASCII. So it is recognizably a destination-directory → owning-identity
+  index, and that is as far as it got: the record layout was not read, and
+  whether CSI *requires* the maps to be current is still unknown. Documented
+  prominently rather than papered over — `component.FileMapsDir`,
+  `component.ErrFileMapsNotUpdated`, `component.InstallationTouchesFileMaps`
+  (which answers "is this gap even relevant to this particular install?"),
+  and a "Known gaps" section in the package README.
+- **A third-party `.cat` never chains to a Microsoft root**, so an installed
+  component can never be validated by CBS; recorded in the API docs where a
+  caller supplies a catalog.
+- **No live end-to-end confirmation.** Nothing here has been proven by
+  installing a component into a running Windows. The VM experiment written
+  up above was deliberately not run, and no libvirt domain was touched.
+- `Install` and `Remove` are **not** exact inverses, and that is now a tested
+  fact rather than a surprise: `Remove` works from a parsed `Entry`, so it
+  removes the manifest, the WinSxS payload directory and a package's
+  `.mum`+`.cat`, but not the `WinSxS\Catalogs` copy and not payload projected
+  into `System32`. Making them symmetric would mean `Remove` learning what
+  `Install` wrote, which is a design question, not a bug fix.
+- The manifest's own `<file destinationPath="$(runtime.system32)">` elements
+  are not consulted, because `mum` does not model `<file>` at all — the
+  caller supplies resolved destination directories, the same way
+  `driver.Install` takes `destDirs`. Teaching `mum` the `<file>` vocabulary
+  (including `destinationPath` DIRID-like tokens) would let `Install` derive
+  them, and is the natural follow-up.
 
 ## ISO image creation subsystem (new)
 
