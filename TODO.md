@@ -4197,7 +4197,7 @@ Still open, unchanged or newly recorded:
 
 ## Top-level orchestration
 
-- [ ] Build a top-level tool stringing all of the above together to
+- [x] Build a top-level tool stringing all of the above together to
       reproduce nano11builder's workflow end-to-end (pick an
       install.wim/esd image index, strip AppX/CBS packages and files by
       rule, edit the standard registry hives, rebuild `boot.wim`, export to
@@ -4205,8 +4205,19 @@ Still open, unchanged or newly recorded:
       formats in memory — no real DISM/WOF mount, no Administrator/
       Windows-host requirement.
 
-      **Status (2026-08-19): this exists out of tree and is now
-      external-tool-free.** `nano11-go`
+      **Closed (2026-08-19), out of tree, by decision rather than
+      further gowim work.** This item's own text never actually required
+      the tool to live in *this* repository -- only that the workflow be
+      reproducible purely on the WIM/registry formats in memory, which it
+      now is. Explicitly decided not to duplicate that command inside
+      gowim: `nano11-go` already is it, gowim's job is to be the library
+      a caller like it builds on, and a second in-tree copy of the same
+      orchestration would be upkeep with no capability gowim itself is
+      missing. If a *different* in-tree top-level tool is ever wanted
+      (one that isn't just nano11-go's own workflow specifically), that
+      is a new, separate feature request, not a reopening of this item.
+
+      `nano11-go`
       (`github.com/Pandapip1/nano11-go`, commit `a1c08c1`) does every step
       of that list except the ESD recompression, over these packages via
       `replace` directives. Its last shell-out, `rebuild-iso.sh`'s
