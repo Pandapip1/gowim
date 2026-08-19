@@ -13,12 +13,20 @@ import (
 // compressChunk compresses one chunk's uncompressed bytes with the codec
 // selected by ctype (one of the HdrFlagCompress* constants). It is the
 // encode-side counterpart of decompressChunk.
-func compressChunk(ctype CompressionType, data []byte) ([]byte, error) {
+//
+// lzxOpts selects the LZX encoder's speed/ratio tradeoff and is used only
+// when ctype is HdrFlagCompressLZX; the XPRESS and LZMS encoders have no
+// equivalent knobs, so their calls are unchanged. Its zero value is
+// lzx.Compress's exact behavior (lzx.CompressWith(data, lzx.Options{}) is
+// byte-for-byte lzx.Compress(data), which that package pins with a test),
+// so a zero-valued lzxOpts reproduces this function's pre-Options output
+// exactly.
+func compressChunk(ctype CompressionType, data []byte, lzxOpts lzx.Options) ([]byte, error) {
 	switch ctype {
 	case HdrFlagCompressXPRESS, HdrFlagCompressXPRESS2:
 		return xpress.Compress(data), nil
 	case HdrFlagCompressLZX:
-		return lzx.Compress(data), nil
+		return lzx.CompressWith(data, lzxOpts), nil
 	case HdrFlagCompressLZMS:
 		return lzms.Compress(data), nil
 	default:
@@ -39,7 +47,7 @@ func compressChunk(ctype CompressionType, data []byte) ([]byte, error) {
 // concurrency opportunities" entry for why this loop specifically was
 // worth parallelizing (found slow against a real ~4GB WIM file's largest
 // resources during a nano11-style debloat run, 2026-07-14).
-func compressChunksParallel(data []byte, compressionType CompressionType, chunkSize uint32, uncompressedSize uint64, numChunks uint64) ([][]byte, error) {
+func compressChunksParallel(data []byte, compressionType CompressionType, chunkSize uint32, uncompressedSize uint64, numChunks uint64, lzxOpts lzx.Options) ([][]byte, error) {
 	chunks := make([][]byte, numChunks)
 
 	workers := uint64(runtime.GOMAXPROCS(0))
@@ -73,7 +81,7 @@ func compressChunksParallel(data []byte, compressionType CompressionType, chunkS
 				usize := chunkUncompressedSize(i, numChunks, uncompressedSize, chunkSize)
 				raw := data[start : start+usize]
 
-				compressed, cerr := compressChunk(compressionType, raw)
+				compressed, cerr := compressChunk(compressionType, raw, lzxOpts)
 				if cerr != nil {
 					mu.Lock()
 					if firstErr == nil {
@@ -136,6 +144,34 @@ func compressChunksParallel(data []byte, compressionType CompressionType, chunkS
 //     assembling one chunk with no table yields exactly len(data) bytes,
 //     which trips this same >= comparison.
 func EncodeResourceData(data []byte, compressionType CompressionType, chunkSize uint32) (payload []byte, flags uint8, err error) {
+	return EncodeResourceDataWith(data, compressionType, chunkSize, lzx.Options{})
+}
+
+// EncodeResourceDataWith is EncodeResourceData with the LZX encoder's
+// speed/compression-ratio tunables exposed, mirroring the
+// lzx.Compress/lzx.CompressWith pair this package's LZX encoder itself
+// offers.
+//
+// lzxOpts is used only when compressionType is HdrFlagCompressLZX: the
+// XPRESS and LZMS encoders have no equivalent knobs and are called exactly
+// as before. Its zero value is the LZX package's defaults, so
+// EncodeResourceDataWith(data, ctype, chunkSize, lzx.Options{}) is
+// byte-for-byte EncodeResourceData(data, ctype, chunkSize) -- which is what
+// lets EncodeResourceData stay as-is rather than being a breaking signature
+// change, and what makes WriteOptions.LZXOptions's zero value preserve
+// every existing caller's exact output.
+//
+// The knobs matter a lot at WIM scale, because a WIM export re-encodes
+// every blob: measured 2026-08-18 on a 24-core x86-64 machine over a 4 MiB
+// corpus compressed in 32 KiB chunks across all cores (see lzx.Options's
+// own doc for the corpus and full ladder), lzx.Fast() runs at 13.8 MB/s
+// for 2.87% larger output where the defaults run at 0.511 MB/s, and
+// lzx.Balanced() at 2.94 MB/s for 0.52% larger output. Projected onto a
+// real 7.4 GB install.wim re-export that is roughly 20-30 minutes versus
+// ~4 hours of compression time, so callers re-encoding multi-gigabyte
+// images should choose a preset deliberately rather than inheriting the
+// ratio-first default.
+func EncodeResourceDataWith(data []byte, compressionType CompressionType, chunkSize uint32, lzxOpts lzx.Options) (payload []byte, flags uint8, err error) {
 	if len(data) == 0 {
 		return nil, 0, nil
 	}
@@ -149,7 +185,7 @@ func EncodeResourceData(data []byte, compressionType CompressionType, chunkSize 
 	uncompressedSize := uint64(len(data))
 	numChunks := numChunksFor(uncompressedSize, chunkSize)
 
-	chunks, err := compressChunksParallel(data, compressionType, chunkSize, uncompressedSize, numChunks)
+	chunks, err := compressChunksParallel(data, compressionType, chunkSize, uncompressedSize, numChunks, lzxOpts)
 	if err != nil {
 		return nil, 0, err
 	}

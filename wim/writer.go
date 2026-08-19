@@ -4,6 +4,8 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
+
+	"github.com/Pandapip1/gowim/lzx"
 )
 
 // BlobSource supplies a blob's raw, uncompressed content bytes given its
@@ -50,6 +52,25 @@ type WriteOptions struct {
 	// not CompressionNone; it is ignored (and the written header stores 0)
 	// when CompressionType is CompressionNone.
 	ChunkSize uint32
+	// LZXOptions selects the LZX encoder's speed/compression-ratio tradeoff
+	// (see the lzx package's Options and its Fastest/Fast/Balanced/
+	// DefaultOptions/Max preset ladder). It applies ONLY when
+	// CompressionType is HdrFlagCompressLZX: the XPRESS and LZMS encoders
+	// expose no equivalent tunables and are called exactly as before
+	// regardless of what is set here.
+	//
+	// The zero value is the lzx package's defaults, i.e. byte-for-byte what
+	// this writer produced before this field existed, so existing callers
+	// are unaffected by leaving it unset.
+	//
+	// It is worth setting for any large re-encode. Measured 2026-08-18 on a
+	// 24-core x86-64 machine, 4 MiB of mixed binary/text compressed in
+	// 32 KiB chunks across all cores (the same way this package drives the
+	// encoder): the defaults sustain 0.511 MB/s, lzx.Balanced() 2.94 MB/s
+	// for 0.52% larger output, and lzx.Fast() 13.8 MB/s for 2.87% larger
+	// output. Projected onto a real 7.4 GB install.wim export that is the
+	// difference between ~4 hours and ~20-30 minutes of compression.
+	LZXOptions lzx.Options
 	// BootIndex is the 1-based index into the images slice passed to
 	// WriteTo/Assemble designating the bootable image, or 0 if no image is
 	// bootable (matching Header.BootIndex's own convention).
@@ -198,7 +219,7 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 	// it is pipelined across a bounded worker pool (see
 	// encodeBlobsPipeline); only this loop's actual file write must happen
 	// in blob-table order, which draining blobResults[i] in order preserves.
-	blobResults := encodeBlobsPipeline(bt, blobs, opts.CompressionType, chunkSize)
+	blobResults := encodeBlobsPipeline(bt, blobs, opts.CompressionType, chunkSize, opts.LZXOptions)
 	for i := range bt.Entries {
 		hash := bt.Entries[i].Hash
 		eb := <-blobResults[i]
@@ -231,7 +252,7 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 		if err != nil {
 			return 0, wrapErr(fmt.Sprintf("image %d metadata", i+1), err)
 		}
-		payload, flags, err := EncodeResourceData(metaBytes, opts.CompressionType, chunkSize)
+		payload, flags, err := EncodeResourceDataWith(metaBytes, opts.CompressionType, chunkSize, opts.LZXOptions)
 		if err != nil {
 			return 0, wrapErr(fmt.Sprintf("encode image %d metadata", i+1), err)
 		}

@@ -3,6 +3,8 @@ package wim
 import (
 	"fmt"
 	"runtime"
+
+	"github.com/Pandapip1/gowim/lzx"
 )
 
 // encodedBlob is one blob's compressed-and-framed result, produced by
@@ -32,7 +34,11 @@ type encodedBlob struct {
 // exactly 1) -- important since a real WIM's total content can be many
 // gigabytes, far more than is comfortable to hold in memory all at once
 // (see BlobSource's own doc comment on this same concern).
-func encodeBlobsPipeline(bt *BlobTable, blobs BlobSource, compressionType CompressionType, chunkSize uint32) []chan encodedBlob {
+// lzxOpts is threaded straight through to EncodeResourceDataWith, so
+// WriteOptions.LZXOptions reaches every blob's chunks and not just the
+// per-image metadata resources WriteTo encodes inline; its zero value is
+// the LZX package's defaults (see WriteOptions.LZXOptions).
+func encodeBlobsPipeline(bt *BlobTable, blobs BlobSource, compressionType CompressionType, chunkSize uint32, lzxOpts lzx.Options) []chan encodedBlob {
 	n := len(bt.Entries)
 	results := make([]chan encodedBlob, n)
 	for i := range results {
@@ -67,7 +73,7 @@ func encodeBlobsPipeline(bt *BlobTable, blobs BlobSource, compressionType Compre
 					results[i] <- encodedBlob{err: fmt.Errorf("blob %s: %w", hash, err)}
 					continue
 				}
-				payload, flags, err := EncodeResourceData(data, compressionType, chunkSize)
+				payload, flags, err := EncodeResourceDataWith(data, compressionType, chunkSize, lzxOpts)
 				if err != nil {
 					results[i] <- encodedBlob{err: fmt.Errorf("encode blob %s: %w", hash, err)}
 					continue

@@ -30,11 +30,13 @@
 //   - EncodeResourceData is the write-side counterpart: given a resource's
 //     full uncompressed bytes, a compression type, and a chunk size, it
 //     produces the correctly chunk-table-framed on-disk payload (compressing
-//     each chunk with xpress.Compress/lzx.Compress/lzms.Compress and falling
+//     each chunk with xpress.Compress/lzx.CompressWith/lzms.Compress and falling
 //     back to storing a chunk, or the whole resource, raw when compression
 //     does not shrink it -- mirroring wimlib's own writer behavior; see its
 //     doc comment for the exact rules) plus the ResFlag* bits that belong on
-//     that resource's ResourceHeader.
+//     that resource's ResourceHeader. EncodeResourceDataWith is the same
+//     thing with the LZX encoder's speed/ratio tunables (lzx.Options)
+//     exposed; WriteOptions.LZXOptions is how the writer reaches it.
 //
 // Solid resources (ResourceHeader.IsSolid, ResFlagSolid) remain explicitly
 // out of scope: they pack multiple blobs into one shared compressed stream
