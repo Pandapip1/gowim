@@ -79,6 +79,9 @@ func (b *Builder) WriteTo(w io.Writer) (int64, error) {
 	if err := b.finalize(); err != nil {
 		return 0, err
 	}
+	if err := b.measure(); err != nil {
+		return 0, err
+	}
 	l := buildLayout(b)
 	if err := l.assign(); err != nil {
 		return 0, err
@@ -354,6 +357,12 @@ func (l *layout) writeDirectory(w *sectorWriter, d *node) error {
 				return err
 			}
 			buf = appendRecord(buf, rec)
+			continue
+		}
+		if c.isoHidden {
+			// Recorded only in UDF (Options.LargeFilesUDFOnly). Its data
+			// still occupies extents in this image; nothing in ECMA-119
+			// points at them.
 			continue
 		}
 		// One Directory Record per File Section (6.5.1). Every record but

@@ -48,6 +48,10 @@ type layout struct {
 	// cur is the fragment currently being sized; see currentFragmentStart.
 	cur *fragment
 
+	// udf holds the UDF layer's sector assignments, or nil when
+	// Options.UDF is clear.
+	udf *udfLayout
+
 	// Filled in by the sizing pass, because the Primary Volume Descriptor
 	// has to record them (ECMA-119 8.4.13 to 8.4.17).
 	pathTableSize uint32
@@ -106,10 +110,9 @@ func buildLayout(b *Builder) *layout {
 		write: (*layout).writeTerminator,
 	})
 
-	// Deferred: the UDF Volume Recognition Sequence goes here, directly
-	// after the ISO 9660 Volume Descriptor Set, followed by the UDF main
-	// and reserve Volume Descriptor Sequences and the anchor at sector 256.
-	// All of that must be reserved before any file data is placed.
+	if b.opts.UDF {
+		l.addUDFHead()
+	}
 
 	l.add(&fragment{
 		name:  "Type L Path Table",
@@ -134,7 +137,9 @@ func buildLayout(b *Builder) *layout {
 		write: (*layout).writeFileData,
 	})
 
-	if b.opts.PadSectors > 0 {
+	if b.opts.UDF {
+		l.addUDFTail()
+	} else if b.opts.PadSectors > 0 {
 		pad := b.opts.PadSectors
 		l.add(&fragment{
 			name:  "Trailing pad",
@@ -144,6 +149,132 @@ func buildLayout(b *Builder) *layout {
 	}
 
 	return l
+}
+
+// addUDFHead inserts the UDF metadata fragments that must precede all file
+// data: the Volume Recognition Sequence, the two Volume Descriptor Sequences
+// and the Logical Volume Integrity Sequence, the anchor at sector 256, the
+// File Set Descriptor, and the per-directory and per-file metadata.
+//
+// The order and the two pad-to-sector fragments are genisoimage's
+// (genisoimage.c's outputlist_insert block guarded by use_udf, which runs
+// after end_vol and before pathtable_desc). It is not arbitrary:
+//
+//   - The Volume Recognition Sequence must butt directly against the
+//     ECMA-119 Volume Descriptor Set with no gap, because ECMA-167 2/8.3.1
+//     Note 1 ends the recognition sequence at the first sector that is not a
+//     valid Volume Structure Descriptor.
+//   - Everything else must be below sector 256, because the anchor lives
+//     there and a reader that finds a Volume Descriptor Sequence extent from
+//     it must find real descriptors.
+//   - All of it must be sized before the ISO path tables, directory extents
+//     and file data, because file extents have to be final before the UDF
+//     allocation descriptors that share them can be written.
+func (l *layout) addUDFHead() {
+	l.udf = &udfLayout{}
+	l.udf.dirs, l.udf.files = udfWalk(l.b.root)
+
+	l.add(&fragment{
+		name:  "UDF Volume Recognition Sequence",
+		size:  func(*layout) (uint32, error) { return 3, nil },
+		write: (*layout).writeUDFVolumeRecognitionSequence,
+	})
+	l.addPadTo("UDF pad to sector 32", udfVolumeDescriptorSequenceSector)
+	l.add(&fragment{
+		name: "UDF Main Volume Descriptor Sequence",
+		size: func(l *layout) (uint32, error) {
+			l.udf.mainSeq = l.currentFragmentStart()
+			return udfMainSeqSectors, nil
+		},
+		write: func(l *layout, w *sectorWriter) error { return l.writeUDFMainSeq(w, l.udf.mainSeq) },
+	})
+	l.add(&fragment{
+		name: "UDF Reserve Volume Descriptor Sequence",
+		size: func(l *layout) (uint32, error) {
+			l.udf.reserveSeq = l.currentFragmentStart()
+			return udfMainSeqSectors, nil
+		},
+		write: func(l *layout, w *sectorWriter) error { return l.writeUDFMainSeq(w, l.udf.reserveSeq) },
+	})
+	l.add(&fragment{
+		name: "UDF Logical Volume Integrity Sequence",
+		size: func(l *layout) (uint32, error) {
+			l.udf.integritySeq = l.currentFragmentStart()
+			return udfIntegritySeqSectors, nil
+		},
+		write: (*layout).writeUDFIntegritySeq,
+	})
+	l.addPadTo("UDF pad to sector 256", udfAnchorSector)
+	l.add(&fragment{
+		name:  "UDF Anchor Volume Descriptor Pointer",
+		size:  oneSector,
+		write: func(l *layout, w *sectorWriter) error { return l.writeUDFAnchor(w, udfAnchorSector) },
+	})
+	l.add(&fragment{
+		name: "UDF File Set Descriptor",
+		size: func(l *layout) (uint32, error) {
+			// The partition begins here: everything from this sector on is
+			// addressed relative to it (ECMA-167 3/10.5.8, 4/7.1).
+			l.udf.partitionStart = l.currentFragmentStart()
+			return 2, nil
+		},
+		write: (*layout).writeUDFFileSetDesc,
+	})
+	l.add(&fragment{
+		name:  "UDF directory tree",
+		size:  (*layout).udfDirTreeSectors,
+		write: (*layout).writeUDFDirTree,
+	})
+	l.add(&fragment{
+		name:  "UDF file entries",
+		size:  (*layout).udfFileEntriesSectors,
+		write: (*layout).writeUDFFileEntries,
+	})
+}
+
+// addPadTo inserts a fragment of zero sectors that runs up to, but not into,
+// the given sector.
+func (l *layout) addPadTo(name string, target uint32) {
+	f := &fragment{name: name}
+	f.size = func(l *layout) (uint32, error) {
+		start := l.currentFragmentStart()
+		if start > target {
+			return 0, fmt.Errorf("iso: the volume descriptors already reach sector %d, "+
+				"but UDF needs sector %d to be free", start, target)
+		}
+		return target - start, nil
+	}
+	f.write = func(_ *layout, w *sectorWriter) error { return w.zeroSectors(f.sectors) }
+	l.add(f)
+}
+
+// addUDFTail inserts the closing Anchor Volume Descriptor Pointer, plus the
+// run-out padding if any.
+//
+// ECMA-167 3/8.4.2.1 puts anchor points at sectors 256, N-256 and N, and UDF
+// 1.02 2.2.3 requires two of the three. Measured reality on both
+// genisoimage's and Microsoft's output: 256 and N, never N-256, which would
+// mean a hole in the middle of the file data. Since the anchor has to be at
+// or near the last recorded sector, the image's total length has to be
+// settled before it is written — which is exactly what this fragment list
+// does, since it is sized in order and the anchor is last.
+func (l *layout) addUDFTail() {
+	l.add(&fragment{
+		name: "UDF End Anchor Volume Descriptor Pointer",
+		size: func(l *layout) (uint32, error) {
+			l.udf.endAnchor = l.currentFragmentStart()
+			return 1, nil
+		},
+		write: func(l *layout, w *sectorWriter) error { return l.writeUDFAnchor(w, l.udf.endAnchor) },
+	})
+	if pad := l.b.opts.PadSectors; pad > 0 {
+		f := &fragment{name: "UDF trailing anchors"}
+		f.size = func(*layout) (uint32, error) { return pad, nil }
+		f.write = func(l *layout, w *sectorWriter) error {
+			return l.writeUDFTrailingAnchors(w, f.start, pad)
+		}
+		l.add(f)
+	}
 }
 
 func (l *layout) add(f *fragment) { l.frags = append(l.frags, f) }
@@ -278,6 +409,12 @@ func numSections(n *node) int {
 	if n.isDir {
 		return 1
 	}
+	if n.isoHidden {
+		// Recorded only in UDF: the data is allocated and written, but no
+		// ECMA-119 Directory Record describes it. See
+		// Options.LargeFilesUDFOnly.
+		return 0
+	}
 	if len(n.sections) > 0 {
 		return len(n.sections)
 	}
@@ -329,18 +466,12 @@ func fileDataSectors(l *layout) (uint32, error) {
 	base := l.currentFragmentStart()
 	next := base
 	for _, f := range l.files {
-		size, err := f.src.Size()
-		if err != nil {
-			return 0, fmt.Errorf("iso: sizing %q: %w", f.hostName, err)
-		}
-		if size < 0 {
-			return 0, fmt.Errorf("iso: %q reports a negative size", f.hostName)
-		}
-		lens := sectionLengths(uint64(size), l.b.opts.MaxSectionSize)
-		if len(lens) > 1 && l.b.opts.Level < Level3 {
+		lens := sectionLengths(uint64(f.size), l.b.opts.MaxSectionSize)
+		if len(lens) > 1 && !f.isoHidden && l.b.opts.Level < Level3 {
 			return 0, fmt.Errorf("iso: %q is %d bytes, which needs %d File Sections, "+
 				"but ECMA-119 10.%d states that at this interchange level each file shall consist "+
-				"of only one File Section; use Level3", f.hostName, size, len(lens), l.b.opts.Level)
+				"of only one File Section; use Level3 or Options.LargeFilesUDFOnly",
+				f.hostName, f.size, len(lens), l.b.opts.Level)
 		}
 		f.sections = f.sections[:0]
 		for _, n := range lens {

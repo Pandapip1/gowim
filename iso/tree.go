@@ -86,12 +86,26 @@ type node struct {
 	children []*node
 	parent   *node
 
+	// size is the file's length in bytes, read from the Source exactly once
+	// by Builder.measure before layout begins. Both the ISO 9660 and the UDF
+	// layer need it, and both must agree, so it is measured once rather than
+	// re-stat'ed per layer.
+	size int64
+	// isoHidden suppresses this file's ECMA-119 Directory Records while
+	// still allocating and writing its data, so that the file is reachable
+	// through UDF alone. See Options.LargeFilesUDFOnly.
+	isoHidden bool
+
 	// Assigned during layout.
 	sections  []section
 	dirExtent uint32 // first Logical Block of the directory's own extent
 	dirLength uint32 // byte length of the directory's extent
 	pathIndex uint16 // ordinal in the Path Table (6.9), directories only
 	level     int    // depth in the hierarchy, Root Directory being 1 (6.8.2)
+
+	// Assigned during layout when UDF is enabled.
+	udfEntry    uint32 // Logical Sector Number of this node's UDF File Entry
+	udfDirBytes uint32 // byte length of a directory's File Identifier Descriptors
 }
 
 // name and ext split the mangled file identifier for sorting per 9.3.
@@ -155,13 +169,46 @@ type Options struct {
 	// mid-block would leave the next section unable to start at a block.
 	MaxSectionSize uint32
 
+	// UDF adds a UDF (ECMA-167 / OSTA UDF 1.02) view of the same tree,
+	// producing a "bridge" volume: one set of file extents described twice,
+	// once by ECMA-119 Directory Records and once by UDF File Entries. This
+	// is what Windows installation media is, and it is mandatory for media
+	// carrying a file of 4 GiB or more (see udf.go's package-level comment).
+	//
+	// It is not free: UDF needs a whole 2048-byte sector per file for the
+	// File Entry, plus the ~480 KiB below sector 256 that its anchor
+	// placement strands. genisoimage's own header comment says the same.
+	UDF bool
+
+	// LargeFilesUDFOnly records a file that needs more than one ECMA-119
+	// File Section (i.e. one larger than MaxSectionSize, in practice 4 GiB)
+	// only in UDF: its data is written and its UDF File Entry describes it,
+	// but it gets no ISO 9660 Directory Record at all.
+	//
+	// This is what Microsoft's oscdimg does, and it is the only large-file
+	// representation with field evidence behind it. Measured on
+	// Win11_25H2_English_x64_v2.iso: the ISO 9660 root directory is 112
+	// bytes — ".", ".." and a README.TXT explaining that a UDF reader is
+	// needed — while the 7 578 075 168-byte sources/install.wim exists only
+	// in UDF.
+	//
+	// The alternative, left as the default, is the ECMA-119 6.5.1
+	// multi-extent representation this package also implements. That one is
+	// standard-conformant but UNVERIFIED against real readers: no ISO on
+	// hand uses it, so whether Windows setup accepts it is untested. Callers
+	// authoring Windows media should set this instead. Requires UDF.
+	LargeFilesUDFOnly bool
+
 	// PadSectors is the number of zero sectors appended after all data.
 	// genisoimage appends 150 by default as a run-out for CD-R drives
 	// whose read-ahead runs off the end of the recorded area. It is not
-	// required by ECMA-119 and defaults to 0 here. Note that a later UDF
-	// phase will impose its own constraint on the tail of the image,
-	// because ECMA-167 pins an Anchor Volume Descriptor Pointer near the
-	// last recorded sector.
+	// required by ECMA-119 and defaults to 0 here.
+	//
+	// When UDF is set these sectors are not zeros: they are filled with
+	// copies of the Anchor Volume Descriptor Pointer, which is what
+	// genisoimage's udf_padend_avdp_write does and which makes the anchor
+	// findable even if a drive's idea of the last recorded sector differs
+	// from the image's by a few blocks.
 	PadSectors uint32
 }
 
@@ -368,6 +415,32 @@ func (b *Builder) finalize() error {
 // directory relocation. This package implements neither yet, so it reports
 // the violation rather than emitting a non-conformant image and letting the
 // caller discover the problem on a reader that enforces it.
+// measure reads every file's length once and decides which files the
+// ECMA-119 layer will decline to record.
+//
+// This has to happen before layout rather than inside it, because the
+// directory extents are sized before file data is allocated: whether a file
+// gets a Directory Record has to be known while the directories are being
+// sized, not when its extent is handed out.
+func (b *Builder) measure() error {
+	if b.opts.LargeFilesUDFOnly && !b.opts.UDF {
+		return errors.New("iso: LargeFilesUDFOnly requires UDF, since it is UDF that " +
+			"would be the only filesystem recording such a file")
+	}
+	for _, f := range b.files() {
+		size, err := f.src.Size()
+		if err != nil {
+			return fmt.Errorf("iso: sizing %q: %w", f.hostName, err)
+		}
+		if size < 0 {
+			return fmt.Errorf("iso: %q reports a negative size", f.hostName)
+		}
+		f.size = size
+		f.isoHidden = b.opts.LargeFilesUDFOnly && uint64(size) > uint64(b.opts.MaxSectionSize)
+	}
+	return nil
+}
+
 func (b *Builder) checkDepth(n *node) error {
 	if n.level > 8 {
 		return fmt.Errorf("iso: directory hierarchy deeper than the 8 levels ECMA-119 6.8.2.1 allows "+
