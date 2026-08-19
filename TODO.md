@@ -4204,3 +4204,29 @@ Still open, unchanged or newly recorded:
       ESD, and author the final bootable ISO), purely on the WIM/registry
       formats in memory — no real DISM/WOF mount, no Administrator/
       Windows-host requirement.
+
+      **Status (2026-08-19): this exists out of tree and is now
+      external-tool-free.** `nano11-go`
+      (`github.com/Pandapip1/nano11-go`, commit `a1c08c1`) does every step
+      of that list except the ESD recompression, over these packages via
+      `replace` directives. Its last shell-out, `rebuild-iso.sh`'s
+      `genisoimage` call, was deleted this date and replaced by
+      `isoimage.go` over the `iso` package; the ISO-root cleanup, the
+      install.wim/boot.wim placement and the root `autounattend.xml` moved
+      into Go with it. Verified by building `isox_test10` in 1.8 s to a
+      3 786 639 360-byte image with an identical 1045-entry path list, a
+      boot catalog byte-identical to the genisoimage reference except the
+      two Load RBAs, matching `bi_csum` `0x46eda81c`, seven matching file
+      SHA-256s, and a UEFI + secure boot + TPM 2.0 boot to Windows Setup's
+      language and keyboard pages. So what remains for this item is only
+      the *in-tree* framing: whether gowim itself should ship such a
+      command, or whether the library boundary the current split draws is
+      the right one. The library side has no gap left; nano11-go proves it
+      end to end.
+      Also verified this date: the writer does not touch its inputs.
+      SHA-256 of `boot/etfsboot.com`, `efisys_noprompt.bin`,
+      `autounattend.xml` and `sources/install.wim` in `isox_test10` were
+      unchanged across the build, where genisoimage's `-boot-info-table`
+      rewrites the boot image on disk. The per-run `cp -a isox isox_testN`
+      convention that existed to give genisoimage a scratch copy is no
+      longer needed for the ISO step.
