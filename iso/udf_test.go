@@ -148,9 +148,10 @@ func TestFileIdentDescLength(t *testing.T) {
 // udfImage is a minimal UDF reader built from the ECMA-167 field tables, used
 // to check the writer's output without going through the writer's own code.
 type udfImage struct {
-	data           []byte
-	partitionStart uint32
-	rootEntry      uint32 // partition-relative block of the root File Entry
+	data            []byte
+	partitionStart  uint32
+	partitionLength uint32
+	rootEntry       uint32 // partition-relative block of the root File Entry
 }
 
 func (u *udfImage) sector(n uint32) []byte {
@@ -241,7 +242,7 @@ func openUDF(t *testing.T, data []byte) *udfImage {
 	for _, base := range []uint32{mainLoc, reserveLoc} {
 		u.scanVDS(t, base, mainLen/LogicalSectorSize)
 	}
-	u.partitionStart = u.scanVDS(t, mainLoc, mainLen/LogicalSectorSize)
+	u.partitionStart, u.partitionLength = u.scanVDS(t, mainLoc, mainLen/LogicalSectorSize)
 
 	// ECMA-167 4/14.1: the File Set Descriptor is the first block of the
 	// partition, and its tag location is partition-relative (4/7.1).
@@ -252,10 +253,10 @@ func openUDF(t *testing.T, data []byte) *udfImage {
 }
 
 // scanVDS walks one Volume Descriptor Sequence, checks every descriptor it
-// finds and returns the Partition Starting Location.
-func (u *udfImage) scanVDS(t *testing.T, base, sectors uint32) uint32 {
+// finds and returns the Partition Starting Location and Partition Length.
+func (u *udfImage) scanVDS(t *testing.T, base, sectors uint32) (uint32, uint32) {
 	t.Helper()
-	var partitionStart uint32
+	var partitionStart, partitionLength uint32
 	seen := map[uint16]bool{}
 	for i := uint32(0); i < sectors; i++ {
 		s := u.sector(base + i)
@@ -267,6 +268,7 @@ func (u *udfImage) scanVDS(t *testing.T, base, sectors uint32) uint32 {
 		seen[id] = true
 		if id == udfTagPartitionDesc {
 			partitionStart = binary.LittleEndian.Uint32(s[188:192])
+			partitionLength = binary.LittleEndian.Uint32(s[192:196])
 		}
 		if id == udfTagTerminatingDesc {
 			break
@@ -280,7 +282,7 @@ func (u *udfImage) scanVDS(t *testing.T, base, sectors uint32) uint32 {
 			t.Errorf("volume descriptor sequence at %d has no descriptor of type %d", base, want)
 		}
 	}
-	return partitionStart
+	return partitionStart, partitionLength
 }
 
 // udfEntryInfo is what the reader learns about one file or directory.
@@ -446,6 +448,15 @@ func TestUDFStructure(t *testing.T) {
 	if u.partitionStart <= udfAnchorSector {
 		t.Errorf("partition starts at %d, which is not past the anchor at %d",
 			u.partitionStart, udfAnchorSector)
+	}
+
+	// The partition must not claim the closing anchor's sector. Declaring it
+	// one block too long is what genisoimage does when it pads, and udfinfo
+	// reports it as "Partition Space overlaps with other blocks".
+	total := uint32(len(data) / LogicalSectorSize)
+	if end := u.partitionStart + u.partitionLength; end > total-1 {
+		t.Errorf("the partition covers blocks %d..%d, but the closing anchor is at %d",
+			u.partitionStart, end-1, total-1)
 	}
 
 	var got []udfEntryInfo

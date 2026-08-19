@@ -718,12 +718,21 @@ func (l *layout) setImplUseVolumeDesc(s []byte, lba uint32) {
 // hinge of the whole shared-extent scheme: a file's UDF allocation descriptor
 // is its ISO 9660 extent minus Partition Starting Location.
 //
-// The partition is declared to run from its start through the end anchor
-// inclusive. genisoimage computes the same value whenever it pads (its
-// default), because udf_padend_avdp_size resets lba_end_anchor_vol_desc to
-// the sector *after* the single end anchor; measured on nano11go_test10.iso,
-// udfinfo reports start=257 blocks=1848690 with the end anchor at 1848946,
-// and 257+1848690 = 1848947 = 1848946+1.
+// The partition runs from its start up to, but not including, the closing
+// Anchor Volume Descriptor Pointer. That anchor is a volume-level structure,
+// not partition space, and file data ends in the sector before it.
+//
+// genisoimage computes one more than this whenever it pads, which is its
+// default: udf_padend_avdp_size resets lba_end_anchor_vol_desc to the sector
+// *after* the single end anchor, so the anchor falls inside the declared
+// partition. Measured on nano11go_test10.iso, udfinfo reports start=257
+// blocks=1848690 with the end anchor at 1848946, and 257+1848690 = 1848947.
+// That goes unnoticed there only because 150 further anchors follow and
+// udfinfo checks the last sector rather than the first anchor; reproducing it
+// here with PadSectors=0 made udfinfo report "Partition Space overlaps with
+// other blocks", which is how this was found. genisoimage's own unpadded path
+// (udf_end_anchor_vol_desc_size, which does not add one) agrees with the
+// value used here.
 func (l *layout) setPartitionDesc(s []byte, lba uint32) {
 	u := l.udf
 	putU32(s[16:20], 2) // Volume Descriptor Sequence Number
@@ -738,7 +747,7 @@ func (l *layout) setPartitionDesc(s []byte, lba uint32) {
 	putEntityID(s[24:56], 2, "+NSR02", nil)
 	putU32(s[184:188], 1) // 3/10.5.7 Access Type: 1 = read-only
 	putU32(s[188:192], u.partitionStart)
-	putU32(s[192:196], u.endAnchor+1-u.partitionStart)
+	putU32(s[192:196], u.endAnchor-u.partitionStart)
 	putImplIdent(s[196:228])
 	putTag(s, udfTagPartitionDesc, lba, 512)
 }
@@ -814,7 +823,7 @@ func (l *layout) writeUDFIntegritySeq(w *sectorWriter) error {
 	// 3/10.10.9 Free Space Table: 0, no free space on read-only media.
 	putU32(s[80:84], 0)
 	// 3/10.10.10 Size Table: the partition's length in blocks.
-	putU32(s[84:88], u.endAnchor+1-u.partitionStart)
+	putU32(s[84:88], u.endAnchor-u.partitionStart)
 	// 3/10.10.11 Implementation Use, whose layout UDF 1.02 2.2.6.4 defines.
 	putImplIdent(s[88:120])
 	putU32(s[120:124], uint32(len(u.files)))
