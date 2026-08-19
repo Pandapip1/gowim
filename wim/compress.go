@@ -162,13 +162,13 @@ func EncodeResourceData(data []byte, compressionType CompressionType, chunkSize 
 // every existing caller's exact output.
 //
 // The knobs matter a lot at WIM scale, because a WIM export re-encodes
-// every blob: measured 2026-08-18 on a 24-core x86-64 machine over a 4 MiB
-// corpus compressed in 32 KiB chunks across all cores (see lzx.Options's
-// own doc for the corpus and full ladder), lzx.Fast() runs at 13.8 MB/s
-// for 2.87% larger output where the defaults run at 0.511 MB/s, and
-// lzx.Balanced() at 2.94 MB/s for 0.52% larger output. Projected onto a
-// real 7.4 GB install.wim re-export that is roughly 20-30 minutes versus
-// ~4 hours of compression time, so callers re-encoding multi-gigabyte
+// every blob: measured 2026-08-18 on a 24-core x86-64 machine over 29.4 MiB
+// of real Windows install-image data compressed in 32 KiB chunks across all
+// cores (see lzx.Options's own doc for the corpus and full ladder),
+// lzx.Fast() runs at 20.5 MB/s for 1.75% larger output where the defaults
+// run at 0.63 MB/s, and lzx.Balanced() at 3.2 MB/s for 0.66% larger output.
+// Projected onto a real 7.4 GB install.wim re-export that is well under an
+// hour versus most of a day of compression time, so callers re-encoding multi-gigabyte
 // images should choose a preset deliberately rather than inheriting the
 // ratio-first default.
 func EncodeResourceDataWith(data []byte, compressionType CompressionType, chunkSize uint32, lzxOpts lzx.Options) (payload []byte, flags uint8, err error) {

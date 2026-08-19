@@ -124,7 +124,7 @@ for this package:
 | `matcher.go` | the bounded-lookahead binary-tree LZ77 match finder, the repeat-offset queue, and the cost model |
 | `optimal.go` | the bounded multi-state beam DP parse tried alongside the lookahead parse |
 | `splitstats.go` | wimlib's statistics-driven block-splitting heuristic |
-| `options.go` | `Options`, its zero-means-default resolution, and the `Fastest`/`Fast`/`Balanced`/`DefaultOptions`/`Max` preset ladder |
+| `options.go` | `Options`, its zero-means-default resolution, and the `Fast`/`Balanced`/`DefaultOptions`/`Max` preset ladder |
 
 ## Usage
 
@@ -149,8 +149,8 @@ this package does not do that slicing itself (see [Scope](#scope)).
 ### Speed/ratio presets
 
 The encoder's search effort is a caller-visible knob, because the range is
-enormous: the same 4 MiB corpus takes 20.8s or 0.21s to compress depending
-on the preset, for a 2.9% difference in output size. `CompressWith` takes an
+enormous: the same corpus compresses at 20.5 MB/s or 0.6 MB/s depending on
+the preset, for a 1.8% difference in output size. `CompressWith` takes an
 `Options` whose zero value is exactly what `Compress` does, so a caller
 overrides only the knobs it cares about:
 
@@ -162,25 +162,40 @@ compressed = lzx.CompressWith(original, lzx.Options{      // or tune directly
 })
 ```
 
-Measured 2026-08-18 on a 24-core x86-64 Linux machine (Go 1.26.5), 32 KiB
-chunks: "serial" is total time for an 832 KiB / 26-chunk mixed corpus
-compressed one chunk at a time; "parallel", "output" and "alloc" are for a
-4 MiB / 128-chunk corpus compressed across all cores, the way the `wim`
-package drives this encoder.
+Measured 2026-08-18 on an otherwise idle 24-core x86-64 Linux machine
+(Go 1.26.5), on real Windows install-image data: 29.4 MiB, 1170 chunks,
+315 files from a mounted Windows 11 build 26100 image, split into 32 KiB
+chunks exactly the way non-solid WIM resources are chunked (89.9% PE by
+bytes, 6.9% registry hive, 1.9% manifest/inf/mum text, 1.2%
+already-compressed). "serial" is one goroutine over half that corpus
+(585 chunks, 15.0 MiB), best of 3; "parallel", "output" and "alloc" are the
+full corpus across all cores, the way the `wim` package drives this encoder.
 
 | preset | serial | parallel | output | alloc | vs default |
 |---|---|---|---|---|---|
-| `Fastest()` | 0.54s | 20.2 MB/s | 1617878 | 1.5 GB | +2.91% |
-| `Fast()` | 0.80s | 13.8 MB/s | 1617228 | 2.2 GB | +2.87% |
-| `Balanced()` | 2.33s | 2.9 MB/s | 1580330 | 13.2 GB | +0.52% |
-| `DefaultOptions()` | 15.34s | 0.51 MB/s | 1572132 | 74.7 GB | — |
-| `Max()` | 47.84s | 0.20 MB/s | 1571204 | 153.8 GB | −0.06% |
+| `Fast()` | 8.17s | 20.5 MB/s | 10902398 | 11.6 GB | +1.75% |
+| `Balanced()` | 2.07s* | 3.2 MB/s | 10785178 | 87.9 GB | +0.66% |
+| `DefaultOptions()` | 11.64s* | 0.6 MB/s | 10714428 | 473.8 GB | — |
+| `Max()` | 44.11s* | 0.2 MB/s | 10706412 | 1049.6 GB | −0.07% |
+
+(*) `Balanced`, `DefaultOptions` and `Max` are far too slow to time over 585
+chunks; their serial column is a 30-chunk / 818 KiB subset of the same
+corpus. Output and alloc columns are always the full 1170-chunk corpus.
 
 The parallel column is not simply 24x the serial one: at the default
-settings this encoder allocates fast enough (measured 9.1 GB/s) that GC,
-not compute, is what limits a many-core run. That is also why `Fast`'s
-parallel speedup (27x) exceeds its serial one (19x) — turning off the DP
-parser removes almost all of the allocation, not just the CPU.
+settings this encoder allocates fast enough (473.8 GB for those 29.4 MiB)
+that GC, not compute, is what limits a many-core run. That is also why
+`Fast`'s parallel speedup exceeds its serial one — turning off the DP
+parser removes most of the allocation, not just the CPU.
+
+There is deliberately no `Fastest` rung. Until 2026-08-18 there was one,
+adding `DisableBlockSplit` on top of `Fast`'s knobs; remeasured on this
+corpus it was at most ~5% faster (and in some runs slower) while costing
+0.116% of output size on real WIM chunks and 1.222% on deliberately
+heterogeneous ones — it made 238 of 560 hetero chunks more than 1% larger
+and not one chunk smaller. Every other step in the ladder is at least 5x
+wide, so a rung that thin was not a rung; a caller who has measured its own
+workload can still set the fields directly.
 
 Every preset produces a valid LZX chunk; the format never changes. Both the
 default and the `DisableDP` path were verified byte-for-byte through real

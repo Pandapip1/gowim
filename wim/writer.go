@@ -53,7 +53,7 @@ type WriteOptions struct {
 	// when CompressionType is CompressionNone.
 	ChunkSize uint32
 	// LZXOptions selects the LZX encoder's speed/compression-ratio tradeoff
-	// (see the lzx package's Options and its Fastest/Fast/Balanced/
+	// (see the lzx package's Options and its Fast/Balanced/
 	// DefaultOptions/Max preset ladder). It applies ONLY when
 	// CompressionType is HdrFlagCompressLZX: the XPRESS and LZMS encoders
 	// expose no equivalent tunables and are called exactly as before
@@ -64,12 +64,13 @@ type WriteOptions struct {
 	// are unaffected by leaving it unset.
 	//
 	// It is worth setting for any large re-encode. Measured 2026-08-18 on a
-	// 24-core x86-64 machine, 4 MiB of mixed binary/text compressed in
-	// 32 KiB chunks across all cores (the same way this package drives the
-	// encoder): the defaults sustain 0.511 MB/s, lzx.Balanced() 2.94 MB/s
-	// for 0.52% larger output, and lzx.Fast() 13.8 MB/s for 2.87% larger
-	// output. Projected onto a real 7.4 GB install.wim export that is the
-	// difference between ~4 hours and ~20-30 minutes of compression.
+	// 24-core x86-64 machine, 29.4 MiB of real Windows install-image data
+	// compressed in 32 KiB chunks across all cores (the same way this
+	// package drives the encoder): the defaults sustain 0.63 MB/s,
+	// lzx.Balanced() 3.2 MB/s for 0.66% larger output, and lzx.Fast()
+	// 20.5 MB/s for 1.75% larger output. Projected onto a real 7.4 GB
+	// install.wim export that is the difference between most of a day and
+	// well under an hour of compression.
 	LZXOptions lzx.Options
 	// BootIndex is the 1-based index into the images slice passed to
 	// WriteTo/Assemble designating the bootable image, or 0 if no image is

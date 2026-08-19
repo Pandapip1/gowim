@@ -266,7 +266,7 @@ func Compress(data []byte) []byte {
 }
 
 // CompressWith is Compress with an explicit speed/compression-ratio
-// tradeoff. See Options for the individual knobs and Fastest/Fast/
+// tradeoff. See Options for the individual knobs and Fast/Balanced/
 // DefaultOptions/Max for the measured preset ladder most callers should
 // use; the zero Options is the default tuning, so CompressWith(data,
 // Options{}) and Compress(data) produce identical bytes.

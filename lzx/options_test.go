@@ -65,7 +65,6 @@ func TestCompressWithZeroOptionsMatchesCompress(t *testing.T) {
 // must still produce a chunk this package's own decoder restores exactly.
 func TestPresetsRoundTrip(t *testing.T) {
 	presets := map[string]Options{
-		"Fastest":  Fastest(),
 		"Fast":     Fast(),
 		"Balanced": Balanced(),
 		"Default":  DefaultOptions(),
@@ -99,9 +98,10 @@ func TestPresetsRoundTrip(t *testing.T) {
 // it. The check is on the TOTAL across the corpora, not per buffer, and
 // deliberately so: these knobs change which parse the encoder picks rather
 // than strictly widening a search, so a single buffer can invert -- e.g.
-// on testdata/hash2_greedy_chunk1.bin alone, Fastest's narrower
-// MaxChainLen happens to find a parse 16 bytes smaller than Fast's
-// (measured 8872 vs 8888, 2026-08-18). The ladder's ordering is a
+// on testdata/hash2_greedy_chunk1.bin alone, Fast's narrower MaxChainLen
+// happens to find a parse 16 bytes smaller than the same run at the
+// default search depth (measured 8872 vs 8888, 2026-08-18). The ladder's
+// ordering is a
 // statement about aggregate behavior, which is what a caller choosing a
 // rung actually experiences, and the per-rung byte counts quoted in the
 // preset docs are likewise corpus totals.
@@ -111,7 +111,6 @@ func TestPresetLadderIsOrdered(t *testing.T) {
 		name string
 		opts Options
 	}{
-		{"Fastest", Fastest()},
 		{"Fast", Fast()},
 		{"Balanced", Balanced()},
 		{"Default", DefaultOptions()},

@@ -12,8 +12,8 @@ package lzx
 // callers get.
 //
 // Most callers should not set these fields individually: the named presets
-// (Fastest, Fast, Balanced, DefaultOptions, Max -- an ordered ladder, each
-// a specific measured combination of the fields below) are the intended
+// (Fast, Balanced, DefaultOptions, Max -- an ordered ladder, each a
+// specific measured combination of the fields below) are the intended
 // interface, and the individual fields are the escape hatch for tuning
 // beyond them. See each preset's own doc for its measured position.
 //
@@ -24,51 +24,58 @@ package lzx
 //
 // # The preset ladder
 //
-// Fastest, Fast, Balanced, DefaultOptions and Max are an ordered ladder of
-// measured (speed, size) points, from fastest/largest to slowest/smallest.
-// Each is a specific combination of the fields above, chosen by measuring
-// the individual knobs rather than by guessing which ones would matter.
+// Fast, Balanced, DefaultOptions and Max are an ordered ladder of measured
+// (speed, size) points, from fastest/largest to slowest/smallest. Each is a
+// specific combination of the fields above, chosen by measuring the
+// individual knobs against each other rather than by guessing which ones
+// would matter -- and, as of the 2026-08-18 remeasurement below, by
+// measuring them on the workload this package actually exists to serve.
 //
-// All numbers below were measured on 2026-08-18 on a 24-core x86-64 Linux
-// machine (Go 1.26.5), 32 KiB chunks through CompressWith, on two corpora:
+// All numbers below were measured on 2026-08-18 on an otherwise idle
+// 24-core x86-64 Linux machine (Go 1.26.5), on real Windows install-image
+// data rather than on synthetic or Unix-side samples:
 //
-//   - "serial": 832 KiB, 26 chunks, compressed one at a time on one
-//     goroutine -- 128 KiB each of /usr/bin/bash, libc.so.6,
-//     libLLVM.so.18.1, /usr/share/dict/american-english, concatenated
-//     Debian copyright text, Go net/http source, plus this package's two
-//     testdata chunks. This isolates per-chunk encoder cost.
-//   - "parallel": 4 MiB, 128 chunks, compressed concurrently across all 24
-//     cores the way the `wim` package drives this encoder -- 2 MiB of
-//     libLLVM.so.18.1, 1 MiB of Go runtime+net/http source, 512 KiB of
-//     dictionary words, 512 KiB of libc.so.6. This is the number that
-//     predicts real WIM-export wall time, and it is NOT simply 24x the
-//     serial number: at the default settings the encoder allocates fast
-//     enough (measured 9.1 GB/s, 74.7 GB total for those 4 MiB) that GC,
-//     not compute, is the binding constraint.
+//   - "WIM corpus": 29.4 MiB, 1170 chunks, 315 files pulled from a mounted
+//     Windows 11 build 26100 image (ProgramData, Program Files, Program
+//     Files (x86) and Windows trees), split into 32 KiB chunks exactly the
+//     way this package's non-solid resources are chunked -- per file, last
+//     chunk short (297 of the 1170 are short). By bytes it is 89.9% PE
+//     (150 .dll/.exe/.mui/.sys), 6.9% registry hive, 1.9% manifest/inf/mum
+//     text and 1.2% already-compressed (.png/.ttf/.jpg). Files longer than
+//     32 chunks contribute an evenly spaced 32-chunk sample, so that one
+//     72 MB SOFTWARE hive adds variety rather than volume.
+//   - "hetero corpus": 17.5 MiB, 560 chunks, each one a deliberate splice
+//     of halves (or quarters) of real chunks from different content
+//     categories. This is the case block splitting exists for, and no
+//     corpus of whole files exercises it, because a non-solid WIM chunk is
+//     only ever heterogeneous where a single file is (a PE straddling
+//     .text/.rsrc/.reloc, say). It is an upper bound, not a typical case.
 //
-// Measured, same input both columns (output bytes / parallel throughput /
-// total allocation for the 4 MiB parallel corpus):
+// Serial figures are one goroutine over half the WIM corpus (585 chunks,
+// 15.0 MiB), best of 3. Parallel figures are all 1170 chunks across all 24
+// cores the way the `wim` package drives this encoder, best of 7
+// interleaved runs. The parallel column is NOT simply 24x the serial one:
+// at the default settings the encoder allocates fast enough (473.8 GB for
+// those 29.4 MiB) that GC, not compute, is the binding constraint, which
+// is why the alloc column is reported alongside.
 //
-//	preset      serial     parallel    output      alloc    vs Default
-//	Fastest     0.54s      20.2 MB/s   1617878     1.5 GB   +2.91% size
-//	Fast        0.80s      13.8 MB/s   1617228     2.2 GB   +2.87% size
-//	Balanced    2.33s       2.9 MB/s   1580330    13.2 GB   +0.52% size
-//	Default    15.34s      0.51 MB/s   1572132    74.7 GB   --
-//	Max        47.84s      0.20 MB/s   1571204   153.8 GB   -0.06% size
+//	preset      serial   parallel    output      alloc     vs Default
+//	Fast         8.17s   20.5 MB/s   10902398    11.6 GB   +1.75% size
+//	Balanced     2.07s*   3.2 MB/s   10785178    87.9 GB   +0.66% size
+//	Default     11.64s*   0.6 MB/s   10714428   473.8 GB   --
+//	Max         44.11s*   0.2 MB/s   10706412  1049.6 GB   -0.07% size
 //
-// (Serial column is the 832 KiB corpus's total time; output/alloc columns
-// are the 4 MiB parallel corpus.) For orientation, this package's encoder
-// as of commit cfe02d5 -- before the DP parser was refined into the
-// default path -- measured 0.94s serial / 8.1 MB/s parallel at 1593160
-// bytes, i.e. Fast is measurably faster than that older encoder (13.8 vs
-// 8.1 MB/s, for 1.5% more output), and Balanced is smaller than it
-// (1580330 vs 1593160) though 2.8x slower.
+// (*) Balanced, Default and Max are far too slow to time over 585 chunks;
+// their serial column is a 30-chunk / 818 KiB subset of the same corpus.
+// Output and alloc columns are always the full 1170-chunk corpus.
 //
 // The ladder is deliberately not evenly spaced: the honest measured shape
 // of this encoder is that nearly all of the DP parser's compression win is
-// available at a small fraction of its cost (Balanced is 6.6x faster than
-// Default for 0.52% more output), and the last half-percent is what costs
-// the remaining order of magnitude.
+// available at a small fraction of its cost (Balanced is 5x faster than
+// Default for 0.66% more output), and the last half-percent is what costs
+// the remaining order of magnitude. Every step in it is at least 5x wide;
+// see Fast's doc for the rung that was measured, found to be ~5% wide, and
+// removed for it.
 type Options struct {
 	// DisableDP skips the bounded multi-state beam DP parser
 	// (optimal.go's findMatchesOptimal) entirely, leaving only the
@@ -136,6 +143,13 @@ type Options struct {
 	// VERBATIM and ALIGNED trials are always kept: ALIGNED is a single
 	// extra encode of an already-parsed token stream and is not worth a
 	// knob.
+	//
+	// Measured 2026-08-18 on 29.4 MiB of real Windows WIM chunks, setting
+	// this on top of DisableDP cost 0.116% of output size (1.222% on
+	// deliberately heterogeneous chunks) for no measurable parallel speed
+	// win at all -- see Fast's doc. It is kept as a knob because a caller
+	// bounded by single-threaded encoder latency can still want the ~3%
+	// serial saving, but it is not part of any preset.
 	DisableBlockSplit bool
 }
 
@@ -207,57 +221,85 @@ func (o Options) resolve() encodeOptions {
 // findMatches directly).
 func defaultEncodeOptions() encodeOptions { return Options{}.resolve() }
 
-// Fastest is the fastest preset: no DP parse, no block-splitting trials, a
-// single refinement round, and a quarter of the default match-finder
-// search depth. Measured (see the ladder table above) 0.54s serial /
-// 20.2 MB/s parallel, 2.91% larger output than Default -- ~40x Default's
-// parallel throughput.
+// Fast is the fast rung: no DP parse, a single refinement round, and a
+// quarter of the default match-finder search depth -- but block-splitting
+// trials KEPT. Measured (see the ladder table above) 8.17s serial /
+// 20.5 MB/s parallel, 1.75% larger output than Default, i.e. ~33x
+// Default's parallel throughput.
+//
+// DisableDP is the single highest-leverage knob in Options: profiling
+// attributed ~85% of the encoder's cumulative CPU to the DP half, and
+// removing it also removes most of the encoder's allocation pressure
+// (473.8 GB -> 16.2 GB on the WIM corpus), which is what makes the
+// parallel speedup larger than the serial one. Everything below is about
+// what to do with the three cheaper knobs on top of it, each measured
+// alone against plain Options{DisableDP: true} (13.62s serial /
+// 13.8 MB/s parallel / 10892438 bytes) on 2026-08-18:
+//
+//	knob added              serial  parallel    size cost   size cost
+//	                                            WIM corpus  hetero corpus
+//	MaxChainLen: 16         11.64s  14.4 MB/s   +0.065%     +0.035%
+//	RefinePatience: 1        9.51s  17.3 MB/s   +0.025%     +0.028%
+//	DisableBlockSplit       13.16s  12.7 MB/s   +0.116%     +1.222%
+//	(all three = the old
+//	 Fastest preset)         7.79s  21.5 MB/s   +0.207%     +1.283%
+//	MaxChainLen + Patience
+//	 (this preset)           8.17s  20.5 MB/s   +0.091%     +0.057%
 //
 // MaxChainLen: 16 rather than the default 96 is where the search-depth
-// knob stops paying on the measured corpora: with the DP off, 96 -> 16
-// measured 0.80s -> 0.74s serial and cost nothing at all in size (265042
-// -> 265030 bytes), while going on to 8 (with this preset's other knobs
-// also set) bought 0.54s -> 0.51s for 418 more bytes. It is included here because it is the
-// only knob that speeds up the lookahead parser, which is all that is left
-// once the DP is off.
-func Fastest() Options {
+// knob stops paying: it is the only match-finder knob shared by both
+// parsers, hence the only one that still speeds anything up once the DP is
+// off. RefinePatience: 1 is the cheapest of the three by size and the
+// second largest by speed.
+//
+// DisableBlockSplit is deliberately NOT set here, and that is the whole
+// reason this preset is defined as a combination rather than as "turn
+// everything down". Block splitting is nearly free -- adding it to this
+// preset measured 8.17s vs 7.79s serial, and in parallel the two are
+// within measurement noise of each other (20.5 vs 21.5 MB/s over 7
+// interleaved runs; a separate run had this preset FASTER, 22.9 vs 22.5).
+// What it buys is the entire fat tail of the size distribution. Alone
+// against Options{DisableDP: true} it made 118 of 1170 real WIM chunks
+// larger and 0 smaller, 46 of them by more than 1% and 16 by more than 2%,
+// worst case +522 bytes (+4.05%) on a 32 KiB chunk of ReachFramework.dll
+// straddling a PE section boundary. On the hetero corpus, which is nothing
+// but such boundaries, it made 238 of 560 chunks more than 1% larger,
+// worst case +878 bytes (+4.19%), for a 1.222% total -- a 10.5x
+// amplification of its cost on whole-file data, and still no measurable
+// speed win.
+//
+// That asymmetry is why there is no separate "Fastest" rung any more. The
+// preset that set all three knobs existed until 2026-08-18; remeasured on
+// real WIM data it was at most 5% faster than this one (and sometimes
+// slower), for 2.3x the size cost on whole files and 22x on heterogeneous
+// ones. Every other step in this ladder is at least 5x wide, so a rung
+// that thin was not a rung. A caller who has measured its own workload and
+// genuinely wants that last few percent can still write
+// Options{DisableDP: true, MaxChainLen: 16, RefinePatience: 1,
+// DisableBlockSplit: true} -- the individual fields are exactly the escape
+// hatch for that -- but it should not be reached for by name and by
+// default.
+func Fast() Options {
 	return Options{
-		DisableDP:         true,
-		MaxChainLen:       16,
-		RefinePatience:    1,
-		DisableBlockSplit: true,
+		DisableDP:      true,
+		MaxChainLen:    16,
+		RefinePatience: 1,
 	}
 }
-
-// Fast disables only the DP parser, leaving every other default alone: the
-// bounded-lookahead parser with its full refinement loop, block-splitting
-// trials, and search depth. Measured 0.80s serial / 13.8 MB/s parallel,
-// 2.87% larger output than Default.
-//
-// This is the single highest-leverage knob in Options: profiling
-// attributed ~85% of the encoder's cumulative CPU to the DP half, and
-// removing it also removes essentially all of the encoder's allocation
-// pressure (74.7 GB -> 2.2 GB on the 4 MiB parallel corpus), which is what
-// makes the parallel speedup (27x) larger than the serial one (19x).
-//
-// Fast rather than Fastest is the right default choice for a caller that
-// wants "as fast as reasonable" but has no measurement of its own: the
-// extra knobs Fastest turns down buy a further ~1.5x for only 650 bytes in
-// 1.6 MB, so they are worth taking only when throughput genuinely
-// dominates.
-func Fast() Options { return Options{DisableDP: true} }
 
 // Balanced keeps the DP parser but runs it much more cheaply: a beam a
 // quarter as wide, a third as many fresh-offset candidates per position,
 // only the full-length repeat sample, no DP-side length-2 (hash2) edges,
-// and a single refinement round. Measured 2.33s serial / 2.9 MB/s
-// parallel, 0.52% larger output than Default.
+// and a single refinement round. Measured (see the ladder table above)
+// 2.07s serial on the 30-chunk subset / 3.2 MB/s parallel, 0.66% larger
+// output than Default.
 //
 // This rung exists because the measured curve between Fast and Default has
-// a very large gap in it (13.8 -> 0.51 MB/s for 2.87% of size), and this
-// combination recovers 82% of that size difference for 14% of the time
-// difference (parallel corpus; 11% on the serial one). The individual contributions on the serial corpus, each
-// measured alone against Default's 15.34s / 255516 bytes: BeamWidth 4 ->
+// a very large gap in it (20.5 -> 0.6 MB/s for 1.75% of size), and this
+// combination recovers 62% of that size difference for 17% of the time
+// difference (parallel column of the ladder table). The individual
+// contributions, measured alone on the earlier 832 KiB serial corpus
+// against its Default of 15.34s / 255516 bytes: BeamWidth 4 ->
 // 5.00s / 255850, BeamWidth 2 -> 2.61s / 256524, RefinePatience 1 ->
 // 9.06s / 255662, DisableDPHash2 -> 10.06s / 256006, DPRepeatLengthSamples
 // 1 -> 13.98s / 255598, MaxFreshCandidates 8 -> 14.84s / 255528. Beam
@@ -280,9 +322,9 @@ func DefaultOptions() Options { return Options{} }
 
 // Max spends substantially more time for a small further size win: a beam
 // 1.6x wider, a third more fresh-offset candidates, and refinement
-// patience 6 rather than 2. Measured 47.84s serial / 0.20 MB/s parallel,
-// 0.06% smaller output than Default -- i.e. 3.1x Default's time for 928
-// bytes out of 1.57 MB.
+// patience 6 rather than 2. Measured (see the ladder table above) 44.11s
+// serial on the 30-chunk subset / 0.2 MB/s parallel, 0.07% smaller output
+// than Default -- i.e. 3.8x Default's time for 8016 bytes out of 10.7 MB.
 //
 // It is offered for callers compressing something small once and keeping
 // it forever, where encoder time is genuinely free. It is NOT the default

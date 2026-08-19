@@ -113,7 +113,7 @@ func TestEncodeResourceDataWithLZXPresetReachesEncoder(t *testing.T) {
 	// The non-LZX codecs take no options, so passing one must change
 	// nothing at all for them.
 	for _, ctype := range []CompressionType{HdrFlagCompressXPRESS, HdrFlagCompressLZMS} {
-		withOpts, _, err := EncodeResourceDataWith(data, ctype, 32768, lzx.Fastest())
+		withOpts, _, err := EncodeResourceDataWith(data, ctype, 32768, lzx.Fast())
 		if err != nil {
 			t.Fatalf("EncodeResourceDataWith(%#x): %v", ctype, err)
 		}
@@ -181,7 +181,7 @@ func TestWriteOptionsZeroLZXOptionsPreservesOutput(t *testing.T) {
 // on the way down would leave every preset producing identical WIMs. It
 // assembles the same images at three rungs of the ladder and requires the
 // LZX-compressed output to actually change, in the measured direction
-// (Fastest >= Fast > Default in size), while every one of them still reads
+// (Fast > Balanced > Default in size), while every one of them still reads
 // back correctly.
 func TestWriteOptionsLZXPresetReachesEncoder(t *testing.T) {
 	files := realBinaryImageFixture(t)
@@ -206,20 +206,20 @@ func TestWriteOptionsLZXPresetReachesEncoder(t *testing.T) {
 
 	def := assemble(lzx.DefaultOptions())
 	fast := assemble(lzx.Fast())
-	fastest := assemble(lzx.Fastest())
+	balanced := assemble(lzx.Balanced())
 
 	if len(fast) <= len(def) {
-		t.Fatalf("lzx.Fast() WIM is %d bytes, default is %d: want Fast strictly larger (it trades ~2.87%% size for ~27x throughput)", len(fast), len(def))
+		t.Fatalf("lzx.Fast() WIM is %d bytes, default is %d: want Fast strictly larger (it trades ~1.75%% size for ~33x throughput)", len(fast), len(def))
 	}
-	if len(fastest) < len(fast) {
-		t.Fatalf("lzx.Fastest() WIM is %d bytes, Fast is %d: want Fastest no smaller", len(fastest), len(fast))
+	if len(fast) <= len(balanced) {
+		t.Fatalf("lzx.Fast() WIM is %d bytes, Balanced is %d: want Fast strictly larger (measured 10902398 vs 10785178 on the WIM corpus)", len(fast), len(balanced))
 	}
-	if bytes.Equal(fast, fastest) {
-		t.Fatalf("Fast and Fastest produced byte-identical WIMs; the finer knobs are not reaching the encoder")
+	if bytes.Equal(fast, balanced) {
+		t.Fatalf("Fast and Balanced produced byte-identical WIMs; the finer knobs are not reaching the encoder")
 	}
-	t.Logf("LZX WIM sizes: default %d, Fast %d (+%.2f%%), Fastest %d (+%.2f%%)",
-		len(def), len(fast), 100*float64(len(fast)-len(def))/float64(len(def)),
-		len(fastest), 100*float64(len(fastest)-len(def))/float64(len(def)))
+	t.Logf("LZX WIM sizes: default %d, Balanced %d (+%.2f%%), Fast %d (+%.2f%%)",
+		len(def), len(balanced), 100*float64(len(balanced)-len(def))/float64(len(def)),
+		len(fast), 100*float64(len(fast)-len(def))/float64(len(def)))
 }
 
 // TestWriteOptionsLZXOptionsIgnoredForNonLZX pins the documented scope of
@@ -251,7 +251,7 @@ func TestWriteOptionsLZXOptionsIgnoredForNonLZX(t *testing.T) {
 				}
 				return out
 			}
-			if !bytes.Equal(assemble(lzx.Options{}), assemble(lzx.Fastest())) {
+			if !bytes.Equal(assemble(lzx.Options{}), assemble(lzx.Fast())) {
 				t.Fatalf("%s output changed with LZXOptions set; it must be ignored for non-LZX compression", tc.name)
 			}
 		})
