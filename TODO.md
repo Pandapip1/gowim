@@ -68,14 +68,37 @@ any compressed output at all.
       content verbatim (via `innerxml`) while renumbering indices, supports
       recompressing to a different codec than the source. Verified against
       real files plus `wimlib-imagex info`/`extract`/`verify`.
-- [ ] **Partially fixed (2026-08-18):** `lzx`'s encoder was measurably less
-      space-efficient than wimlib's, by design, not by bug. All three causes
-      below now have at least a partial fix (repeat-offset queue, precode
-      run-length compression, one-step lazy matching), narrowing the real
-      398-chunk/`ntoskrnl.exe` gap to wimlib's own encoder from the original
-      +7.7% to +4.1%. What remains -- a full optimal/DP parse and
-      ALIGNED-offset block support -- is a substantially bigger change; see
-      cause 4's closing note. Found while
+- [x] **Fixed (2026-08-19).** `lzx`'s encoder was measurably less
+      space-efficient than wimlib's, by design, not by bug. Every cause
+      below was eventually addressed, and the two items cause 2 originally
+      deferred as "substantially bigger changes" -- a real optimal/DP parse
+      and ALIGNED-offset block support -- were both subsequently
+      implemented (see `lzx/optimal.go`'s `findMatchesOptimal`, run as
+      `compressOptimal` alongside the lookahead parser in `encode.go`, and
+      the ALIGNED/split block trials in `encode.go`/`splitstats.go`),
+      together with iterative reparse refinement (`refineParseWith`),
+      length-2 (hash2) matches, and statistics-driven block splitting.
+
+      **Current status: the gap is closed and slightly reversed** --
+      gowim's near-optimal path now compresses ~0.06% *smaller* than
+      wimlib's own encoder (maintainer's most recent check, 2026-08-19).
+      The full historical progression is preserved below rather than
+      overwritten, since the intermediate measurements are what justify
+      each individual fix: original +7.7% -> +5.4% (cause 1) -> +5.3%
+      (cause 3) -> +4.1% (cause 4) -> parity-or-better (DP parse +
+      ALIGNED + refinement).
+
+      Two later corrections to this work are recorded further down rather
+      than here: a window-boundary crash in hash2 candidate discovery
+      (commit `5dadfff`), and an accidental O(arrivals) merge scan in the
+      DP beam that cost 18x wall time and 147.3 GB of allocation on a
+      4 MiB corpus before being bounded at insert time (commit `a63fd2c`).
+      The encoder's speed/size tradeoff is now caller-selectable via
+      `lzx.Options`/`CompressWith` and its preset ladder (commits
+      `000effe`, `495c40b`); the DP parser that closed this gap is what
+      the `Default` and `Max` rungs run, while `Fast` skips it entirely.
+
+      Originally found while
       investigating boot.wim size reduction for the out-of-tree nano11-go
       debloat harness (2026-08-17/18, see its own TODO.md): a real stock
       Windows 11 25H2 `boot.wim`, re-exported through `wim.ExportImage`/
@@ -205,12 +228,17 @@ any compressed output at all.
          (random/low-alphabet/patterned/mixed data, various sizes) with no
          failures, plus the existing full test suite.
 
-         What's left of cause 2 (not attempted): a real optimal/DP parse
+         What was left of cause 2 as of 2026-08-18: a real optimal/DP parse
          (wimlib's `lzx_compress_near_optimal`, `wimlib/src/
-         lzx_compress.c:301`) and ALIGNED-offset block support. Both are
-         substantially bigger changes than the lazy-matching step above;
-         the remaining ~4.1% gap is attributed to these, though not
-         further decomposed between them.
+         lzx_compress.c:301`) and ALIGNED-offset block support. Both were
+         substantially bigger changes than the lazy-matching step above,
+         and the then-remaining ~4.1% gap was attributed to these without
+         being further decomposed between them.
+
+         **Both have since been implemented** -- see this item's header for
+         the current status. That attribution turned out to be correct:
+         building the DP parse and ALIGNED support is what took the
+         remaining ~4.1% to parity-or-better against wimlib.
 
       A follow-on reverse-engineering pass (2026-08-18) tried to compare
       against Microsoft's own real encoder (in `wimgapi.dll`, not just
