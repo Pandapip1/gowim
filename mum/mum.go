@@ -115,6 +115,15 @@ type AssemblyIdentity struct {
 	Language              string `xml:"language,attr,omitempty"`
 	BuildType             string `xml:"buildType,attr,omitempty"`
 	PublicKeyToken        string `xml:"publicKeyToken,attr,omitempty"`
+	// Type is the assembly type attribute, e.g. "win32" or "win32-policy".
+	// Absent from every `.mum` sample this package's own testdata carries,
+	// but present on real WinSxS component manifests -- and load-bearing:
+	// the `COMPONENTS` hive's canonical `identity` string carries it as
+	// `Type=win32` (891 + 394 of the 28069 components in the measured real
+	// image), and a component's type is what decides whether it needs a
+	// `SOFTWARE\...\SideBySide\Winners` entry to be activatable at all. See
+	// the sibling `component` package's CanonicalIdentity.
+	Type string `xml:"type,attr,omitempty"`
 	// VersionScope holds values like "nonSxS", seen on <installerAssembly>
 	// and some nested <component> identities.
 	VersionScope string `xml:"versionScope,attr,omitempty"`
