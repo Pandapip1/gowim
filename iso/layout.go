@@ -458,10 +458,10 @@ func fileIdentifier(n *node) string {
 // a file that would need splitting at a lower level is rejected rather than
 // silently truncated.
 //
-// Note for the later UDF phase: nothing about this allocation is
-// ISO 9660-specific. UDF file entries in a bridge volume describe these
-// same extents, so the UDF layer will read node.sections rather than
-// allocating anything of its own.
+// Nothing about this allocation is ISO 9660-specific, which is the point:
+// UDF File Entries in a bridge volume describe these same extents, so the UDF
+// layer reads node.sections rather than allocating anything of its own (see
+// writeUDFFileEntries in udf.go).
 func fileDataSectors(l *layout) (uint32, error) {
 	base := l.currentFragmentStart()
 	next := base

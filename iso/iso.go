@@ -27,6 +27,7 @@
 //     1987) because it folds in the ISO 9660:1999 / "version 2" Enhanced
 //     Volume Descriptor (8.5, 8.4.30) that genisoimage's -iso-level 4 emits
 //     and that a later phase of this package will need.
+//
 //   - cdrkit 1.1.11 (Debian source package cdrkit_1.1.11.orig.tar.gz), the
 //     genisoimage program that currently produces this project's known-good
 //     bootable Windows 11 ISO. It is the highest-value cross-check
@@ -36,10 +37,16 @@
 //     image-wide fragment ordering built by the outputlist_insert calls
 //     near line 3517 onwards), genisoimage/write.c (the output_fragment
 //     mechanism), genisoimage/tree.c (name mangling, and the >4 GiB
-//     handling at line 1554), genisoimage/eltorito.c and genisoimage/udf.c
-//     (read for design purposes; not yet implemented here).
+//     handling at line 1554), genisoimage/udf.c and genisoimage/udf_fs.h
+//     (the UDF layer, the latter being a complete on-disk field map), and
+//     genisoimage/eltorito.c (read for design purposes; El Torito is not
+//     implemented here yet).
 //
-// # What is implemented (phase 1)
+//   - ECMA-167 3rd edition (June 1997) and the OSTA Universal Disk Format
+//     Specification revision 1.02, for the UDF layer. See udf.go's
+//     file-level comment, which cites them clause by clause.
+//
+// # What is implemented
 //
 //   - The Primary Volume Descriptor (ECMA-119 8.4) and the Volume
 //     Descriptor Set Terminator (8.3).
@@ -51,7 +58,12 @@
 //     mechanism, signalled by the File Flags bit 7 of 9.1.6), which is the
 //     standard-conformant way to record a file larger than the 32-bit Data
 //     Length field of 9.1.4 allows. This requires interchange Level 3
-//     (10.3); Levels 1 and 2 forbid it (10.1, 10.2).
+//     (10.3); Levels 1 and 2 forbid it (10.1, 10.2). Flagged as UNVERIFIED
+//     against real readers: no ISO on hand uses it.
+//   - The UDF bridge layer (Options.UDF), which is what Windows installation
+//     media actually relies on and what makes files of 4 GiB or more
+//     possible. It describes the same file extents the ECMA-119 layer
+//     assigned; nothing is written twice. See udf.go.
 //
 // # What is deliberately NOT implemented yet
 //
@@ -63,8 +75,6 @@
 //     Path Table Group.
 //   - The ISO 9660:1999 Enhanced Volume Descriptor that genisoimage's
 //     -iso-level 4 emits (8.5 with File Structure Version 2 per 8.4.30).
-//   - UDF (ECMA-167 / OSTA UDF 1.02), the layer that Windows setup
-//     actually relies on for files larger than 4 GiB.
 //   - El Torito, i.e. the Boot Record Volume Descriptor (8.2) at the head
 //     of the volume descriptor set plus a boot catalog.
 //
@@ -78,7 +88,7 @@
 // # Why the layout is a list of fragments
 //
 // The single most important design constraint on this package is that a
-// later UDF phase must be bolt-on rather than a rewrite. In a bridge
+// later UDF phase had to be bolt-on rather than a rewrite. In a bridge
 // volume the ISO 9660 directory records and the UDF file entries describe
 // the *same* file data extents, so file data cannot simply be appended
 // wherever the ISO 9660 layer feels like it; UDF metadata occupies fixed
@@ -92,7 +102,9 @@
 // inserted into that list ahead of the path tables, directory tree and file
 // data (genisoimage/genisoimage.c, the outputlist_insert sequence). This
 // package deliberately copies that shape — see layout.go — because it is
-// the structure that makes the later phases additive. Adding UDF, Joliet or
-// El Torito should mean inserting fragments at the right position in the
-// list, not changing how extents are assigned.
+// the structure that makes the later phases additive. That prediction held:
+// adding UDF meant inserting fragments at the right position in the list
+// (layout.go's addUDFHead and addUDFTail) and changed nothing about how
+// extents are assigned. Joliet and El Torito should be the same shape of
+// change.
 package iso

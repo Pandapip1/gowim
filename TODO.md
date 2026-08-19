@@ -3236,12 +3236,85 @@ next step depends on them, same discipline as the research above.
       Volume Descriptor. Neither is needed for depth reasons (see the
       measurement above); the Enhanced VD matters only if we want to match
       `-iso-level 4` output field for field.
-- [ ] Implement the UDF bridge layer (ECMA-167 + OSTA UDF 1.02), reusing
-      the extents the ECMA-119 layer already assigned. This is the phase
-      that actually matters for large-file Windows media. Reserve sectors
-      32–65 and 256–258 plus the per-file File Entry block ahead of the
-      path tables, and decide the trailing-pad length before writing the
-      anchor at sector N.
+- [x] Implement the UDF bridge layer (ECMA-167 + OSTA UDF 1.02), reusing
+      the extents the ECMA-119 layer already assigned. Done (2026-08-19),
+      in `iso/udf.go` plus `buildLayout`'s `addUDFHead`/`addUDFTail`.
+
+      Written: Anchor Volume Descriptor Pointer (ECMA-167 3/10.2) at
+      sector 256 and at the last recorded sector, Primary Volume
+      Descriptor (3/10.1), Implementation Use VD (3/10.4 carrying UDF
+      1.02 2.2.7's "UDF LV Info"), Partition Descriptor (3/10.5),
+      Logical Volume Descriptor (3/10.6 with the type 1 partition map of
+      3/10.7.2), Unallocated Space Descriptor (3/10.8), Terminating
+      Descriptor (3/10.9), Logical Volume Integrity Descriptor (3/10.10),
+      File Set Descriptor (4/14.1), File Identifier Descriptors (4/14.4)
+      and File Entries (4/14.9) with `short_ad`s (4/14.14.1). Both Volume
+      Descriptor Sequences are generated separately rather than copied,
+      because 3/7.2.8 makes every descriptor carry its own location.
+
+      **Phase 1's prediction about the layout held.** The "known blocker"
+      — path tables at LBA 18 where UDF needs 0–255 free — really was a
+      fragment insertion away from correct: `addUDFHead` goes between the
+      Volume Descriptor Set Terminator and the path tables, and nothing
+      about how file extents are assigned changed. `addPadTo` errors out
+      rather than silently overlapping if the descriptor set ever grows
+      past 256.
+
+      **Extent sharing verified two ways.** `TestUDFSharesISOExtents`
+      parses the same image with two independent readers — a UDF one
+      written from the ECMA-167 field tables and a small ECMA-119
+      directory walker — and joins the two views on extent and length.
+      And against genisoimage on the same 29-file `/boot` subtree, both
+      producers place the path tables at LBA 296, i.e. the UDF metadata
+      regions come out the same size.
+
+      **Large files.** `Options.LargeFilesUDFOnly` reproduces what
+      oscdimg does: a file needing more than one ECMA-119 File Section is
+      written and described in UDF but gets no Directory Record at all.
+      This is deliberately *not* built on the Level 3 multi-extent
+      support, which stays UNVERIFIED. Exercised for real on a
+      5 000 000 000-byte file: `7z` reads it back through UDF and the
+      Linux kernel's UDF driver reads it from a loop mount, both with a
+      SHA-256 matching the source, while `isoinfo -f` lists only
+      `/README.TXT;1` — the same shape as Microsoft's media.
+
+      **External validation** (self-consistency proves nothing):
+      **udfinfo** (udftools 2.3) reports `udfrev=1.02`,
+      `integrity=closed`, `accesstype=readonly` and the expected sector
+      map; **7z** identifies the image as `Type = Udf` and extracts a
+      tree that diffs clean; the **Linux kernel** mounts it (`findmnt`
+      reports FSTYPE `udf`) and the mounted tree diffs clean. udftools is
+      not installed on this machine and there is no root to install it,
+      so the udfinfo test skips loudly unless `GOWIM_UDFINFO` points at a
+      copy extracted from the `.deb`.
+
+      udfinfo also **found a real bug**: genisoimage's Partition Length
+      is `end_anchor + 1 - partition_start`, which puts the closing
+      anchor inside the declared partition. That goes unnoticed on
+      genisoimage's own output only because 150 further anchors follow
+      and udfinfo checks the last sector; with `PadSectors=0` it fires as
+      "Partition Space overlaps with other blocks". Ours now stops one
+      block earlier, which is what genisoimage's own unpadded path
+      computes.
+
+      Structural comparison with `genisoimage -udf` on the same tree —
+      every field byte-identical except:
+
+      | Field | genisoimage | gowim | Verdict |
+      | --- | --- | --- | --- |
+      | Implementation Identifier | `*genisoimage` | `*gowim` | correct, ours |
+      | Volume Set Identifier | time + `clock()` | hash of volume ID + timestamp, then the volume ID | legal; ours is reproducible |
+      | Empty dstring | compression byte + length 1 | all zeros | **ours is right**, UDF 1.02 2.1.3 |
+      | Domain Flags | Hard+Soft Write Protect set | clear (as Microsoft) | legal; advisory only |
+      | Timestamps | build time, local zone | caller's `Options.Timestamp` | ours is reproducible |
+      | Partition Length | 9344 | 9341 | see the anchor-overlap bug above (1) plus path table rounding (2) |
+      | Total sectors | 9751 | 9749 | genisoimage rounds each path table to an even block count |
+
+      Not implemented, and not needed for Windows media: named streams,
+      Extended Attributes, symbolic links, Allocation Extent Descriptors
+      (so one file is capped at 234 GB, and a larger one is rejected
+      rather than mis-recorded), the Virtual Allocation Table, and any
+      UDF revision other than 1.02.
 - [ ] Implement El Torito boot catalog support with two boot entries (BIOS
       boot sector + no-emulation UEFI boot image), matching `oscdimg`'s
       `-bootdata:2#p0,e,b<bios-boot>#pEF,e,b<efisys.bin>`. The boot-sector
