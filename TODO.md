@@ -2747,8 +2747,9 @@ next step depends on them, same discipline as the research above.
            `yesNoBool` type (`mum.go`) accepting both spellings on
            unmarshal, always emitting `"true"`/`"false"` on marshal.
         2. 193 of the 17189 real `.manifest` files (older, pre-CBS runtime
-           component manifests, e.g. the VC++ 8.0/9.0 CRT's) turned out to
-           be plain, uncompressed XML with no PA30 layer at all — not a
+           component manifests, e.g. the VC++ 8.0/9.0 CRT's — **that
+           characterization was wrong; see the correction below**) turned out
+           to be plain, uncompressed XML with no PA30 layer at all — not a
            decode failure, a genuinely different real file shape. Worse,
            these use the older, Microsoft-documented `asm.v1` namespace
            (not `asm.v3`), which `mum.Manifest`'s hardcoded-namespace
@@ -2764,6 +2765,27 @@ next step depends on them, same discipline as the research above.
         real-world entry point: `pa30` decode when needed, then
         `mum.Parse`) succeeds on **all 17189 files, 100%**, confirmed by
         rerunning the same full-corpus measurement end-to-end.
+      - **Correction to sub-item 2 (2026-08-19), lesson learned.** "193 ...
+        older, pre-CBS ... e.g. the VC++ 8.0/9.0 CRT's" was inferred from
+        eyeballing a sample of the plain-manifest filenames, not from
+        classifying all of them. The 2026-08-19 whole-corpus pass (see
+        "Component-installation research pass" below) classified every one,
+        against a newer image (Windows 11 build 10.0.26200, 28,069 manifests
+        rather than 17,189): **401 plain manifests, and most are *current*-
+        build 26100.1591 components** — Common-Controls 5.82/6.0 plus their
+        84-language resource assemblies, GdiPlus 1.0/1.1, IsolationAutomation,
+        Windows.SystemCompatible — with the VC80/VC90 CRT and their
+        publisher-policy assemblies only a minority of the set. The real
+        common factor is not age but `Type=win32`/`win32-policy`, i.e. the
+        assemblies resolved by the ntdll/sxs activation-context loader, which
+        cannot decompress anything. The two counts are not directly comparable
+        (different images), but the *characterization* was wrong either way,
+        and it was wrong in the direction that mattered: it made the plain
+        manifests look like a legacy leftover rather than a live, structurally
+        required class. Lesson: classify the whole set before describing what
+        a set is, especially when the description is about to be load-bearing
+        for a scoping decision — it was, for the encoder item immediately
+        below.
 - [x] Research whether a PA30 *encoder* is actually needed at all: if
       component removal only ever deletes `.manifest` files wholesale rather
       than rewriting modified ones, no encoder is required and this can be
@@ -2793,6 +2815,27 @@ next step depends on them, same discipline as the research above.
       be accepted the same way. Deferred until the component-installation
       goal is actually picked up — see that item's own note on what
       would need re-checking first.
+      **Now closed, "no" (2026-08-19).** The re-check happened (see
+      "Component-installation research pass" below): the acceptance question
+      is answered directly out of the servicing stack's own code rather than
+      by extrapolating from the pre-existing plain manifests.
+      `Windows::WCP::Rtl::GetCompressedFileType` (`wcp.dll` 10.0.26100.8035,
+      `0x18004ba50`) classifies a manifest purely by its own first four bytes,
+      and `Windows::WCP::Implementation::Rtl::DecompressManifest`
+      (`0x18004b850`) treats "type != 4" as a *success* path that returns the
+      buffer untouched — so provenance is irrelevant, a plain manifest is
+      plain whoever wrote it. Nothing out of band records the compressed form
+      either: the hive's `S256H` and the package catalog both cover the
+      decompressed XML (401/401 and 1297/1297 checks respectively). **No PA30
+      encoder is required for removal or for installation**, and none should
+      be written unless some future feature genuinely needs to produce a
+      compressed manifest. Also corrected here: the "193 ... legacy VC++ CRT"
+      basis this item leaned on was a mischaracterization — see the correction
+      note on the `pa30` corpus item above (the real figure in the newer image
+      is 401, mostly current-build Common-Controls/GdiPlus/IsolationAutomation)
+      — but the corrected facts point the same way, in fact more strongly:
+      that class of manifest *must* be plain because the loader that reads it
+      has no msdelta code at all.
 - [x] Implement a manifest parser/serializer for plain-XML `.mum` files
       (`Windows\servicing\Packages\*.mum`): the documented base SxS
       `<assembly>`/`assemblyIdentity` schema, plus the empirically-inferred
@@ -2865,6 +2908,17 @@ next step depends on them, same discipline as the research above.
       remove via the existing `Store.ByName` and calls `Remove` once per
       matched `Entry` — no separate bulk-removal function was added, since
       that composition is already trivial with what `Store` exposes.
+      **Sharpened, not changed, by the 2026-08-19 research pass below:** the
+      hive inconsistency `Remove` leaves behind (keys with no files) is now
+      known to be the mirror of a condition CBS's own scanner reports by name
+      in the other direction (files with no keys — `CSI Missing Winning
+      Component Key`, see Q3 below). No cited source shows the key-without-file
+      direction being reported, so this is inference from the scanner
+      comparing the same two sets; but the honest reading is that the
+      documented limitation is "leaves a detectable inconsistency", slightly
+      stronger than the "untouched/inconsistent, invisible to servicing"
+      wording used when this was implemented. The scope decision itself stands
+      — there is still no safe offline way to mutate the hive.
 - [x] Explicitly scope out a `/StartComponentCleanup /ResetBase`-equivalent
       permanent supersedence cleanup entirely — per the research above, its
       mechanism is undocumented `COMPONENTS`-hive-internal accounting
@@ -2886,27 +2940,644 @@ next step depends on them, same discipline as the research above.
       removal functions (`RemoveProvisioned`, and the new component removal
       below) delete files directly instead, which is exactly the
       "best-effort fallback" scope the research verdict recommended.
+### Component-installation research pass (2026-08-19)
+
+The two questions the "component installation" item below was blocked on
+("research first ... not an assumption either way") were taken up together, by
+two independent passes: a **code-level** one (disassembly of a real image's own
+servicing stack, plus whole-corpus measurement against that image) and a
+**documentation** one (official Microsoft documentation plus third-party
+reverse-engineering write-ups), which finished second and is merged into the
+write-up below rather than kept as a separate section. Every statement sourced
+from the documentation pass carries its evidence grade: **(i)** official
+Microsoft documentation, **(ii)** third-party RE/forum write-up (weaker),
+**(iii)** searched for and *not* found. That grading is kept deliberately —
+several load-bearing statements below rest only on **(ii)**, and one useful
+conclusion rests on a **(iii)**; flattening them all into equal-weight
+assertions would misrepresent how well each is actually known.
+
+Outcome: Q1 (are newly added *uncompressed* manifests accepted?) is **answered
+yes**, with code-level, corpus-level and independent documentation-side
+evidence. Q2 (what minimal `COMPONENTS`-hive bookkeeping is required?) is
+**answered**, and **the two passes disagreed on one conclusion, with the
+documentation pass winning**: the code-level pass concluded that a component
+with zero hive footprint is merely *invisible* to servicing and filed "does
+servicing actively object to an orphan?" as not answerable offline; the
+documentation pass answered it — servicing detects that exact condition and has
+a name for it — so hive registration is **not optional if the image will ever be
+serviced or updated again**. See Q3 below, and note the knock-on correction to
+the minimal-implementation plan.
+
+**Data sources for everything below**, so a human can re-run it:
+
+- `/mnt/extra/nano11go-work/fresh/install.wim`, image 1 ("Windows 11 Home",
+  build 10.0.26200, SP build 8037, en-US, amd64), mounted read-only with
+  `wimmount` (wimlib-imagex). Nothing in the image was modified.
+- `Windows\System32\config\COMPONENTS` (53,215,232 bytes) and
+  `Windows\System32\config\SOFTWARE` from that same image, read with
+  `hivexregedit --export` (hivex). Cross-checking with this repo's own `regf`
+  was not repeated — the 2026-07-10/13 passes already established both agree
+  after the `regf/nk.go` fix.
+- The image's amd64 servicing-stack `wcp.dll` 10.0.26100.8035
+  (`Windows\WinSxS\amd64_microsoft-windows-servicingstack_31bf3856ad364e35_10.0.26100.8035_none_a54f1c79772e807e\wcp.dll`,
+  4,511,128 bytes), plus `System32\ntdll.dll`, `System32\sxs.dll`,
+  `System32\sxsstore.dll`. Disassembled with radare2 (`r2 -A`). All VAs below
+  are as loaded at `wcp.dll`'s preferred base `0x180000000`.
+- Documentation pass: Microsoft Learn pages cited inline by URL; the
+  third-party sources are pivotman319's CBS paper, kiwids' CU
+  component-to-binary mapping write-up, Google Project Zero's registry series,
+  two Sysnative CheckSUR threads, and two RE tools cloned to
+  `/tmp/claude/repos/` (`wcpex`, `SXSEXP`) — all cited inline with URLs.
+  Provenance caveat worth knowing before re-running: `sysnative.com` and
+  `xdaforums.com` both answer direct fetches with HTTP 403 (the Sysnative
+  threads were read through the `r.jina.ai` reader proxy and grepped for
+  verbatim text), `web.archive.org` was unreachable from this environment, and
+  the canonical full `CBS_E_*` table (KB 938205) is normally mirrored at
+  betaarchive.com, which is CAPTCHA-gated.
+
+#### Q1 — a newly added uncompressed `.manifest` **is** accepted. No PA30 encoder is needed for installation.
+
+Four independent lines of evidence, three of them measurements or code
+reading rather than inference:
+
+1. **The servicing stack decides compression by sniffing the file's own
+   first four bytes, and treats "not compressed" as a normal, successful
+   case — not an error.** `wcp.dll` exports (internally) three relevant
+   functions, all recoverable by name from the binary's own C++-mangled
+   trace/assert strings:
+   - `unsigned long __cdecl Windows::WCP::Rtl::GetCompressedFileType(struct _LBLOB const*)`
+     at `0x18004ba50` (101 bytes). Disassembled in full: it returns 0 if the
+     blob is shorter than 4 bytes; otherwise it requires `byte[0]=='D'`
+     (0x44), `byte[1]=='C'` (0x43) and `byte[3]==1`, and then switches on
+     `byte[2]`: `'H'`→3, `'M'`→4, `'N'`→2, `'S'`→5, `'X'`→6, `'D'`→a further
+     case; **anything else returns 0**. Plain XML therefore classifies as
+     type 0, "not compressed". This is the `DCM\x01` header this project's
+     `pa30` module already sniffs — `'M'`, i.e. `DCM\x01`, is type 4.
+   - `long __cdecl Windows::WCP::Implementation::Rtl::DecompressManifest(unsigned long, class Windows::Auto<struct _LBLOB>*, unsigned long*)`
+     at `0x18004b850`. It calls `GetCompressedFileType` at `0x18004b8a4` and
+     compares the result to 4. If it is 4 it initializes the delta
+     compressor and calls `Windows::Rtl::DeltaDecompressBuffer`. **If it is
+     anything else, control goes to `0x18004b95c`, which does exactly
+     `or dword [rbx], 1` (set bit 0 of the caller's out-flag) and
+     `xor eax, eax` — return success — leaving the buffer untouched.** The
+     function's own error-origination path names its source file,
+     `onecore\base\wcp\manifestcompression\manifest_compression.cpp`. A
+     sampled caller (`0x1801ac419`, inside `fcn.1801ac13c`) tests only for a
+     negative status (`js`) and then folds the out-flag into a boolean — it
+     does not treat "was not compressed" as a failure.
+   - `long __cdecl Windows::WCP::Implementation::Rtl::IsManifestCompressed(struct _LBLOB const*, bool*)`
+     at `0x18004b7ad`, a predicate that answers the question from buffer
+     contents alone. Its existence is itself the point: compression is a
+     per-file, content-detected property in this design, not a recorded
+     attribute of a component.
+
+   Corroboration from the documentation pass, both **(ii)**: smx-smx's
+   [`wcpex`](https://github.com/smx-smx/wcpex) calls the real export
+   `?GetCompressedFileType@Rtl@WCP@Windows@@YAKPEBU_LBLOB@@@Z` and branches on
+   `type != 4` — an independent witness both that the symbol is real with that
+   exact signature and that classification takes a *buffer* and returns a type
+   enum, i.e. is a content sniff rather than an out-of-band lookup (it does not
+   say what a non-DCM buffer returns; the disassembly above does).
+   hfiref0x's [`SXSEXP`](https://github.com/hfiref0x/SXSEXP)
+   (README "Type descriptions" plus `Source/sxsexp/sup.c::supGetFileType()`)
+   gives the same magic table from the other side: `DCN\x01` (PA30), `DCM\x01`
+   (PA30, source/basis manifest required, from `wcp`), `DCS\x01` (LZMS,
+   multi-block), `DCD\x01` (PA30 delta), `DCH\x01` (not packed, header only),
+   `DCX\x01` (Win10-only, unknown) — matching this pass's switch table
+   position-for-position. **`DCM`/`DCN` are PA30/MSDelta; `DCS` is LZMS — do
+   not conflate the two** (see the trap list below; one published paper does).
+   Incidentally useful for gowim: `SXSEXP` embeds the 9,066-byte basis manifest
+   verbatim as `WCP_SrcManifest[]` in `Source/sxsexp/wcp.h` instead of loading
+   `wcp.dll`, which is the more portable route for a non-Windows implementation
+   than extracting the resource — and kiwids independently confirms where that
+   resource lives, "stored in `wcp.dll` ... as resource type 614, name #1"
+   (614 decimal = 0x266), **(ii)**
+   https://kiwids.me/posts/Windows-CU-Component-Binary-Mapping/.
+2. **Nothing out-of-band records whether a given manifest is compressed.**
+   The `COMPONENTS` hive's `S256H` was established on 2026-07-13 to be
+   SHA-256 of the *decompressed* manifest XML. This pass confirms the
+   symmetric half: for **401 of 401** plain-XML manifests in this image,
+   `DerivedData\Components\<keyform>`'s `S256H` equals SHA-256 of the raw
+   on-disk file bytes exactly (which, for an uncompressed file, is the same
+   thing as the decompressed content). So the hive stores one value with one
+   meaning — "hash of the logical manifest content" — and is *unchanged* by
+   whether the file on disk is compressed. There is no compression flag to
+   get wrong. The documentation pass reaches the same place through a
+   meaningful negative: **(iii)** no source, Microsoft or third-party,
+   describes *any* registry value or per-file attribute that records a
+   manifest's compression state. An absence found after an extensive search
+   is weak on its own, but it lines up with a measurement and a code path that
+   both say the on-disk form is self-describing.
+3. **The package catalog also signs the decompressed content, not the
+   on-disk bytes.** Taking `Windows\servicing\Packages\Package_4_for_KB5066128~31bf3856ad364e35~amd64~~10.0.9321.3.cat`
+   (592,295 bytes) and searching it for every component's `S256H`: **1297**
+   components' decompressed-content hashes appear verbatim in that one
+   catalog, and for those same 1297 components **0** of their on-disk
+   (PA30-compressed) file hashes appear anywhere in it. Catalog verification
+   is therefore performed against the logical manifest, so converting a
+   manifest between compressed and plain does not invalidate its catalog
+   coverage.
+4. **The real corpus's compressed/uncompressed split is explained by a
+   hard architectural constraint, and the explanation generalizes.**
+   Correcting the earlier "193 legacy VC++ CRT manifests" characterization
+   (see the dated correction notes on the `pa30` corpus item and the
+   PA30-encoder item above): in this image
+   there are **401** plain manifests out of 28,069, and they are *not* all
+   legacy — most are current-build 26100.1591 components (Common-Controls
+   5.82/6.0 and their 84-language resource assemblies, GdiPlus 1.0/1.1,
+   IsolationAutomation, Windows.SystemCompatible), plus the VC80/VC90 CRT and
+   their publisher-policy assemblies. Cross-tabulating the 401 against the
+   `identity` value of all 28,069 `DerivedData\Components` entries:
+   - 394 of the 401 are exactly the components whose identity carries
+     `Type=win32` (390) or `Type=win32-policy` (4). **Every single
+     `Type=win32`/`win32-policy` component in the image is stored
+     uncompressed; not one is PA30-compressed.** The other 7 are the `msil`
+     PowerShell/WSMan `.Resources` assemblies.
+   - No plain manifest belongs to a `versionScope=NonSxS` component
+     (0 of 401), while 25,796 of the 27,668 compressed ones do.
+
+   The reason is structural, and confirmed in the binaries: **`ntdll.dll`
+   and `sxs.dll` — the activation-context path that resolves `Type=win32`
+   SxS assemblies for every process — contain no reference to `msdelta`,
+   `UpdateCompression`, `ApplyDeltaB` or `GetDeltaInfo` at all**, whereas
+   `wcp.dll` does (`ApplyDeltaB`, `ApplyDeltaGetReverseB`, `GetDeltaInfoExB`,
+   `DeltaFree`, and its own `Windows::Rtl::DeltaDecompressBuffer`). The
+   loader physically cannot read a compressed manifest, so Microsoft's own
+   build/servicing pipeline must leave that class of manifest plain. The
+   corpus split is thus a *requirement running the other way* — some
+   manifests must be plain — and is not evidence that CBS-side manifests
+   must be compressed.
+
+   **The documentation pass reaches the identical conclusion from the
+   opposite direction — the servicing side — and names the same component
+   family.** **(ii)** pivotman319, *"Windows Component-Based Servicing (CBS):
+   An In-Depth Overview"*, Final Revision R2, 6 June 2024,
+   https://pivotman319-owo.github.io/papers/windows%20cbs%20image%20assembly%20process%20-%20Final%20R2.pdf,
+   section **"Pre-Staging"** (p. 9), verbatim: component manifests are placed
+   into `Windows\WinSxS\Manifests` and compressed as a PA30 null-delta
+   "(*wherever applicable; the servicing stack specifically excludes certain
+   manifests from being compressed such as those pertaining to Windows Common
+   Controls to prevent a CRITICAL_PROCESS_DIED bugcheck from occurring*)".
+   So compression is a per-manifest decision taken by the servicing stack at
+   pre-staging time, against an explicit exclusion list, and the stated
+   consequence of getting it wrong is a bugcheck — which is exactly what
+   "a loader that cannot decompress must never be handed a compressed
+   manifest" looks like from the writer's side. Three caveats to keep honest:
+   - The step "*therefore* the ntdll/sxs activation-context loader cannot
+     decompress DCM" is **this project's inference, not the paper's claim** —
+     the paper states the exclusion and the bugcheck, not the mechanism. The
+     primary evidence for the mechanism remains the zero msdelta references in
+     `ntdll.dll`/`sxs.dll` measured above.
+   - The same sentence parenthetically calls DCM "a variation of the LZMS
+     compression algorithm", which is **wrong**: PA30 is MSDelta, and `DCS\x01`
+     is the LZMS one (see the `SXSEXP` table in point 1). Quote this paper for
+     the exclusion finding; do not rely on it for format details.
+   - It is the sole source found for the Common-Controls exclusion; no
+     corroboration elsewhere.
+
+   **(ii)** kiwids (URL above) independently reports **23,759 of 23,830**
+   manifests in one cumulative update as DCM-compressed — a ~0.3% uncompressed
+   minority in a completely different corpus, the same order as this image's
+   401/28,069 (1.4%), i.e. a standing exclusion list rather than an anomaly of
+   one build.
+
+**Verdict (Q1):** an uncompressed, plain-XML `.manifest` newly written into
+`WinSxS\Manifests` is read correctly by the servicing stack, which detects
+its format from its own bytes and passes it through. **A PA30 *encoder* is
+therefore not a prerequisite for component installation** and the "PA30
+encoder needed at all?" item above is finally closed: no — neither for
+removal nor for installation.
+
+Honest scope limits on that verdict: it is proven for (a) `wcp.dll`'s
+manifest reader — the code every CBS/CSI manifest read goes through — and
+(b) the ntdll/sxs activation path, which never sees compressed manifests
+anyway. It is *not* proven that no other consumer anywhere in Windows
+insists on compression, and it is not proven by a live end-to-end install
+(see the proposed experiment below). `wcp.dll` does also contain
+`Windows::WCP::Implementation::Rtl::CompressManifest` — the only code in the
+binary that references the `DCM\x01` literal at `0x1803f1534` — alongside
+whole-store compression passes ("Beginning Null-Delta compression of
+components with mutable files", "Delta compression complete. Total number of
+components compressed: ..."), so a plain manifest sitting in the store is a
+state Windows' own servicing stack is built to encounter and, at least for
+component payload files, to normalize later. Whether it would ever
+re-compress a specific hand-placed manifest was not established. Note also
+that the *reverse* mistake is a real failure mode with a documented error:
+`ERROR_SXS_MANIFEST_FORMAT_ERROR` (14004), "The manifest file does not begin
+with the required tag and format information" — i.e. what a plain-XML-expecting
+parser raises when handed a `DCM\x01` blob. Plain is the safe direction.
+
+#### Q2 — the `COMPONENTS` hive is servicing-only; nothing at *runtime* reads it
+
+Measured invariants in the real image (all exact, zero exceptions):
+
+- **28,069 `WinSxS\Manifests\*.manifest` files ↔ 28,069
+  `COMPONENTS\DerivedData\Components\<key>` subkeys, with byte-identical
+  names** (manifest filename minus `.manifest` == hive key name). Compared
+  as sorted sets: zero entries on either side without a counterpart. CBS
+  maintains this as a strict 1:1 invariant.
+- **3,517 `Windows\servicing\Packages\*.mum` files ↔ 3,517
+  `SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based
+  Servicing\Packages\<name>` subkeys.** A package key carries
+  `InstallName` (the `.mum` filename), `InstallLocation`, `InstallClient`,
+  `CurrentState`, `Visibility`, `SelfUpdate`, and an `Owners` subkey naming
+  the parent package(s).
+- **2,274 `WinSxS\Catalogs\<hex>.cat` files ↔ 2,274
+  `COMPONENTS\CanonicalData\Catalogs\<hex>` subkeys, identical name sets**,
+  and the name **is** the SHA-256 of the catalog file's own bytes (verified
+  by hashing; separately, 2,199 of the 2,274 also match a
+  `servicing\Packages\*.cat` byte-for-byte). `CanonicalData\Deployments\*`'s
+  `CatalogThumbprint` value (UTF-16 hex text) is that same digest — so the
+  catalog reference chain is fully resolved now, no longer a guess.
+
+But 1:1 in a shipped image says what CBS *maintains*, not what is
+*required*. The requirement question splits in two — who reads the hive at
+process load (answered here), and whether anything *checks* the invariant
+later (answered in Q3, and the answer changed the plan).
+
+- **No runtime component reads `COMPONENTS`.** Searched for
+  `\Registry\Machine\COMPONENTS`-shaped strings in `ntoskrnl.exe`,
+  `smss.exe`, `csrss.exe`, `winsrv.dll`, `kernel32.dll`, `drvstore.dll`,
+  `ntdll.dll`, `sxs.dll`, `sxsstore.dll`: **zero hits in all of them**. The
+  only binary inspected that references it is `wcp.dll`, which references
+  `\Registry\Machine\COMPONENTS`, `\Registry\Machine\COMPONENTS\CanonicalData\Deployments`,
+  `\Registry\Machine\COMPONENTS\DerivedData`, and — directly relevant to
+  offline work — `\Registry\Machine\$OFFLINE_RW$COMPONENTS`, the name under
+  which offline servicing mounts an image's hive. This corroborates the
+  leaked-symbol trail from the 2026-07-10 pass
+  (`ComponentStore::CRawStoreLayout::OpenCanonicalDataKey`, still present in
+  this build's strings).
+- **The runtime SxS index lives in `SOFTWARE`, not `COMPONENTS`.**
+  `ntdll.dll` references
+  `\Registry\Machine\Software\Microsoft\Windows\CurrentVersion\SideBySide\AssemblyStorageRoots`
+  and `\WinSxS\`; `sxs.dll` references
+  `Software\Microsoft\Windows\CurrentVersion\SideBySide\Winners` and
+  `PatchedComponents`. That `Winners` tree (16,216 keys in this image, each
+  an identity-minus-version with per-version-family subkeys naming the
+  winning full version) is what activation resolution consults — and it is
+  *derived*: `wcp.dll` contains `WriteWinnersFromChangelist`, i.e. CBS
+  writes it out of the component store.
+
+Three documentation-side findings support the same split, and one explains
+why the split is undocumented:
+
+- **(i)** [*Assembly Searching Sequence*](https://learn.microsoft.com/en-us/windows/win32/sbscs/assembly-searching-sequence)
+  — every documented step of the loader's probe sequence is a **file path**.
+  No registry key of any kind is named anywhere in it.
+- **(i)** [*Fix Windows Update corruptions and installation failures*](https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/fix-windows-update-errors),
+  section "How does DISM Repair work?", lists what *servicing* consults:
+  `%SYSTEMROOT%\Servicing\Packages`, `%SYSTEMROOT%\WinSxS\Manifests`, and
+  registry under `HKEY_LOCAL_MACHINE\Components`, `HKEY_LOCAL_MACHINE\Schema`
+  and `HKLM\Software\Microsoft\Windows\CurrentVersion\Component Based
+  Servicing`. `HKLM\...\SideBySide` appears nowhere in it. **The two consumers
+  use disjoint registry scopes** — the documentation-side statement of exactly
+  the split the binary string search found.
+- **(ii)** Google Project Zero, [*The Windows Registry Adventure #4: Hives and
+  the registry layout*](https://projectzero.google/2024/10/the-windows-registry-adventure-4-hives.html),
+  on COMPONENTS: "It isn't always active, but instead, it is loaded and
+  unloaded on demand whenever a component installation or update takes place."
+  A hive that is not mounted during normal operation cannot be consulted on
+  every process creation.
+- **(iii)** — and this absence *is* the finding: Microsoft was asked directly
+  to document the `SideBySide` subkeys (`Winners`, `AssemblyStorageRoots`,
+  `PatchedComponents`, `ComponentVersions`) in Microsoft Q&A #296832 and
+  **declined**. So the runtime index this project may have to write is
+  deliberately undocumented, not merely overlooked — nobody should expect to
+  find a schema for it, and gowim's reverse-engineered understanding of it is
+  the only kind available. Independently, **(ii)** Process Monitor output in
+  Microsoft Q&A #2508258 shows `winlogon.exe RegOpenKey
+  HKLM\Software\Microsoft\Windows\CurrentVersion\SideBySide\AssemblyStorageRoots
+  NAME NOT FOUND` — confirming the loader really does probe that key at process
+  start, and that it is normally absent on a default install.
+
+Honest caveat, worth stating because it is the one link in this chain that is
+inference rather than citation: **no source states in so many words "the
+`COMPONENTS` hive is not consulted at process load"**. That conclusion rests on
+(a) demand-mounting, (b) a file-only documented probe sequence, (c) disjoint
+documented registry scopes, and (d) the primary measurement that nine runtime
+binaries contain zero references to it. Four independent supports, no direct
+statement.
+
+**Verdict (Q2):** a component installed with **zero `COMPONENTS`-hive
+footprint still works at runtime** — its payload files are ordinary files and
+behave as such once they are placed where the manifest says they go, and for a
+`Type=win32` assembly the one index that *is* load-bearing is
+`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\SideBySide\Winners`, which
+lives in the `SOFTWARE` hive this project's `regf`/`registry` modules already
+write, not in the undocumented `COMPONENTS` hive. What it is *not* is free:
+see Q3.
+
+#### Q3 — servicing **does** detect the orphan. This changed a conclusion.
+
+The code-level pass left this open as its one explicit residual gap: whether
+the servicing stack merely *ignores* an unknown extra manifest or actively
+*objects* to it, filed as "nothing in the offline data can answer that; it
+needs a live system". The documentation pass answered it without needing one:
+**this exact condition — manifest and payload present in `WinSxS`, no
+`COMPONENTS` entry — has a name in Microsoft's own scanner output.**
+
+**(ii)** Sysnative, [*[SOLVED] CSI Missing Winning Component Key*](https://www.sysnative.com/forums/threads/csi-missing-winning-component-key.14167/):
+CheckSUR / `DISM /ScanHealth` emits, verbatim,
+
+> `(f) CSI Missing Winning Component Key 0x00000000 amd64_wudfusbcciddriver.inf_31bf3856ad364e35_6.1.7601.18381_none_c050ea32188fe348`
+
+— where the identity string is exactly the WinSxS manifest/folder name, i.e.
+the keyform gowim would be writing. The reported fix was importing the missing
+`COMPONENTS\DerivedData\Components\<identity>` and
+`CanonicalData\Deployments\<identity>` keys. (The log text is Microsoft tool
+output; only the forum hosting it is third-party — which is why this is graded
+(ii) and not (i).)
+
+**(ii)** Sysnative, [*How to solve Components Scanner reporting thousands of
+missing registry keys*](https://www.sysnative.com/forums/threads/how-to-solve-components-scanner-reporting-thousands-of-missing-registry-keys.38270/)
+reports the orphan form directly — `WinSxS\Catalogs\*.cat` present but no
+`CanonicalData\Catalogs` key, and the `DerivedData` equivalents — and, the
+part that matters for scoping: in that thread **updates kept failing until the
+missing `DerivedData\Components` keys were restored.**
+
+**(i)** The nearest official acknowledgement of the class is
+[*Troubleshoot Windows Installation Error 0x800f0831*](https://learn.microsoft.com/en-us/troubleshoot/windows-client/deployment/windows-update-error-0x800f0831),
+section Cause: "This error typically occurs if a required package is missing
+from the store **or isn't fully applied to the registry**."
+
+What is *not* established, and should not be assumed:
+
+- **Nothing documented deletes such an orphan.** **(i)**
+  [*Clean up the WinSxS folder*](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/clean-up-the-winsxs-folder)
+  scopes `/StartComponentCleanup` and `/ResetBase` to *superseded* components;
+  an unknown extra component is not superseded by anything. SFC's registry
+  scope is **(iii)** undocumented. So the expected symptom is a scanner
+  *finding* and possibly a failed later update — not silent deletion of the
+  installed files.
+- The cited evidence is for the *file-without-key* direction. The mirror
+  direction — key-without-file, which is what this project's existing
+  `component.Remove` produces — was not directly evidenced. Since the same
+  scanner compares the same two sets, assume it is detectable too; that is
+  inference, flagged as such, and it sharpens rather than changes
+  `Remove`'s already-documented limitation.
+
+**Verdict (Q3):** "zero hive footprint" is **not** the free, symmetric-with-
+removal tradeoff the code-level pass took it for. It produces a named CBS
+scanner finding, and there is at least one reported case of it blocking
+updates outright. It remains fine for a throwaway/deploy-once image; it is not
+fine for an image expected to take future servicing.
+
+#### Q4 — there is no *supported* offline route for hand-placing an assembly, but no explicit prohibition either
+
+Worth writing down so nobody re-litigates it: every documented offline path
+funnels through DISM/CBS, and Microsoft never addresses hand-placement at all.
+
+- **(i)** *Add or Remove Packages Offline Using DISM*: "There are two ways to
+  install or remove packages offline with DISM. You can either apply an
+  unattend answer file to the offline image, or you can add or remove the
+  package directly from the command prompt."
+- **(i)** *Modify a Windows Image Using DISM*, "View and modify an image":
+  "Although you can add application files and folders, you can't install
+  applications directly into a mounted image in the same way that you would on
+  a running PC."
+- **(i)** *Features on Demand*: "Don't hand-copy .cab files to a folder and try
+  to use it as a repository. DISM requires additional metadata in the
+  repository." — the closest documented prohibition of the analogous
+  hand-assembly shortcut, and a decent statement of the general principle that
+  bit the Q3 conclusion.
+- **(i)** The only documented programmatic routes into WinSxS — MSI's
+  `MsiAssembly` table with a null `File_Application`, and
+  `IAssemblyCache::InstallAssembly` — **both operate on the running system**;
+  neither applies to a mounted offline image.
+- **(iii)** No Microsoft page permits, describes, *or* explicitly forbids
+  hand-placing files *into* WinSxS. Every WinSxS warning on Learn is about
+  **deleting, removing, moving or replacing** — e.g. *Determine the Actual Size
+  of the WinSxS Folder*: "Deleting files from the WinSxS folder or deleting the
+  entire WinSxS folder might severely damage your system." So hand-placement is
+  **undocumented and unsupported by omission**, not prohibited. State it that
+  way; overstating it as forbidden would be as wrong as pretending it is
+  blessed.
+
+#### Traps: things that look like evidence and are not
+
+Recorded so a future reader does not spend the search budget again.
+
+- **KB 2795190's most-quoted sentence is not about WinSxS.** "We do not
+  support and do not recommend that you delete any files in this folder or
+  replace them with files from another computer" is widely quoted as a WinSxS
+  prohibition; in the KB it sits in a *More information* note about
+  **`%windir%\Installer`**, the Windows Installer cache. Do not cite it for
+  WinSxS.
+- **`CBS_E_MANIFEST_NOT_FOUND` could not be found anywhere** — not on Learn,
+  not in any accessible mirror of the `CBS_E_*` table — and may simply not be a
+  real symbol. Do not cite it. The symbol that actually covers "manifest
+  absent" is `CBS_E_STORE_CORRUPTION` (`0x800f0831`), whose CBS.log text is
+  "Store corruption, manifest missing for package: ...".
+- **`WcpOpenManifest` and `SxspOpenManifest` are apparently invented symbol
+  names** — zero hits anywhere, in binaries or in literature. The real entry
+  points found by disassembly are the three `Windows::WCP::...` names in Q1.
+
+Error codes actually worth recording, all **(i)** unless noted:
+
+| Symbol | Value | Meaning / note |
+|---|---|---|
+| `CBS_E_STORE_CORRUPTION` | `0x800f0831` | CBS.log: "Store corruption, manifest missing for package: ..." |
+| `CBS_E_SOURCE_MISSING` | `0x800F081F` | "The source for the package or file not found" |
+| `ERROR_SXS_COMPONENT_STORE_CORRUPT` | `0x80073712` | "The component store is in an inconsistent state" |
+| `ERROR_SXS_FILE_HASH_MISMATCH` | `0x800736CC` | "A component's file does not match the verification information present in the component manifest" |
+| `ERROR_SXS_MANIFEST_FORMAT_ERROR` | 14004 | "The manifest file does not begin with the required tag and format information" — what a plain-XML parser raises on a `DCM\x01` blob |
+
+None of these is documented as being driven by `HKLM\COMPONENTS`.
+
+#### Incidental findings recorded while measuring (reverse engineering, not documentation)
+
+- **`f!` value prefix — new, not in the 2026-07-13 prefix list.**
+  `DerivedData\Components\<key>` entries carry `f!<filename>` values (e.g.
+  `f!msvcr80.dll`, `f!gdiplus.dll`, `f!1394.inf_loc_c820a7a9f3fa126b`) with
+  small DWORD data (`1`, `0x41` observed). Best reading: a per-payload-file
+  index for the component ("**f**ile"), where the name carries the payload
+  file's name and the data carries per-file flags. Confidence: moderate,
+  from naming plus the observed contents; not cross-checked against a second
+  source.
+- **`CF` is almost certainly the `ComponentFlags` bitfield**, and
+  `wcp.dll` leaks the enumerator list verbatim in an assert string:
+  `ComponentSparsed | CorruptionsDetected | ClosureFlag_ManifestsPresent |
+  ClosureFlag_FilesPresent | DeltaCompressed_DEPRECATED |
+  NTFSCompressed_DEPRECATED | PayloadDeleted | ComponentHasMutableFile |
+  BackupCandidate | LZMSCompressed | UnlinkedFromDriverStore |
+  BackupLZMSCompressed`. If those are bits 0..11 in listed order, then
+  `PayloadDeleted == 0x40` — and that is corroborated: of the 3,791
+  components with `CF & 0x40` set, **3,791 have no `WinSxS\<keyform>`
+  payload directory at all** (0 exceptions), while components without the
+  bit split 17,384 with a payload directory / 6,894 without (metadata-only
+  assemblies). `CF` is also sparse — 17,127 of 28,069 components have no
+  `CF` value at all. Confidence: the enumerator names are verbatim from the
+  binary (high); the bit *ordering* is an inference corroborated by one
+  strong correlation (moderate-high). The parallel `FileFlags` enum is also
+  leaked: `StageMark | Hardlinked_DEPRECATED | DeltaCompressed_DEPRECATED |
+  NTFSCompressed_DEPRECATED | LZMSCompressed | BackupCompressed |
+  PSFXCompressedForwardReverseDelta | PSFXCompressedNullDelta`. Note the
+  deprecated `DeltaCompressed`/`NTFSCompressed` bits are *not* a
+  counter-example to Q1's "nothing records compression state": they are
+  marked deprecated in the current build's own enumerator list, and the
+  documentation search **(iii)** found nothing that uses them.
+- `WinSxS` also holds `Backup\` (2,656 files — SFC's repair source; its
+  1,148 `.manifest` files are themselves a 774-compressed / 374-plain mix,
+  consistent with content sniffing) and `FileMaps\*.cdf-ms` (3,764 binary
+  per-destination-directory maps, e.g. `$$_appcompat_appraiser_*.cdf-ms`).
+  Neither was reverse-engineered here; `FileMaps` in particular is an
+  unexamined index an installer may or may not need to touch — flagged as a
+  risk below, not resolved.
+
+#### What a minimal viable `component.Install` looks like, given the above
+
+Mirroring `driver.Install(md, bt, pkg, destDirs) (*wim.DirEntry, []NewBlob, error)`:
+
+1. Write the component `.manifest` into `Windows\WinSxS\Manifests\<keyform>.manifest`
+   as **plain UTF-8 XML** — `mum.Manifest.Serialize` output, no PA30 layer.
+   Per Q1 this is accepted; per this project's own corpus it is also a shape
+   that already occurs 401 times in a stock image.
+2. Write the component's payload files into `Windows\WinSxS\<keyform>\`
+   (optional — 6,894 real components have no payload directory).
+3. Project the payload to its real destinations as the manifest's `<file>`
+   elements direct (`destinationPath="$(runtime.system32)"` etc.). CBS does
+   this with hardlinks; offline in a WIM the natural analogue is a second
+   `wim.DirEntry` referencing the same blob hash with the refcount bumped,
+   exactly as `driver.Install` already does. **This, not the manifest, is
+   what actually makes the component do anything.**
+4. For a package: write `Windows\servicing\Packages\<pkg>.mum` and its paired
+   `<pkg>.cat`, and add
+   `SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\Packages\<pkg>`
+   with at least `InstallName`, `CurrentState`, `Visibility` (that key is a
+   plain `SOFTWARE`-hive write the `regf`/`registry` modules can already do,
+   and it is what makes `DISM /Get-Packages` list the package).
+5. For a `Type=win32`/`win32-policy` assembly only: add the
+   `SOFTWARE\Microsoft\Windows\CurrentVersion\SideBySide\Winners\<identity>\<major.minor>`
+   entry naming the winning version, or no process will ever activate it.
+   (Undocumented by Microsoft's deliberate choice — see Q2's **(iii)** —
+   so this is reverse-engineered knowledge with no schema to check against.)
+6. `COMPONENTS`-hive bookkeeping: **not optional if the image will ever be
+   serviced or updated again.** This is the point where the documentation pass
+   overturned the code-level pass's plan. The original plan here was "none,
+   deliberately, documented as a permanent limitation symmetric with
+   `component.Remove`'s" on the reasoning that the cost is only invisibility to
+   DISM. Q3 shows the cost is higher: the resulting state is a *named* CBS
+   scanner finding (`CSI Missing Winning Component Key`) and has been reported
+   to block updates until the keys were restored. So:
+   - For a **build-once, never-serviced** image (nano11-style — arguably this
+     project's main use case), omitting it is still a defensible, documented
+     tradeoff. Say plainly in the docs that the image is not serviceable
+     afterwards, rather than calling it merely "invisible to DISM".
+   - For anything expected to take future updates, the hive entries must be
+     written. The pieces are now known well enough to attempt:
+     `DerivedData\Components\<keyform>` with `identity`, `S256H` (SHA-256 of
+     the manifest XML), `f!<file>` per payload file, `c!<deployment>` backlink;
+     `CanonicalData\Deployments\<truncated-keyform>` with `appid`,
+     `CatalogThumbprint`, `p!`/`s!`/`i!`; `CanonicalData\Catalogs\<sha256 of
+     the .cat>` — and Q3's first citation confirms which two of those a real
+     repair actually restored (`DerivedData\Components` and
+     `CanonicalData\Deployments`). That remains reverse-engineered and must
+     stay opt-in behind a loud disclaimer per the 2026-07-10 verdict; what
+     changed is only that skipping it is a real defect, not a free choice.
+
+#### Risks an implementer should know about
+
+- **Skipping the hive is a detectable defect, not just an invisibility.** An
+  image with a gowim-installed component looks fine and boots, but CheckSUR /
+  `DISM /ScanHealth` names the condition (Q3), and a later update may fail on
+  it. Not known to be *deleted* by any documented cleanup path, since
+  `/StartComponentCleanup` is scoped to superseded components.
+- **`WinSxS\FileMaps\*.cdf-ms` was not investigated.** If CSI relies on those
+  per-directory maps to know which component owns a file at a given
+  destination, a hand-placed payload will be missing from them. Not known to
+  break anything; not known not to.
+- **Catalog/signature.** A third-party `.cat` will not chain to a Microsoft
+  root. That does not matter for offline file placement, but it does mean the
+  component can never be validated by CBS, and on a system enforcing driver
+  or component signing the payload itself may be rejected on its own terms.
+- The 401-plain / `Type=win32` correlation is a *description of Microsoft's
+  build output*, not a rule the loader enforces in the other direction. Q1's
+  verdict rests on the `GetCompressedFileType`/`DecompressManifest` code
+  reading and the hash evidence, not on that correlation — do not restate the
+  correlation as if it proved acceptance by itself.
+- **Nothing here is a supported operation** (Q4). It is undocumented rather
+  than forbidden, which is a meaningfully weaker statement than "Microsoft says
+  don't" — but it also means there is no contract to rely on across builds.
+
+#### The experiment that would close what is still open (not run; needs the user's decision)
+
+Q3 removed the biggest reason to want a live test — "does servicing object?"
+now has an answer — so what is left is confirming Q1 end-to-end on a real
+system, which is the cheaper of the two variants below.
+
+A live Windows 11 host built from this project's own image exists
+(libvirt VM `nano11go-test10`). It was deliberately **not touched** during
+this pass. If empirical confirmation is wanted, the minimal decisive test is:
+
+1. Snapshot the VM first (this is destructive-in-principle: it writes into
+   `WinSxS`, which Microsoft's own "Clean up the WinSxS folder" page warns
+   "may severely damage your system so that your PC might not boot").
+2. Pick a trivial synthetic component — one identity, one payload file,
+   e.g. a `.txt` with `destinationPath="$(runtime.system32)"`. Write
+   `WinSxS\Manifests\<keyform>.manifest` as **plain XML**, create
+   `WinSxS\<keyform>\` with the payload, and hardlink/copy the payload into
+   `System32`. Make **no** `COMPONENTS` and **no** `SOFTWARE` registry
+   changes.
+3. Reboot. "Accepted" vs "silently ignored" is distinguished by, in order of
+   strength: (a) `DISM /Online /Get-Packages` and `/Get-Features` — does
+   anything new appear (expected: no, since no hive/package entry was
+   written); (b) `sfc /scannow` followed by
+   `findstr /c:"[SR]" %windir%\Logs\CBS\CBS.log` — does it flag or delete the
+   orphan manifest/payload; (c) `DISM /Online /Cleanup-Image /ScanHealth` —
+   is the image reported corrupt (per Q3 the *expected* result is now a
+   `CSI Missing Winning Component Key`-style finding, so this variant doubles
+   as a check of Q3 on a current build rather than a 7601-era one); (d) does
+   the payload file survive a reboot and a subsequent Windows Update.
+4. A second, sharper variant isolates Q1 alone with far less risk: take one
+   *existing* PA30 manifest of a low-risk component, decompress it with this
+   repo's `pa30` module, write the plain XML back over the file (the hive's
+   `S256H` and the catalog both still match, per the hash findings above),
+   reboot, and run the same checks. If Windows is indifferent, Q1's code
+   reading is confirmed end-to-end on a real system. **Do not pick a
+   Common-Controls or other `Type=win32` component for this** — those are
+   already plain, so it would test nothing; and per the pivotman319 exclusion
+   the reverse operation on one of them is what allegedly bugchecks.
+
+Both variants mutate a real installation and should only be run on a
+snapshotted VM, at the user's explicit direction.
+
 - [ ] **Future goal, low priority, not currently being worked on:**
       component *installation* (the reverse of the removal above) — given a
       new component's `.manifest`/`.mum`/`.cat`/payload files, add them to
       `WinSxS\Manifests`/`servicing\Packages`/the payload directory tree,
       mirroring `driver.Install`'s shape for driver packages. In scope for
       this project eventually (stated 2026-07-14), but explicitly not
-      started and not blocking anything else. Before picking this up,
-      re-check the PA30-encoder question above: specifically, whether a
-      *newly added* uncompressed (plain-XML) `.manifest` file is actually
-      accepted by real Windows the same way the 193 pre-existing legacy
-      uncompressed manifests are (unconfirmed — see that entry) — if so, no
-      PA30 encoder is needed even for install; if not, an encoder becomes a
-      prerequisite for this item. Also unaddressed: whatever minimal,
-      best-effort `COMPONENTS`-hive bookkeeping (if any) is actually
-      necessary for a newly installed component to be recognized at all, vs.
-      being silently ignored — the removal-side research above established
-      the hive's schema is undocumented and its *supersedence* accounting is
-      out of reach, but did not establish whether install-side runtime
-      behavior tolerates a component with zero `COMPONENTS`-hive footprint;
-      this needs its own "research first" pass before implementation, not an
-      assumption either way.
+      started and not blocking anything else. **The "research first" pass this
+      item demanded is now DONE (2026-08-19)** — see the
+      "Component-installation research pass" section immediately above for the
+      evidence, sources and confidence grading. What it settled, for this
+      item specifically:
+      - **A PA30 encoder is not needed.** `wcp.dll`'s manifest reader sniffs
+        the file's own first four bytes
+        (`Windows::WCP::Rtl::GetCompressedFileType` at `0x18004ba50`) and
+        treats "not compressed" as a success path that leaves the buffer
+        alone, so a newly written plain-XML `.manifest` is read correctly;
+        neither the hive (`S256H`) nor the package catalog records or signs
+        the compressed form. The encoder item above is closed "no" on the
+        strength of that.
+      - **Writing the files is enough to make the component *work*, but not
+        enough to leave the image serviceable.** Nothing at runtime reads the
+        `COMPONENTS` hive; the only load-bearing runtime index is
+        `HKLM\SOFTWARE\...\SideBySide\Winners` (and only for
+        `Type=win32`/`win32-policy` assemblies), which is a `SOFTWARE`-hive
+        write the existing `regf`/`registry` modules can already do. But an
+        entry-less component is *not* merely invisible: CBS's own scanner
+        names the condition (`CSI Missing Winning Component Key`) and it has
+        been reported to block later updates. So the implementation must
+        either write the reverse-engineered `DerivedData\Components` /
+        `CanonicalData\Deployments` entries, or document loudly that the
+        resulting image is build-once and not serviceable — not the earlier,
+        softer "invisible to DISM" framing.
+      - **Still open, and cheap to close later:** whether the
+        `WinSxS\FileMaps\*.cdf-ms` per-directory maps need touching, and live
+        end-to-end confirmation of the plain-manifest verdict on a real
+        system (a low-risk two-step VM experiment is written up at the end of
+        the research section, deliberately not run).
 
 ## ISO image creation subsystem (new)
 
