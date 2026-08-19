@@ -91,6 +91,11 @@ type node struct {
 	// layer need it, and both must agree, so it is measured once rather than
 	// re-stat'ed per layer.
 	size int64
+	// bootInfoTable, when non-nil, is the 56-byte genisoimage boot
+	// information table to splice over bytes 8 to 63 of this file's data as
+	// it is copied into the image. The caller's Source is not modified; see
+	// eltorito.go.
+	bootInfoTable []byte
 	// isoHidden suppresses this file's ECMA-119 Directory Records while
 	// still allocating and writing its data, so that the file is reachable
 	// through UDF alone. See Options.LargeFilesUDFOnly.
@@ -199,6 +204,31 @@ type Options struct {
 	// authoring Windows media should set this instead. Requires UDF.
 	LargeFilesUDFOnly bool
 
+	// BootEntries makes the image El Torito bootable. Each entry names a file
+	// already added to the Builder and becomes one entry in the boot catalog;
+	// the first becomes the Initial/Default Entry and every later one gets its
+	// own Section Header. Windows installation media has exactly two: a BIOS
+	// entry for boot/etfsboot.com and a UEFI one (platform 0xEF) for
+	// efi/microsoft/boot/efisys*.bin. See eltorito.go.
+	//
+	// Setting this also causes a Boot Record Volume Descriptor (ECMA-119 8.2)
+	// to be written immediately after the Primary Volume Descriptor, and adds
+	// the generated boot catalog to the tree as an ordinary file.
+	BootEntries []BootEntry
+
+	// BootCatalogPath is where the generated boot catalog is recorded in the
+	// image. Empty means "boot.catalog" in the root directory, which is
+	// genisoimage's default and what the reference image uses. Ignored when
+	// BootEntries is empty.
+	BootCatalogPath string
+
+	// BootCatalogID fills the 24-byte ID string of the El Torito Validation
+	// Entry (El Torito 1.0 Figure 2, offset 4-1B), "intended to identify the
+	// manufacturer/developer of the CD-ROM". Nothing reads it; genisoimage
+	// puts the first 23 bytes of -publisher there and Microsoft leaves it
+	// zero, as does the zero value here.
+	BootCatalogID string
+
 	// PadSectors is the number of zero sectors appended after all data.
 	// genisoimage appends 150 by default as a run-out for CD-R drives
 	// whose read-ahead runs off the end of the recorded area. It is not
@@ -233,6 +263,11 @@ type Builder struct {
 	opts Options
 	root *node
 	err  error
+
+	// bootCatalogSrc is the Source of the generated El Torito boot catalog,
+	// non-nil once addBootCatalog has run. Its bytes are produced after the
+	// sizing pass, since they name the LBAs of the boot images.
+	bootCatalogSrc *bootCatalogSource
 }
 
 // New returns a Builder for an image described by opts. A nil opts is

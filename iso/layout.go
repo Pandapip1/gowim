@@ -52,6 +52,10 @@ type layout struct {
 	// Options.UDF is clear.
 	udf *udfLayout
 
+	// boot holds the El Torito layer's resolved boot images and catalog, or
+	// nil when Options.BootEntries is empty.
+	boot *bootLayout
+
 	// Filled in by the sizing pass, because the Primary Volume Descriptor
 	// has to record them (ECMA-119 8.4.13 to 8.4.17).
 	pathTableSize uint32
@@ -95,10 +99,24 @@ func buildLayout(b *Builder) *layout {
 		write: (*layout).writePVD,
 	})
 
-	// Deferred phase insertion points, in the order they must appear:
+	// The El Torito Boot Record Volume Descriptor goes immediately after the
+	// Primary Volume Descriptor. That position is not merely conventional:
+	// El Torito 1.0 section 1.4 says the Boot Record "must reside at sector
+	// 11 (17 decimal) in the last session on the CD", i.e. exactly one sector
+	// after the Primary Volume Descriptor at 16. genisoimage's genisoimage.c
+	// notes the same in a comment on its outputlist_insert of torito_desc,
+	// and both the reference image and Microsoft's own media put it at 17.
+	if len(b.opts.BootEntries) > 0 {
+		l.add(&fragment{
+			name:  "El Torito Boot Record Volume Descriptor",
+			size:  oneSector,
+			write: (*layout).writeBootRecord,
+		})
+	}
+
+	// Remaining deferred phase insertion points, in the order they must
+	// appear:
 	//
-	//   - El Torito Boot Record Volume Descriptor (ECMA-119 8.2, type 0).
-	//     genisoimage places it immediately after the PVD.
 	//   - ISO 9660:1999 Enhanced Volume Descriptor (8.5, File Structure
 	//     Version 2 per 8.4.30), what genisoimage -iso-level 4 emits.
 	//   - Joliet Supplementary Volume Descriptor (8.5 with a UCS-2 escape

@@ -38,9 +38,15 @@
 //     near line 3517 onwards), genisoimage/write.c (the output_fragment
 //     mechanism), genisoimage/tree.c (name mangling, and the >4 GiB
 //     handling at line 1554), genisoimage/udf.c and genisoimage/udf_fs.h
-//     (the UDF layer, the latter being a complete on-disk field map), and
-//     genisoimage/eltorito.c (read for design purposes; El Torito is not
-//     implemented here yet).
+//     (the UDF layer, the latter being a complete on-disk field map),
+//     genisoimage/eltorito.c and genisoimage/bootinfo.h (El Torito and the
+//     boot information table).
+//
+//   - The El Torito "Bootable CD-ROM Format Specification" version 1.0
+//     (Phoenix Technologies / IBM, 1995) and UEFI 2.10 section 13.3.2.1, for
+//     the boot catalog. See eltorito.go's file comment, which cites them
+//     figure by figure and explains why the UEFI Platform ID 0xEF is not an
+//     El Torito value at all.
 //
 //   - ECMA-167 3rd edition (June 1997) and the OSTA Universal Disk Format
 //     Specification revision 1.02, for the UDF layer. See udf.go's
@@ -64,6 +70,12 @@
 //     media actually relies on and what makes files of 4 GiB or more
 //     possible. It describes the same file extents the ECMA-119 layer
 //     assigned; nothing is written twice. See udf.go.
+//   - El Torito (Options.BootEntries): the Boot Record Volume Descriptor of
+//     ECMA-119 8.2 immediately after the Primary Volume Descriptor, and a
+//     boot catalog recorded as an ordinary file, with one Initial/Default
+//     Entry and a Section Header plus Section Entry per further platform.
+//     Optionally genisoimage's boot information table — patched into the
+//     output stream only, never into the caller's file. See eltorito.go.
 //
 // # What is deliberately NOT implemented yet
 //
@@ -75,8 +87,10 @@
 //     Path Table Group.
 //   - The ISO 9660:1999 Enhanced Volume Descriptor that genisoimage's
 //     -iso-level 4 emits (8.5 with File Structure Version 2 per 8.4.30).
-//   - El Torito, i.e. the Boot Record Volume Descriptor (8.2) at the head
-//     of the volume descriptor set plus a boot catalog.
+//     Without it identifiers stay d-characters, so ISO 9660 names come out
+//     upper-cased and version-suffixed where genisoimage's -iso-level 4
+//     preserves them. UDF carries the real names, which is what Windows
+//     media relies on.
 //
 // # Scope boundary
 //
@@ -105,6 +119,8 @@
 // the structure that makes the later phases additive. That prediction held:
 // adding UDF meant inserting fragments at the right position in the list
 // (layout.go's addUDFHead and addUDFTail) and changed nothing about how
-// extents are assigned. Joliet and El Torito should be the same shape of
-// change.
+// extents are assigned. El Torito was the same shape of change again: one
+// fragment for the Boot Record Volume Descriptor, and a boot catalog that is
+// simply a file in the tree whose bytes are generated once every extent is
+// known. Joliet should be the same.
 package iso

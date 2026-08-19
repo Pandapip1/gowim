@@ -117,6 +117,19 @@ func putStrPad(b []byte, s string) {
 	}
 }
 
+// putStrZeroPad copies s into b, truncating it if necessary, and pads the
+// remainder with (00) rather than with FILLER.
+//
+// This is for the El Torito fields, which are not ECMA-119 character fields
+// and are specified with zero padding: the Boot System Identifier of the Boot
+// Record Volume Descriptor "must be 'EL TORITO SPECIFICATION' padded with
+// 0's" (El Torito 1.0 Figure 7), and the Validation Entry's ID string is
+// likewise zero-filled by every producer measured.
+func putStrZeroPad(b []byte, s string) {
+	n := copy(b, s)
+	putZero(b[n:])
+}
+
 // putZero fills b with (00) bytes, for the fields ECMA-119 describes as
 // "Unused Field" or "Reserved for future standardization" (e.g. 8.4.4,
 // 8.4.7, 8.4.9, 8.4.31, 8.4.33), all of which are specified to be (00).

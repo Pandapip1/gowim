@@ -76,6 +76,13 @@ func (b *Builder) WriteTo(w io.Writer) (int64, error) {
 	if b.err != nil {
 		return 0, b.err
 	}
+	// The El Torito boot catalog joins the tree before finalize, so that it
+	// is mangled, deduplicated and sorted like any other file.
+	if len(b.opts.BootEntries) > 0 {
+		if err := b.addBootCatalog(); err != nil {
+			return 0, err
+		}
+	}
 	if err := b.finalize(); err != nil {
 		return 0, err
 	}
@@ -83,8 +90,20 @@ func (b *Builder) WriteTo(w io.Writer) (int64, error) {
 		return 0, err
 	}
 	l := buildLayout(b)
+	if len(b.opts.BootEntries) > 0 {
+		if err := l.initBoot(); err != nil {
+			return 0, err
+		}
+	}
 	if err := l.assign(); err != nil {
 		return 0, err
+	}
+	// Now that every extent is final, the boot catalog's contents — which are
+	// nothing but LBAs — and the boot information tables can be produced.
+	if l.boot != nil {
+		if err := l.finishBoot(); err != nil {
+			return 0, err
+		}
 	}
 	sw := newSectorWriter(w)
 	for _, f := range l.frags {
@@ -447,7 +466,19 @@ func (l *layout) writeFileData(w *sectorWriter) error {
 		if err != nil {
 			return fmt.Errorf("opening %q: %w", f.hostName, err)
 		}
-		n, err := io.Copy(w, io.LimitReader(rc, int64(total)+1))
+		var r io.Reader = io.LimitReader(rc, int64(total)+1)
+		if f.bootInfoTable != nil {
+			// -boot-info-table: splice genisoimage's 56-byte table over bytes
+			// 8 to 63 on the way out. The Source itself is never written to;
+			// see eltorito.go's file comment on why that differs from
+			// genisoimage.
+			r, err = applyBootInfoTable(r, f.bootInfoTable)
+			if err != nil {
+				rc.Close()
+				return fmt.Errorf("patching the boot information table into %q: %w", f.hostName, err)
+			}
+		}
+		n, err := io.Copy(w, r)
 		rc.Close()
 		if err != nil {
 			return fmt.Errorf("copying %q: %w", f.hostName, err)
