@@ -4028,12 +4028,144 @@ Still open, unchanged or newly recorded:
       resolves name collisions with a zero-padded three-digit suffix where
       we use a plain counter. None is visible to a reader.
 
-- [ ] Implement Joliet (a Supplementary Volume Descriptor per ECMA-119 8.5
+- [x] Implement Joliet (a Supplementary Volume Descriptor per ECMA-119 8.5
       with a UCS-2 escape sequence per 8.5.6, plus its own directory
       hierarchy and Path Table Group) and/or the ISO 9660:1999 Enhanced
       Volume Descriptor. Neither is needed for depth reasons (see the
       measurement above); the Enhanced VD matters only if we want to match
       `-iso-level 4` output field for field.
+
+      **Done (2026-08-19): Joliet, not the Enhanced VD**, per this item's
+      own text — Joliet is what actually gives a non-Windows/older reader
+      long mixed-case names; the Enhanced VD only buys byte-for-byte
+      `-iso-level 4` parity, which was never this project's goal. New
+      `Options.Joliet` (default off, matching `UDF`/`BootEntries`/etc.), in
+      `iso/joliet.go` plus one new fragment (the Supplementary Volume
+      Descriptor) and two fragment pairs (Joliet Path Table Group,
+      directory tree) in `layout.go`'s `buildLayout`. Phase 1's prediction
+      held a fourth time: nothing about extent assignment changed, and file
+      data is shared exactly the way UDF already shares it — only the
+      directory records and path tables are per-hierarchy.
+
+      Joliet was never standardized by Ecma or ISO ("spottily documented by
+      Microsoft", in the words of the source read here). The primary
+      reference used is the real, cross-checkable implementation this
+      whole package is validated against: **cdrkit 1.1.11's
+      `genisoimage/joliet.c`** (cached from earlier phases at
+      `/tmp/claude/repos/cdrkit-1.1.11/genisoimage/joliet.c`), by Eric
+      Youngdale (1997) with later changes by J. Schilling — its own file
+      comment is the closest thing to a specification available, and its
+      `convert_to_unicode`/`joliet_strlen`/`ucs_codes` are what this
+      package's illegal-character set, 64-code-unit length limit and
+      `%/E` escape sequence actually come from, cited function-by-function
+      in `iso/name.go` and `iso/joliet.go`. Cross-referenced against
+      ECMA-119 4th edition 8.5 (already cached) for the parts of the SVD
+      that ARE normative (field layout, BP ranges, File Structure Version).
+      No independent Microsoft "Joliet Specification" document was found
+      or used; this is flagged rather than silently omitted, per this
+      project's sourcing rule.
+
+      **Machinery reused, not forked.** `iso/layout.go`'s new
+      `hierarchyView` parameterises the *existing* directory-record and
+      path-table code (`directoryRecordLenV`, `directorySectorsV`,
+      `pathTableSectorsV`, `write.go`'s `writeDirectoryRecordV`/
+      `writeDirectoriesV`/`writePathTableV`) over which identifier encoding
+      (d-characters+version vs. UCS-2BE+no-version) and which pair of
+      per-directory extent fields (`node.dirExtent`/`dirLength` vs.
+      `node.jolietDirExtent`/`jolietDirLength`) to use, rather than a
+      second copy of that logic. File *data* extents are not duplicated at
+      all — `node.sections`, already shared with UDF, is read as-is by the
+      Joliet directory-record writer. One simplification worth flagging
+      explicitly: both hierarchies share one traversal order (the one
+      `mangle()` already produces under ECMA-119 9.3), rather than Joliet
+      independently sorting by the original long name the way
+      `joliet_compare_paths`/`joliet_compare_dirs` do. This is a real,
+      deliberate divergence — documented in `iso/joliet.go`'s file comment
+      — traded for not forking a second sort model over a property (sibling
+      order in a listing) that no reader validated against here (isoinfo,
+      xorriso, 7z) actually depends on.
+
+      **Name mangling**, `mangleJolietName` in `iso/name.go`: the
+      *original* host name is used (not the ECMA-119-mangled one — matching
+      `tree.c`'s `s_entry->name = strdup(short_name)`, captured before 8.3
+      mangling), case and spaces preserved, illegal characters folded to
+      `_` (control chars 0x00-0x1F, DEL 0x7F, and `* / : ; ? \`, per
+      `joliet.c`'s file comment and its `convert_to_unicode` switch — DEL is
+      in the code but not the comment), truncated to 64 UCS-2 code units
+      (`JMAX` in `genisoimage.h`; the out-of-spec `-joliet-long`/`JLONGMAX`
+      103 is not offered). No version-number suffix, matching Joliet's
+      real behaviour. One deliberate deviation: **genisoimage aborts the
+      whole build** on a same-after-truncation name collision
+      (`jsort_goof`, "have the same Joliet name"); this package resolves it
+      with the same kind of numeric-suffix dedupe already used for
+      ECMA-119 identifiers (`jolietDedupe`), since a gowim caller's names
+      are already guaranteed unique before Joliet mangling and failing the
+      whole build over a cosmetic-hierarchy collision is a worse trade than
+      resolving it. `TestJolietDedupeResolvesCollision` and
+      `TestCompareJolietSVDWithGenisoimage`'s file comment both record this.
+
+      **External validation** (self-consistency proves nothing): **isoinfo
+      -J** (cdrkit) shows the real long, mixed-case names (spaces,
+      ampersands, multiple dots) while plain `isoinfo -f` on the same image
+      still shows the independent, mangled 8.3-ish ECMA-119 names —
+      confirming the two hierarchies are genuinely separate, not one
+      aliasing the other; **xorriso** (which prefers Joliet/Rock Ridge over
+      plain ECMA-119 by default) and **7z** both read the same names with
+      zero FAILURE/SORRY events. `TestJolietDoesNotAffectOtherHierarchies`
+      builds one image with Joliet, UDF and El Torito all enabled together
+      and re-runs each earlier phase's own check against it: the plain
+      ECMA-119 path list is unchanged, `7z l` still reports `Type = Udf`,
+      and `xorriso -report_el_torito` still reports both boot entries
+      cleanly — nothing regressed.
+
+      **Structural comparison against `genisoimage -J`** on the plain
+      ECMA-119 `sampleTree` (external_test.go): the Supplementary Volume
+      Descriptor is byte-identical on every field not tied to layout
+      specifics genisoimage's extra version-block/run-out padding shifts —
+      Volume Descriptor Type, Version, Volume Flags, Escape Sequences
+      (`%/E`, all 29 trailing bytes zero), and File Structure Version all
+      match exactly — and the two producers' Joliet path lists are
+      identical (`TestCompareJolietSVDWithGenisoimage`). Against the real
+      29-file `/boot` subtree of `/mnt/extra/nano11go-work/isox` (the same
+      tree phases 2 and 3 used, built here with `-J -udf` on one side and
+      `Options{Joliet: true, UDF: true, Level: Level3}` on the other): the
+      32-entry Joliet path lists from `isoinfo -J -f` are **identical**,
+      every file's SHA-256 read back through the Joliet path matches, and
+      `xorriso`/`7z` both report the resulting gowim image clean.
+
+      **Real-media survey, per this item's own request.** Checked whether
+      real Windows install media on hand actually ships Joliet at all
+      (`isoinfo -d`, `-J -f`): **it does not.** All four Windows/NTLite
+      images on disk —
+      `Win11_25H2_English_x64_v2.iso`, `..._EnglishInternational_x64_v2.iso`,
+      `..._Arm64_v2.iso` (oscdimg) and `Nano11_22H2_1.1_English_x64.iso`
+      (NTLite/IMAPI2) — report `NO Joliet present`, and so does this
+      project's own genisoimage-built `nano11go_test10.iso` (built without
+      `-J`). This is new information against the item's own premise ("real
+      Windows media has always shipped Joliet historically") — at least for
+      these four images, it never did; UDF alone carries the names, which
+      matches phase 2's finding that these images' ECMA-119 trees are
+      themselves minimal placeholders. By contrast, the **non-Windows
+      media** on hand does carry full, real Joliet: both
+      `nixos-26.11.20260705.d407951-aarch64-linux.iso` and
+      `ubuntu-24.04.4-desktop-amd64.iso` report `Joliet with UCS level 3
+      found` (and Rock Ridge) with complete, real path lists under
+      `isoinfo -J -f`. This is exactly the shape the item predicted: Joliet
+      matters for non-Windows-authored or non-Windows-targeted media, not
+      for Microsoft's own installer images.
+
+      Not implemented: the ISO 9660:1999 Enhanced Volume Descriptor
+      (unneeded per the depth measurement above and per the fact that both
+      UDF and Joliet already carry real names); Romeo (Joliet's
+      non-Unicode ISO-8859-1 sibling, per `joliet.c`'s own comment,
+      irrelevant once UCS-2 is available); UCS-2 Levels 1/2 (genisoimage
+      itself always uses Level 3; no reader on hand distinguishes them);
+      and an independent Joliet-only volume label distinct from the
+      Primary Volume Descriptor's — this package's `writeJolietSVD`
+      matches genisoimage in re-encoding the *same already-sanitized*
+      System/Volume/etc. Identifier fields as UCS-2BE rather than
+      preserving the caller's original casing there, which is a real
+      (if minor and clearly documented) parity choice, not an oversight.
 - [x] Implement the UDF bridge layer (ECMA-167 + OSTA UDF 1.02), reusing
       the extents the ECMA-119 layer already assigned. Done (2026-08-19),
       in `iso/udf.go` plus `buildLayout`'s `addUDFHead`/`addUDFTail`.

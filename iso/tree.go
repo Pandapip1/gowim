@@ -111,6 +111,24 @@ type node struct {
 	// Assigned during layout when UDF is enabled.
 	udfEntry    uint32 // Logical Sector Number of this node's UDF File Entry
 	udfDirBytes uint32 // byte length of a directory's File Identifier Descriptors
+
+	// jolietID is this node's Joliet File/Directory Identifier: UCS-2 code
+	// units re-encoded big-endian by jolietBytes, with no version-number
+	// suffix (see mangleJolietName). Set only when Options.Joliet is true.
+	// The root directory's own record never uses this field: like the
+	// ECMA-119 tree, it is always identified by the reserved single (00)
+	// byte (see recordKind.selfRecord in write.go), which is the same
+	// convention Joliet uses for "." and ".." (joliet.go).
+	jolietID []byte
+	// jolietDirExtent and jolietDirLength are a directory's extent in the
+	// Joliet hierarchy — the Joliet tree's Directory Records differ in size
+	// from the ECMA-119 tree's (UCS-2 identifiers, no version numbers), so
+	// it needs its own extent even though it describes exactly the same set
+	// of children. There is no separate jolietPathIndex: the Joliet Path
+	// Table lists directories in the same relative order as l.dirs (see
+	// joliet.go), so pathIndex is shared between the two hierarchies.
+	jolietDirExtent uint32
+	jolietDirLength uint32
 }
 
 // name and ext split the mangled file identifier for sorting per 9.3.
@@ -228,6 +246,20 @@ type Options struct {
 	// puts the first 23 bytes of -publisher there and Microsoft leaves it
 	// zero, as does the zero value here.
 	BootCatalogID string
+
+	// Joliet adds a Supplementary Volume Descriptor (ECMA-119 8.5) whose
+	// Escape Sequences field (8.5.6) identifies UCS-2 Level 3, plus a
+	// second, parallel directory hierarchy and Path Table Group recording
+	// the caller's original long, mixed-case names in UCS-2BE. This is what
+	// lets a plain ISO 9660 reader — an older tool, or a non-Windows OS —
+	// show real names instead of the 8.3-ish upper-cased, version-suffixed
+	// ones the ECMA-119 tree alone produces; Windows itself reads names
+	// from UDF (Options.UDF) and needs neither ECMA-119 nor Joliet for
+	// that. See joliet.go.
+	//
+	// Off by default, matching UDF, LargeFilesUDFOnly and BootEntries: this
+	// package writes only what a caller explicitly asks for.
+	Joliet bool
 
 	// PadSectors is the number of zero sectors appended after all data.
 	// genisoimage appends 150 by default as a run-out for CD-R drives
@@ -505,11 +537,18 @@ func (b *Builder) mangle(dir *node) {
 	// within a directory, since both appear as the File Identifier field
 	// of a Directory Record (9.1.11) and 9.3 orders them together.
 	used := map[string]bool{}
+	usedJoliet := map[string]bool{}
 	for _, c := range dir.children {
 		if c.isDir {
 			c.id = dedupe(used, mangleDirName(c.hostName, b.opts.Level), true, b.opts.Level)
 		} else {
 			c.id = dedupe(used, mangleFileName(c.hostName, b.opts.Level), false, b.opts.Level)
+		}
+		if b.opts.Joliet {
+			// Joliet identifiers and their namespace are computed from the
+			// unmangled host name, independently of the ECMA-119 identifier
+			// above: see mangleJolietName.
+			c.jolietID = jolietBytes(jolietDedupe(usedJoliet, mangleJolietName(c.hostName)))
 		}
 	}
 

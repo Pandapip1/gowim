@@ -52,6 +52,10 @@
 //     Specification revision 1.02, for the UDF layer. See udf.go's
 //     file-level comment, which cites them clause by clause.
 //
+//   - cdrkit 1.1.11's genisoimage/joliet.c again, for the Joliet layer,
+//     since Joliet was never standardized by Ecma or ISO. See joliet.go's
+//     file-level comment.
+//
 // # What is implemented
 //
 //   - The Primary Volume Descriptor (ECMA-119 8.4) and the Volume
@@ -76,21 +80,28 @@
 //     Entry and a Section Header plus Section Entry per further platform.
 //     Optionally genisoimage's boot information table — patched into the
 //     output stream only, never into the caller's file. See eltorito.go.
+//   - Joliet (Options.Joliet): a Supplementary Volume Descriptor (ECMA-119
+//     8.5) with a UCS-2 Level 3 escape sequence (8.5.6), and a second,
+//     parallel directory hierarchy and Path Table Group recording the
+//     caller's original long, mixed-case names in UCS-2BE, sharing the
+//     same file data extents as the ECMA-119 tree. This is what lets a
+//     plain ISO 9660 reader show real names instead of the 8.3-ish
+//     upper-cased, version-suffixed ones the ECMA-119 tree alone produces.
+//     See joliet.go.
 //
 // # What is deliberately NOT implemented yet
 //
-// These are designed for — the layout mechanism in layout.go reserves
-// ordered insertion points for each — but are not written:
+// The layout mechanism in layout.go reserved an insertion point for this
+// from phase 1 onward, but it is not written:
 //
-//   - Joliet (a Supplementary Volume Descriptor with a UCS-2 escape
-//     sequence, ECMA-119 8.5.6) and its second directory hierarchy and
-//     Path Table Group.
 //   - The ISO 9660:1999 Enhanced Volume Descriptor that genisoimage's
 //     -iso-level 4 emits (8.5 with File Structure Version 2 per 8.4.30).
-//     Without it identifiers stay d-characters, so ISO 9660 names come out
-//     upper-cased and version-suffixed where genisoimage's -iso-level 4
-//     preserves them. UDF carries the real names, which is what Windows
-//     media relies on.
+//     Without it, the ECMA-119 tree's own identifiers stay d-characters,
+//     upper-cased and version-suffixed, where genisoimage's -iso-level 4
+//     preserves them. UDF and Joliet each carry the real names already,
+//     which is what Windows media (UDF) and every other reader (Joliet)
+//     actually rely on; the Enhanced Volume Descriptor would only matter
+//     for matching genisoimage's -iso-level 4 output field for field.
 //
 // # Scope boundary
 //
@@ -122,5 +133,11 @@
 // extents are assigned. El Torito was the same shape of change again: one
 // fragment for the Boot Record Volume Descriptor, and a boot catalog that is
 // simply a file in the tree whose bytes are generated once every extent is
-// known. Joliet should be the same.
+// known. Joliet was the same again: one fragment for the Supplementary
+// Volume Descriptor and two more pairs of fragments (a Path Table Group and
+// a directory tree) alongside the ECMA-119 ones, sharing the file data
+// fragment and the extents it already assigned. The directory-record and
+// path-table serialisation itself is not forked for Joliet: layout.go's
+// hierarchyView parameterises the one implementation over which identifier
+// encoding and which pair of per-directory extent fields to use.
 package iso

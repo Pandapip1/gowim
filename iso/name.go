@@ -2,6 +2,7 @@ package iso
 
 import (
 	"strings"
+	"unicode/utf16"
 )
 
 // InterchangeLevel selects the ECMA-119 clause 10 level of interchange,
@@ -268,6 +269,130 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// jolietMaxNameLen is the maximum length, in UCS-2 code units, of a Joliet
+// file or directory identifier.
+//
+// Joliet was never standardized by Ecma or ISO; it is a Microsoft-authored
+// extension, and this package's source for its on-disk rules is the real
+// cross-checkable implementation cited throughout this file: cdrkit 1.1.11's
+// genisoimage (already cached from earlier phases at
+// /tmp/claude/repos/cdrkit-1.1.11/genisoimage/). genisoimage.h defines
+// `JMAX 64 /* maximum Joliet file name length (spec) */` and joliet.c's
+// joliet_strlen clamps every converted name to `2*jlen` bytes, i.e. jlen
+// UCS-2 code units, with jlen defaulting to JMAX. genisoimage's
+// out-of-spec `-joliet-long` raises this to `JLONGMAX 103`; this package
+// does not offer that, only the in-spec 64.
+const jolietMaxNameLen = 64
+
+// mangleJolietName converts a host name into a Joliet identifier: the name
+// re-encoded as UCS-2 (recorded big-endian, per joliet.go's writer), with
+// illegal characters folded to '_' and the result truncated to
+// jolietMaxNameLen code units.
+//
+// Unlike mangleFileName/mangleDirName, no name/extension split, case
+// folding, or version-number suffix is applied: joliet.c stores the
+// original host name verbatim (`s_entry->name = strdup(short_name)` in
+// cdrkit-1.1.11/genisoimage/tree.c, where at that point `short_name` is
+// still the pre-8.3-mangling name) and it is this original name, not the
+// mangled ECMA-119 identifier, that convert_to_unicode later encodes for
+// the Joliet tree. Directories and files are treated identically because
+// joliet.c's generate_one_joliet_directory and get_joliet_vol_desc route
+// both through the very same convert_to_unicode call.
+//
+// The illegal-character set is documented in joliet.c's own file comment
+// and enforced in convert_to_unicode's switch statement:
+//
+//	Characters (00)(00) through (00)(1f) (control chars)
+//	(00)(2a) '*'
+//	(00)(2f) '/'
+//	(00)(3a) ':'
+//	(00)(3b) ';'
+//	(00)(3f) '?'
+//	(00)(5c) '\'
+//
+// convert_to_unicode additionally folds (00)(7f) (DEL) to '_'
+// (`if (uc <= 0x1f || uc == 0x7f) uc = '\0'`, then the switch maps the
+// sentinel 0 to '_'), which the file comment omits but the code does not.
+func mangleJolietName(name string) []uint16 {
+	units := utf16.Encode([]rune(name))
+	if len(units) > jolietMaxNameLen {
+		units = units[:jolietMaxNameLen]
+	}
+	out := make([]uint16, len(units))
+	for i, u := range units {
+		out[i] = jolietSanitizeUnit(u)
+	}
+	if len(out) == 0 {
+		// Every mangleFileName/mangleDirName path also refuses to produce an
+		// empty identifier (ECMA-119 7.5.1 requires at least one non-empty
+		// component); Joliet has no such normative text since it was never
+		// standardized, but an empty File/Directory Identifier is not a
+		// legal Directory Record (LEN_FI would be 0), so the same
+		// placeholder is used here for consistency.
+		out = []uint16{'_'}
+	}
+	return out
+}
+
+// jolietSanitizeUnit folds one UCS-2 code unit to '_' if it is outside the
+// legal set documented on mangleJolietName.
+func jolietSanitizeUnit(u uint16) uint16 {
+	switch {
+	case u <= 0x1f, u == 0x7f:
+		return '_'
+	case u == '*', u == '/', u == ':', u == ';', u == '?', u == '\\':
+		return '_'
+	}
+	return u
+}
+
+// jolietBytes encodes UCS-2 code units as big-endian bytes ("Unicode strings
+// are always encoded in big-endian format", joliet.c's file comment).
+func jolietBytes(units []uint16) []byte {
+	b := make([]byte, len(units)*2)
+	for i, u := range units {
+		b[2*i] = byte(u >> 8)
+		b[2*i+1] = byte(u)
+	}
+	return b
+}
+
+// jolietDedupe makes want unique within used by overwriting its tail with a
+// decimal counter, mirroring dedupe's role for ECMA-119 identifiers.
+//
+// genisoimage does not do this: joliet_compare_dirs treats two siblings
+// that collide after Joliet mangling as a fatal error ("Error: %s and %s
+// have the same Joliet name", cdrkit-1.1.11/genisoimage/joliet.c). Since a
+// gowim caller's host names are already guaranteed unique within a
+// directory (AddFile/AddTree only ever see one entry per host name) and a
+// collision can only arise from truncation or illegal-character folding —
+// e.g. two names differing only past the 64th code unit — resolving it
+// deterministically is more useful to a caller than aborting the whole
+// build, so this package deviates from genisoimage here.
+func jolietDedupe(used map[string]bool, want []uint16) []uint16 {
+	key := string(jolietBytes(want))
+	if !used[key] {
+		used[key] = true
+		return want
+	}
+	for n := 1; ; n++ {
+		suffix := utf16.Encode([]rune(itoa(n)))
+		keep := jolietMaxNameLen - len(suffix)
+		if keep < 0 {
+			keep = 0
+		}
+		if keep > len(want) {
+			keep = len(want)
+		}
+		cand := append(append([]uint16{}, want[:keep]...), suffix...)
+		k := string(jolietBytes(cand))
+		if !used[k] {
+			used[k] = true
+			return cand
+		}
+	}
 }
 
 // compareFileIdentifiers implements the ordering of ECMA-119 9.3, "Order of

@@ -59,6 +59,10 @@ type layout struct {
 	// Filled in by the sizing pass, because the Primary Volume Descriptor
 	// has to record them (ECMA-119 8.4.13 to 8.4.17).
 	pathTableSize uint32
+	// jolietPathTableSize is pathTableSize's counterpart for the Joliet
+	// Supplementary Volume Descriptor (8.5.7 to 8.5.11), filled in the same
+	// way when Options.Joliet is set.
+	jolietPathTableSize uint32
 
 	// totalSectors is the Volume Space Size in Logical Blocks (8.4.8),
 	// known once every fragment has been assigned.
@@ -114,13 +118,25 @@ func buildLayout(b *Builder) *layout {
 		})
 	}
 
-	// Remaining deferred phase insertion points, in the order they must
-	// appear:
-	//
-	//   - ISO 9660:1999 Enhanced Volume Descriptor (8.5, File Structure
-	//     Version 2 per 8.4.30), what genisoimage -iso-level 4 emits.
-	//   - Joliet Supplementary Volume Descriptor (8.5 with a UCS-2 escape
-	//     sequence per 8.5.6).
+	// Remaining deferred phase insertion point: the ISO 9660:1999 Enhanced
+	// Volume Descriptor (8.5, File Structure Version 2 per 8.4.30), what
+	// genisoimage -iso-level 4 emits. Not implemented; see the package doc.
+
+	// The Joliet Supplementary Volume Descriptor goes here: immediately
+	// after where the (unimplemented) Enhanced Volume Descriptor would go
+	// and immediately before the Volume Descriptor Set Terminator. That is
+	// genisoimage's own order (genisoimage.c's outputlist_insert sequence:
+	// voldesc_desc, torito_desc, xvoldesc_desc, joliet_desc, end_vol) and
+	// there is no normative reason to differ, since Joliet was never
+	// standardized and ECMA-119 8.3/6.3 only fix the Terminator's role
+	// (last) and the set's start (16), not what comes between.
+	if b.opts.Joliet {
+		l.add(&fragment{
+			name:  "Joliet Supplementary Volume Descriptor",
+			size:  oneSector,
+			write: (*layout).writeJolietSVD,
+		})
+	}
 
 	l.add(&fragment{
 		name:  "Volume Descriptor Set Terminator",
@@ -143,11 +159,35 @@ func buildLayout(b *Builder) *layout {
 		write: func(l *layout, w *sectorWriter) error { return l.writePathTable(w, true) },
 	})
 
+	// Joliet's own Path Table Group follows immediately, matching
+	// genisoimage's jpathtable_desc placement right after pathtable_desc
+	// (genisoimage.c's outputlist_insert sequence).
+	if b.opts.Joliet {
+		l.add(&fragment{
+			name:  "Joliet Type L Path Table",
+			size:  jolietPathTableSectors,
+			write: func(l *layout, w *sectorWriter) error { return l.writePathTableV(w, jolietView, false) },
+		})
+		l.add(&fragment{
+			name:  "Joliet Type M Path Table",
+			size:  jolietPathTableSectors,
+			write: func(l *layout, w *sectorWriter) error { return l.writePathTableV(w, jolietView, true) },
+		})
+	}
+
 	l.add(&fragment{
 		name:  "Directory tree",
 		size:  directorySectors,
 		write: (*layout).writeDirectories,
 	})
+
+	if b.opts.Joliet {
+		l.add(&fragment{
+			name:  "Joliet directory tree",
+			size:  jolietDirectorySectors,
+			write: func(l *layout, w *sectorWriter) error { return l.writeDirectoriesV(jolietView, w) },
+		})
+	}
 
 	l.add(&fragment{
 		name:  "File data",
@@ -327,7 +367,93 @@ func (l *layout) assign() error {
 	return nil
 }
 
-// pathTableSectors sizes one Path Table.
+// hierarchyView abstracts the two structurally identical directory-record /
+// path-table hierarchies this package can write over one shared set of file
+// data extents: the primary ECMA-119 Level 1-3 tree (d-character
+// identifiers, ";1" versions, isoView) and, when Options.Joliet is set, the
+// parallel Joliet tree (UCS-2BE identifiers, no version numbers,
+// jolietView; see joliet.go). Every function in this file and in write.go
+// that lays out or serialises a directory hierarchy or a Path Table Group
+// is written once, against this interface, rather than forked per
+// hierarchy — only the identifier encoding and the per-directory extent
+// bookkeeping actually differ between the two.
+//
+// Both hierarchies share l.dirs (the same traversal order and the same
+// node.pathIndex numbering) rather than each computing its own: see
+// node.jolietDirExtent's doc comment for why that is a deliberate
+// simplification rather than an oversight.
+type hierarchyView struct {
+	// name identifies the hierarchy in error messages.
+	name string
+	// ownID returns the Directory Identifier / File-Identifier-without-
+	// version bytes for a node's own entry in its parent's directory: what
+	// a Path Table Record's Directory Identifier field (9.4.5) holds, and,
+	// for a directory child, its Directory Record's File Identifier too.
+	ownID func(n *node) []byte
+	// fileID returns the complete File Identifier field (9.1.11) for a
+	// file's Directory Record, including any version-number suffix.
+	fileID func(n *node) []byte
+	// extent and length read and write a directory's own extent location
+	// and byte length in this hierarchy (node.dirExtent/dirLength for
+	// isoView, node.jolietDirExtent/jolietDirLength for jolietView).
+	extent    func(n *node) uint32
+	setExtent func(n *node, v uint32)
+	length    func(n *node) uint32
+	setLength func(n *node, v uint32)
+	// pathTableSize returns this hierarchy's cached Path Table byte size
+	// (l.pathTableSize or l.jolietPathTableSize), filled in by the sizing
+	// pass before any write-pass function runs.
+	pathTableSize func(l *layout) uint32
+}
+
+// isoView is the hierarchyView for the primary ECMA-119 Level 1-3 tree.
+var isoView = hierarchyView{
+	name:          "ECMA-119",
+	ownID:         func(n *node) []byte { return []byte(n.id) },
+	fileID:        func(n *node) []byte { return []byte(fileIdentifier(n)) },
+	extent:        func(n *node) uint32 { return n.dirExtent },
+	setExtent:     func(n *node, v uint32) { n.dirExtent = v },
+	length:        func(n *node) uint32 { return n.dirLength },
+	setLength:     func(n *node, v uint32) { n.dirLength = v },
+	pathTableSize: func(l *layout) uint32 { return l.pathTableSize },
+}
+
+// jolietView is the hierarchyView for the Joliet tree (joliet.go).
+var jolietView = hierarchyView{
+	name:          "Joliet",
+	ownID:         func(n *node) []byte { return n.jolietID },
+	fileID:        func(n *node) []byte { return n.jolietID },
+	extent:        func(n *node) uint32 { return n.jolietDirExtent },
+	setExtent:     func(n *node, v uint32) { n.jolietDirExtent = v },
+	length:        func(n *node) uint32 { return n.jolietDirLength },
+	setLength:     func(n *node, v uint32) { n.jolietDirLength = v },
+	pathTableSize: func(l *layout) uint32 { return l.jolietPathTableSize },
+}
+
+// pathTableID returns v's Path Table Directory Identifier for d.
+//
+// ECMA-119 6.8.2.2 and 9.4.5: the record for the Root Directory carries a
+// Directory Identifier consisting of a single (00) byte, the same reserved
+// identifier the Root Directory's own first Directory Record uses in both
+// hierarchies (see writeDirectoryRecordV's selfID).
+func (v hierarchyView) pathTableID(d *node) []byte {
+	if d.parent == nil {
+		return selfID
+	}
+	return v.ownID(d)
+}
+
+// pathTableSectors sizes the ECMA-119 Path Table. See pathTableSectorsV.
+func pathTableSectors(l *layout) (uint32, error) {
+	return pathTableSectorsV(isoView, &l.pathTableSize)(l)
+}
+
+// jolietPathTableSectors sizes the Joliet Path Table.
+func jolietPathTableSectors(l *layout) (uint32, error) {
+	return pathTableSectorsV(jolietView, &l.jolietPathTableSize)(l)
+}
+
+// pathTableSectorsV sizes one hierarchy's Path Table.
 //
 // A Path Table Record is 8 bytes of fixed fields plus the Directory
 // Identifier, plus a (00) padding byte when the identifier length is odd
@@ -337,78 +463,78 @@ func (l *layout) assign() error {
 // is simply a byte stream padded out to a whole number of sectors.
 //
 // Both Type L and Type M tables have the same size, so the value is
-// computed once and cached for the Primary Volume Descriptor's Path Table
-// Size field (8.4.13), which records the size in bytes, not sectors.
-func pathTableSectors(l *layout) (uint32, error) {
-	if l.pathTableSize == 0 {
-		var total uint64
-		for _, d := range l.dirs {
-			total += uint64(pathTableRecordLen(d))
+// computed once and cached in *size, which is also what the owning Volume
+// Descriptor's Path Table Size field (8.4.13/8.5.7) records.
+func pathTableSectorsV(v hierarchyView, size *uint32) func(*layout) (uint32, error) {
+	return func(l *layout) (uint32, error) {
+		if *size == 0 {
+			var total uint64
+			for _, d := range l.dirs {
+				total += uint64(pathTableRecordLenBytes(len(v.pathTableID(d))))
+			}
+			if total > math.MaxUint32 {
+				return 0, fmt.Errorf("iso: %s path table too large", v.name)
+			}
+			*size = uint32(total)
 		}
-		if total > math.MaxUint32 {
-			return 0, fmt.Errorf("iso: path table too large")
-		}
-		l.pathTableSize = uint32(total)
+		return sectorsFor(uint64(*size)), nil
 	}
-	return sectorsFor(uint64(l.pathTableSize)), nil
 }
 
-func pathTableRecordLen(d *node) int {
-	n := len(pathTableID(d))
-	return 8 + n + n%2
+func pathTableRecordLenBytes(idLen int) int {
+	return 8 + idLen + idLen%2
 }
 
-// pathTableID returns the Directory Identifier for a Path Table Record.
-//
-// ECMA-119 6.8.2.2 and 9.4.5: the record for the Root Directory carries a
-// Directory Identifier consisting of a single (00) byte, the same reserved
-// identifier the Root Directory's own first Directory Record uses.
-func pathTableID(d *node) string {
-	if d.parent == nil {
-		return "\x00"
-	}
-	return d.id
-}
+// directorySectors sizes the ECMA-119 directory tree. See
+// directorySectorsV.
+func directorySectors(l *layout) (uint32, error) { return directorySectorsV(isoView)(l) }
 
-// directorySectors sizes the directory tree and assigns each directory its
-// extent.
+// jolietDirectorySectors sizes the Joliet directory tree.
+func jolietDirectorySectors(l *layout) (uint32, error) { return directorySectorsV(jolietView)(l) }
+
+// directorySectorsV sizes one hierarchy's directory tree and assigns each
+// directory its extent in that hierarchy.
 //
 // Each directory's extent begins with the two reserved records of ECMA-119
 // 6.8.2.2 — "." identifying the directory itself, with a Directory
 // Identifier of a single (00) byte, and ".." identifying its Parent
 // Directory, with a single (01) byte — followed by one Directory Record per
-// child in 9.3 order.
+// child in 9.3 order (or, for jolietView, the same order: see
+// node.jolietDirExtent's doc comment).
 //
 // Records are packed into Logical Sectors under 6.8.1.1: a record that
 // would not fit in the remainder of the current sector starts the next
 // sector instead, and the unused bytes are set to (00). Per 6.8.1.3 the
-// recorded length of the directory includes that trailing slack, so
-// dirLength is always a whole number of sectors.
-func directorySectors(l *layout) (uint32, error) {
-	base := l.currentFragmentStart()
-	next := base
-	for _, d := range l.dirs {
-		n, err := directoryExtentSectors(d)
-		if err != nil {
-			return 0, err
+// recorded length of the directory includes that trailing slack, so the
+// length is always a whole number of sectors.
+func directorySectorsV(v hierarchyView) func(*layout) (uint32, error) {
+	return func(l *layout) (uint32, error) {
+		base := l.currentFragmentStart()
+		next := base
+		for _, d := range l.dirs {
+			n, err := directoryExtentSectorsV(v, d)
+			if err != nil {
+				return 0, err
+			}
+			v.setExtent(d, next)
+			v.setLength(d, n*LogicalSectorSize)
+			next += n
 		}
-		d.dirExtent = next
-		d.dirLength = n * LogicalSectorSize
-		next += n
+		return next - base, nil
 	}
-	return next - base, nil
 }
 
-func directoryExtentSectors(d *node) (uint32, error) {
+func directoryExtentSectorsV(v hierarchyView, d *node) (uint32, error) {
 	// The "." and ".." records: LEN_FI is 1 (odd), so 9.1.12's padding
 	// field is absent and LEN_DR is 33 + 1 = 34. That is exactly the size
 	// of the "Directory Record for Root Directory" field of the Primary
-	// Volume Descriptor (8.4.18, BP 157 to 190).
+	// Volume Descriptor (8.4.18, BP 157 to 190) and, identically, of the
+	// Supplementary Volume Descriptor (8.5.12, BP 157 to 190).
 	used := uint32(34 + 34)
 	sectors := uint32(1)
 	for _, c := range d.children {
 		for i := 0; i < numSections(c); i++ {
-			n := uint32(directoryRecordLen(c))
+			n := uint32(directoryRecordLenV(v, c))
 			if used+n > LogicalSectorSize {
 				sectors++
 				used = 0
@@ -439,15 +565,23 @@ func numSections(n *node) int {
 	return 1
 }
 
-// directoryRecordLen computes LEN_DR for a node's Directory Record.
+// directoryRecordLen computes LEN_DR for a node's ECMA-119 Directory
+// Record. See directoryRecordLenV.
+func directoryRecordLen(n *node) int { return directoryRecordLenV(isoView, n) }
+
+// directoryRecordLenV computes LEN_DR for a node's Directory Record in the
+// given hierarchy.
 //
 // ECMA-119 9.1: BP 1 to 33 are fixed fields, BP 34 onwards is the File
 // Identifier of length LEN_FI, and 9.1.12 adds a single (00) Padding Field
 // "only if the number in the Length of the File Identifier field is an even
 // number" — which keeps LEN_DR even. This package writes no System Use
-// field (9.1.13), so nothing follows the padding.
-func directoryRecordLen(n *node) int {
-	fi := len(fileIdentifier(n))
+// field (9.1.13), so nothing follows the padding. The rule is identical for
+// the Joliet hierarchy: joliet.c's joliet_sort_n_finish computes jreclen as
+// `offsetof(iso_directory_record, name[0]) + joliet_strlen(...) + 1`, the
+// same "fixed part + identifier + parity byte" shape.
+func directoryRecordLenV(v hierarchyView, n *node) int {
+	fi := len(v.fileID(n))
 	return 33 + fi + (1 - fi%2)
 }
 
