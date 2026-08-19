@@ -1,0 +1,98 @@
+// Package iso writes ISO 9660 (ECMA-119) CD-ROM filesystem images.
+//
+// The eventual goal of this package is to author bootable Windows
+// installation media byte-for-byte equivalent in *function* (not
+// necessarily in layout) to what Microsoft's oscdimg and the cdrkit
+// genisoimage tool produce, so that gowim can finish a rebuilt Windows
+// image without shelling out to an external ISO authoring tool. Windows
+// install media is not plain ISO 9660: it is a hybrid ("bridge") volume
+// carrying ISO 9660, UDF and an El Torito boot catalog over one shared set
+// of file extents. This package is being built in phases, and the phase
+// boundaries are documented under "Scope" below so that callers are never
+// misled about what is actually implemented.
+//
+// # Sources
+//
+// Nothing in this package is written from memory or from plausibility. Each
+// structure below is taken either from the normative standard or from a
+// real, shipping implementation, and the doc comment on each type cites the
+// clause or the source file it came from.
+//
+//   - ECMA-119, "Volume and File Structure of CDROM for Information
+//     Interchange", 4th edition (June 2019), published freely by Ecma
+//     International. This is the normative reference and is the same
+//     document as ISO 9660 plus its later amendments. Clause numbers cited
+//     throughout this package ("ECMA-119 9.1.6") refer to this edition. The
+//     4th edition was used rather than the original 2nd edition (December
+//     1987) because it folds in the ISO 9660:1999 / "version 2" Enhanced
+//     Volume Descriptor (8.5, 8.4.30) that genisoimage's -iso-level 4 emits
+//     and that a later phase of this package will need.
+//   - cdrkit 1.1.11 (Debian source package cdrkit_1.1.11.orig.tar.gz), the
+//     genisoimage program that currently produces this project's known-good
+//     bootable Windows 11 ISO. It is the highest-value cross-check
+//     available because its output can be diffed against this package's.
+//     Files consulted: genisoimage/iso9660.h (on-disk structure layout),
+//     genisoimage/genisoimage.c (option semantics and, critically, the
+//     image-wide fragment ordering built by the outputlist_insert calls
+//     near line 3517 onwards), genisoimage/write.c (the output_fragment
+//     mechanism), genisoimage/tree.c (name mangling, and the >4 GiB
+//     handling at line 1554), genisoimage/eltorito.c and genisoimage/udf.c
+//     (read for design purposes; not yet implemented here).
+//
+// # What is implemented (phase 1)
+//
+//   - The Primary Volume Descriptor (ECMA-119 8.4) and the Volume
+//     Descriptor Set Terminator (8.3).
+//   - Directory Records (9.1), including the reserved "." and ".." records
+//     required by 6.8.2.2, sorted per 9.3.
+//   - Type L and Type M Path Tables (9.4), ordered per 6.9.1.
+//   - Extent allocation over a 2048-byte logical sector / logical block.
+//   - Multiple File Sections per file (the ECMA-119 6.5.1 "multi-extent"
+//     mechanism, signalled by the File Flags bit 7 of 9.1.6), which is the
+//     standard-conformant way to record a file larger than the 32-bit Data
+//     Length field of 9.1.4 allows. This requires interchange Level 3
+//     (10.3); Levels 1 and 2 forbid it (10.1, 10.2).
+//
+// # What is deliberately NOT implemented yet
+//
+// These are designed for — the layout mechanism in layout.go reserves
+// ordered insertion points for each — but are not written:
+//
+//   - Joliet (a Supplementary Volume Descriptor with a UCS-2 escape
+//     sequence, ECMA-119 8.5.6) and its second directory hierarchy and
+//     Path Table Group.
+//   - The ISO 9660:1999 Enhanced Volume Descriptor that genisoimage's
+//     -iso-level 4 emits (8.5 with File Structure Version 2 per 8.4.30).
+//   - UDF (ECMA-167 / OSTA UDF 1.02), the layer that Windows setup
+//     actually relies on for files larger than 4 GiB.
+//   - El Torito, i.e. the Boot Record Volume Descriptor (8.2) at the head
+//     of the volume descriptor set plus a boot catalog.
+//
+// # Scope boundary
+//
+// This package deals only with laying out and serialising the filesystem
+// structures. It does not read ISO images, does not burn or verify media,
+// and knows nothing about WIM, PE or any other gowim format: callers hand
+// it a tree of names and content Sources and receive a byte stream.
+//
+// # Why the layout is a list of fragments
+//
+// The single most important design constraint on this package is that a
+// later UDF phase must be bolt-on rather than a rewrite. In a bridge
+// volume the ISO 9660 directory records and the UDF file entries describe
+// the *same* file data extents, so file data cannot simply be appended
+// wherever the ISO 9660 layer feels like it; UDF metadata occupies fixed
+// early sectors (and ECMA-167 additionally pins Anchor Volume Descriptor
+// Pointers to specific sectors near the start and end of the volume), and
+// so must be reserved before any file data is placed.
+//
+// genisoimage solves this with an ordered list of "output fragments", each
+// of which is first asked how many sectors it needs (assigning it a start
+// LBA) and only later asked to write its bytes; the UDF fragments are
+// inserted into that list ahead of the path tables, directory tree and file
+// data (genisoimage/genisoimage.c, the outputlist_insert sequence). This
+// package deliberately copies that shape — see layout.go — because it is
+// the structure that makes the later phases additive. Adding UDF, Joliet or
+// El Torito should mean inserting fragments at the right position in the
+// list, not changing how extents are assigned.
+package iso

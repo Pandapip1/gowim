@@ -6,6 +6,7 @@ use (
 	./component
 	./driver
 	./inf
+	./iso
 	./lzms
 	./lzx
 	./mum
