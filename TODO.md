@@ -2910,13 +2910,345 @@ next step depends on them, same discipline as the research above.
 
 ## ISO image creation subsystem (new)
 
-- [ ] Implement an ISO 9660 (+ Joliet and/or UDF bridge format, matching
-      what `oscdimg -udfver102` produces) filesystem writer.
+- [x] **Research first:** what the on-disk layout of a bootable Windows
+      install ISO actually is, and what an ECMA-119 core writer must do now
+      so that UDF and El Torito can be bolted on later without a redesign.
+      Done (2026-08-19). Sources actually read, not recalled:
+      - **ECMA-119 4th edition (June 2019)**, "Volume and File Structure of
+        CDROM for Information Interchange", freely published by Ecma
+        International
+        ([PDF](https://ecma-international.org/wp-content/uploads/ECMA-119_4th_edition_june_2019.pdf)).
+        The 4th edition rather than the original 2nd (December 1987)
+        because it folds in the ISO 9660:1999 "version 2" Enhanced Volume
+        Descriptor (§8.5, §8.4.30) that the reference producer emits. Also
+        pulled the 2nd (1987) and 5th (December 2024) editions for
+        cross-reference.
+      - **El Torito "Bootable CD-ROM Format Specification" v1.0**
+        (Phoenix/IBM, 1995),
+        [MIT PDOS mirror](https://pdos.csail.mit.edu/6.828/2017/readings/boot-cdrom.pdf).
+      - **ECMA-167 3rd edition (June 1997)**
+        ([PDF](https://ecma-international.org/wp-content/uploads/ECMA-167_3rd_edition_june_1997.pdf))
+        and **OSTA UDF 1.02**
+        ([13thmonkey.org mirror](http://www.13thmonkey.org/documentation/UDF/udf102.pdf);
+        `osta.org` resolves but times out on both 80 and 443 as of this
+        date) for the deferred UDF phase.
+      - **UEFI 2.10 §13.3.2.1 "ISO-9660 and El Torito"**
+        ([spec](https://uefi.org/specs/UEFI/2.10/13_Protocols_Media_Access.html)),
+        which is where platform ID `0xEF` is defined — El Torito 1.0 itself
+        defines only 0/1/2.
+      - **cdrkit 1.1.11**, the Debian `genisoimage` source
+        (`apt-get source genisoimage`, cached under
+        `/tmp/claude/repos/cdrkit-1.1.11/genisoimage/`), as the
+        cross-checkable real implementation: it produces this project's
+        known-good bootable image, so its output can be diffed against
+        ours. Files read: `iso9660.h`, `genisoimage.c`, `write.c`,
+        `tree.c`, `eltorito.c`, `udf.c`, `bootinfo.h`, `name.c`.
+      - Direct hex-dump measurement of real media on hand:
+        `/mnt/extra/isos/nano11go_test10.iso` (the known-good
+        genisoimage-produced image) and Microsoft's own oscdimg output
+        `Win11_25H2_English_x64_v2.iso`, `..._EnglishInternational_x64_v2.iso`,
+        `..._Arm64_v2.iso`, plus `Nano11_22H2_1.1_English_x64.iso`
+        (NTLite/IMAPI2). Read in place; nothing copied.
+
+      ### Measured sector map of the known-good reference image
+
+      `nano11go_test10.iso` is 3 786 950 656 bytes = 1 849 097 sectors, and
+      the PVD's Volume Space Size (ECMA-119 8.4.8) is exactly 1 849 097,
+      i.e. it covers the whole file including trailing padding.
+
+      | LBA | Content |
+      | --- | --- |
+      | 0–15 | System Area, zero (ECMA-119 6.2.1) |
+      | 16 | ISO PVD (`01 CD001 01`) |
+      | 17 | El Torito Boot Record VD (`00 CD001 01 "EL TORITO SPECIFICATION"`) |
+      | 18 | Enhanced VD (`02 CD001 02`, File Structure Version 2) |
+      | 19 | VD Set Terminator (`FF CD001 01`) |
+      | 20/21/22 | UDF Volume Recognition Sequence: `BEA01`/`NSR02`/`TEA01` |
+      | 23 | genisoimage "version block" (zeroed) |
+      | 24–31 | pad |
+      | 32–47 | UDF Main Volume Descriptor Sequence |
+      | 48–63 | UDF Reserve VDS (same content, re-tagged) |
+      | 64–65 | Logical Volume Integrity Descriptor + Terminating Descriptor |
+      | 66–255 | pad |
+      | **256** | Anchor Volume Descriptor Pointer |
+      | 257–258 | UDF File Set Descriptor + TD; partition starts at 257 |
+      | 259–1422 | UDF directory ICBs and per-file File Entries (**1 164 sectors**) |
+      | 1423–1426 | ISO Type L path table, then Type M (2 sectors each) |
+      | 1427– | ISO directory extents, then file data |
+      | 1848946–1849096 | 151 consecutive AVDP sectors (end anchor + 150 pad) |
+
+      The single most important structural fact is the ordering: **every
+      UDF metadata region is allocated in front of the ISO path tables and
+      directory extents**, and file data comes last. That is not
+      cosmetic — see the shared-extent finding below.
+
+      ### The shared-extent constraint (this is what shapes the writer)
+
+      In a bridge volume the ISO 9660 directory record and the UDF File
+      Entry for a file point at *the same bytes*. Confirmed in source:
+      `udf.c`'s `write_udf_file_entries()` builds each File Entry from
+      `read_733(de->isorec.extent) - lba_udf_partition_start`, i.e. it
+      literally reads the extent the ISO layer already assigned in
+      `write.c`'s `assign_file_addresses()`. There is one allocator, one
+      pass, one set of extents; UDF only converts absolute LBA to
+      partition-relative LBN.
+
+      Verified end-to-end on the real image: `/sources/install.wim`'s ISO
+      directory record gives extent 326740, and its UDF File Entry gives
+      `short_ad` lbn 326483 against a partition start of 257 — 326483 + 257
+      = 326740. Same bytes.
+
+      The consequence is that UDF metadata must be **reserved before file
+      data is placed**, and its size depends on the complete tree: `udf.c`
+      reserves one sector per regular file for its File Entry, and
+      `1 + ceil(FID_bytes/2048)` per directory. On the reference image that
+      is 1 164 sectors (~2.4 MB) for ~1 045 nodes. genisoimage's own header
+      comment notes the cost: *"there is an overhead of more than 2K per
+      file when using UDF"*.
+
+      genisoimage achieves this with three passes over an ordered fragment
+      list: a size pass that reserves fixed regions, a generate pass in
+      which `files_desc` (which has no size function at all) assigns file
+      extents, and a write pass that resolves the cross-references. **This
+      is the shape `iso/layout.go` deliberately copies.**
+
+      ### El Torito, as actually built for the two-entry Windows case
+
+      Boot Record Volume Descriptor at LBA 17 (ECMA-119 8.2, whose BP
+      72–2048 "Boot System Use" field the El Torito spec claims): type 0,
+      `CD001`, version 1, Boot System Identifier
+      `"EL TORITO SPECIFICATION"` zero-padded in BP 8–39, BP 40–71 left
+      zero, and a little-endian 32-bit pointer at BP 72–75 to the boot
+      catalog's LBA. Measured: 1542 on the reference image. Microsoft
+      writes a structurally identical descriptor.
+
+      The boot catalog is an ordinary one-sector file in the ISO tree
+      (`eltorito.c`'s `insert_boot_cat`), allocated by the normal
+      allocator and patched during the write pass. Its layout for the
+      two-entry case, measured on the reference image:
+
+      - `+0x00` **Validation Entry** (El Torito Figure 2): header ID `01`,
+        platform ID of the *first* entry (`0x00`, x86), 24-byte ID string,
+        checksum word, key bytes `55 AA`. Checksum rule: the sum of the
+        sixteen little-endian 16-bit words of the 32-byte entry, key bytes
+        included, is zero modulo 2^16. The spec's wording is only *"This
+        sum of all the words in this record should be 0"* — it states
+        neither a width nor a modulus — so the modulus is an
+        implementation fact, verified numerically against both genisoimage
+        and oscdimg output.
+      - `+0x20` **Initial/Default Entry** (Figure 3) for the BIOS image:
+        `88` bootable, media type 0 (no emulation), load segment 0
+        (meaning the traditional 0x7C0), sector count 8 (from
+        `-boot-load-size 8`, i.e. 8 × 512 bytes), Load RBA 2263 — which is
+        exactly the ISO directory record's extent for `/boot/etfsboot.com`.
+      - `+0x40` **Final Section Header** (Figure 4): `91`, platform `0xEF`,
+        one entry, zero ID.
+      - `+0x60` **Section Entry** (Figure 5) for the UEFI image: `88`,
+        media type 0, sector count 0x0B40 = 2880, Load RBA 1543 =
+        `/efi/microsoft/boot/efisys_noprompt.bin` (1 474 560 bytes = 2880 ×
+        512).
+
+      `-eltorito-alt-boot` emits nothing itself: `genisoimage.c` shows it
+      only calls `new_boot_entry()`, which nulls `current_boot_entry` so
+      the next `-e`/`-b` starts a fresh list node. The section header is
+      synthesised at catalog-build time for every entry after the first.
+
+      Two divergences from Microsoft worth knowing before implementing:
+
+      - **oscdimg sets the EFI entry's sector count to 1**, not the real
+        image size, deliberately invoking UEFI 2.10 §13.3.2.1's rule that
+        *"If the value of Sector Count is set to 0 or 1, EFI will assume
+        the system partition consumes the space from the beginning of the
+        'no emulation' image to the end of the CD-ROM."* genisoimage
+        writes the true size. Both boot.
+      - The Arm64 Microsoft ISO uses **no section headers at all**: the
+        Validation Entry itself carries platform `0xEF` and there is a
+        single Initial/Default Entry. UEFI §13.3.2.1 explicitly permits
+        the platform ID to live in either place.
+
+      **`-boot-info-table` is not benign, and the TODO's original wording
+      was wrong about it.** The old note said the boot blobs are "reused
+      verbatim from the source image". Under `-boot-info-table` they are
+      not. `bootinfo.h`'s `struct genisoimage_boot_info` is 56 bytes —
+      PVD LBA, boot image LBA, image length, and a checksum, each 32-bit
+      LE, plus 40 reserved bytes — written at **offset 8** of the boot
+      image, i.e. over bytes 8..63. Worse, `eltorito.c` opens the *source
+      file* `O_RDWR` and patches it on disk; the ISO merely copies the
+      already-mutated file. Byte-comparing the reference image's
+      `etfsboot.com` against Microsoft's shipped copy shows bytes 0–7 and
+      64–4095 identical and exactly **45 differing bytes, all inside
+      8..63**, where Microsoft's copy holds real executable code.
+      **oscdimg emits no boot info table at all.** Our writer should
+      default to not emitting one, and if it ever does, must patch the
+      output stream and never the caller's file.
+
+      ### Files larger than 4 GiB
+
+      ECMA-119 9.1.4 makes the Directory Record's Data Length a 32-bit
+      number (recorded twice, per 7.3.3), so one File Section caps at
+      4 GiB − 1. Three representations exist, and the evidence for each is
+      very different:
+
+      1. **ECMA-119 multi-extent.** 6.5.1 lets a file consist of several
+         File Sections, each with its own Directory Record in the same
+         directory, stitched by File Flags bit 7 (9.1.6 Table 10,
+         "Multi-Extent"). Legal only at interchange Level 3, since 10.1
+         and 10.2 both say each file shall consist of only one File
+         Section. **genisoimage never does this**: `ISO_MULTIEXTENT` is
+         defined in `iso9660.h` and referenced nowhere else in the entire
+         cdrkit tree.
+      2. **genisoimage's actual behaviour: silent truncation.**
+         `-allow-limited-size` is purely a permission gate — `tree.c` uses
+         it only to decide whether to abort — and the damage is
+         unconditional: `set_733()` takes an `unsigned int`, so a 64-bit
+         size is truncated modulo 2^32 into both halves of the directory
+         record, while block allocation still uses the full size. A
+         controlled test with a 5 000 000 000-byte file produced a single
+         directory record with size 705 032 704 (= 5e9 mod 2^32), the
+         Multi-Extent flag clear, and a correct 64-bit length in UDF.
+         genisoimage's own warning admits it: *"ISO9660, Joliet,
+         RockRidge, HFS will display incorrect size."*
+      3. **What Microsoft actually ships, and this is the headline
+         finding.** `Win11_25H2_English_x64_v2.iso` has a 7 578 075 168-byte
+         (7.06 GiB) `sources/install.wim`. Its **ISO 9660 filesystem
+         contains exactly one file**: the PVD root directory is at LBA 26
+         with a Data Length of **112 bytes** — `.`, `..` and `README.TXT`,
+         whose contents read *"This disc contains a 'UDF' file system and
+         requires an operating system that supports the ISO-13346 'UDF'
+         file system specification."* Independently re-measured here from
+         the PVD's embedded root Directory Record. The same holds for the
+         International x64 and Arm64 ISOs; the NTLite-produced Nano11 ISO
+         goes further with a 68-byte root, i.e. no files at all. In UDF the
+         file is one File Entry with `InformationLength` = 7 578 075 168
+         (ECMA-167 4/14.9 makes it Uint64) split into eight contiguous
+         `short_ad`s, because ECMA-167 4/14.14.1.1 gives the extent length
+         only 30 bits and UDF 1.02 §2 caps it at 2^30 − block size.
+
+      **Important scope correction, measured 2026-08-19:** the >4 GiB path
+      is *not* currently exercised by this project's own pipeline. The
+      known-good `nano11go_test10.iso` has a 2 921 177 772-byte
+      `install.wim`, and the working tree at
+      `/mnt/extra/nano11go-work/isox` has a 3 150 441 456-byte one — both
+      comfortably under 4 GiB. So genisoimage's truncation never fires
+      today. It would fire on an unmodified Windows image, which is what
+      makes this a design question rather than a live bug.
+
+      Decision for gowim: implement **option 1**, real ECMA-119 Level 3
+      multi-extent, in the core writer, because it is the only
+      representation that is correct at the ISO 9660 layer, and it costs
+      almost nothing given the writer already models a file as a list of
+      sections. But treat it as belt-and-braces, not as the shipping
+      mechanism: **UDF remains mandatory for large-file Windows media**,
+      because option 3 is the only one with field evidence behind it at
+      7 GiB. Flagged honestly as **UNVERIFIED**: no ISO on this machine
+      uses Level 3 multi-extent, so whether Windows setup, UEFI or
+      `etfsboot.com` accept it is untested. Do not rely on it alone.
+
+      ### What `-iso-level 4` means
+
+      Not an ECMA-119 level. `genisoimage.c`'s `case 4:` (whose own comment
+      mislabels it "ISO-9660:1988") means ISO 9660:1999: identifiers to 207
+      characters, no `;1` version suffix, lowercase and multiple dots
+      allowed, deep-directory relocation disabled. It also emits an
+      **Enhanced Volume Descriptor** — `if (iso9660_level > 3)
+      outputlist_insert(&xvoldesc_desc)` — which `write.c`'s `xpvd_write()`
+      builds from the *same* descriptor buffer as the PVD, changing only
+      the type byte (2), the version byte (2) and File Structure Version
+      (2, per ECMA-119 8.4.30/8.5.2). It points at the same single
+      directory tree; there is no second hierarchy, unlike Joliet.
+
+      ### Constraints the ECMA-119 core must honour for the later phases
+
+      1. **Two-phase allocation is mandatory.** Reserve every fixed region
+         first, assign file data second, serialise third. A single-pass or
+         streaming allocator cannot have UDF added later.
+      2. **One canonical LBA and one 64-bit size per file**, with the ISO
+         directory record and the UDF File Entry as two views of it.
+      3. **Sectors 0–255 must stay free for UDF.** ECMA-119 claims only
+         0–15 (6.2.1) plus the descriptor set from 16 (6.3). UDF needs 256
+         for the AVDP (UDF 1.02 §2.2.3) and 32–65 for the two VDS copies
+         and the LVID. genisoimage's own comment: *"Most of the space
+         before sector 256 on the disc (~480K) is wasted, because UDF
+         Bridge requires a pointer block at sector 256."* **The phase-1
+         writer does not yet honour this** — it puts the path tables at
+         LBA 18 — which is correct for a plain ISO 9660 image and becomes
+         a matter of inserting reservation fragments ahead of them when
+         UDF lands.
+      4. **The descriptor sequence must be gap-free and insertable in the
+         middle.** The El Torito Boot Record must come immediately after
+         the PVD (genisoimage says so in a comment and Microsoft does the
+         same), the Enhanced VD after that, the Terminator last, and
+         `BEA01` must immediately follow the Terminator: ECMA-167 2/8.3.1
+         Note 1 says the recognition sequence ends at the first sector
+         that is not a valid descriptor, so any gap truncates it.
+      5. **Volume Space Size includes the trailing pad**, whose length is a
+         UDF decision (AVDP at sector N plus run-out), so it cannot be
+         finalised until padding is decided.
+      6. **AVDP placement pins the image length.** ECMA-167 3/8.4.2.1 puts
+         anchor points at 256, N−256 and N; UDF 1.02 §2.2.3 narrows this to
+         "shall only be recorded at 2 of the following 3". Measured
+         reality: neither genisoimage nor oscdimg writes one at N−256 (it
+         would mean a hole in the middle of file data); both use 256 and N.
+         Since the AVDP at N must land on the last sector, the final image
+         length has to be fixed before the anchor is written.
+      7. **UDF descriptors are self-locating and CRC'd** (ECMA-167 3/7.2.8
+         Tag Location, 3/7.2.3 tag checksum, 3/7.2.6 CRC-ITU-T
+         x^16+x^12+x^5+1), so the Reserve VDS and every trailing AVDP must
+         be re-tagged rather than memcpy'd. Confirmed by measurement: each
+         of the 151 trailing anchors carries its own sector number.
+      8. **Directory hierarchy depth is fine, contrary to expectation.**
+         ECMA-119 6.8.2.1 caps a PVD-identified hierarchy at eight levels.
+         Measured 2026-08-19: the real extracted trees at
+         `/mnt/extra/nano11go-work/isox` and `isox_test10` are only **six**
+         levels deep (deepest is `/efi/microsoft/boot/cipolicies/active`),
+         so the limit is not binding for this project's workflow and the
+         Enhanced VD is not needed on depth grounds. (An earlier commit
+         message in this repo claimed these trees were ten levels deep;
+         that was a miscount of absolute-path components and is wrong.)
+
+- [x] Implement the ECMA-119 core writer. Done (2026-08-19): new `iso`
+      module, wired into `go.work`. Primary Volume Descriptor (8.4),
+      Volume Descriptor Set Terminator (8.3), Type L and Type M path
+      tables (9.4, ordered per 6.9.1), directory records (9.1, ordered per
+      9.3, with the reserved "." and ".." records of 6.8.2.2), 2048-byte
+      extent allocation, Level 1/2/3 identifier mangling, and Level 3
+      multi-extent files. Layout is the ordered sized-then-written
+      fragment list described above, with the insertion points for the
+      deferred phases marked in `layout.go`'s `buildLayout`.
+
+      Externally validated, since a writer checked only by its own reader
+      proves nothing: **isoinfo** (cdrkit), **xorriso** (libburnia, an
+      unrelated lineage) and **7z** all read the same tree back, and every
+      file extracts byte-identical to its input. Against a real 19 MB
+      Windows subtree (`isox/boot`, 40 files) our path list and every
+      file's SHA-256 match genisoimage's output exactly, with zero xorriso
+      FAILURE/SORRY events. Known legal-but-different divergences from
+      genisoimage on the same input: it emits an extra "version block"
+      sector and 150 sectors of CD-R run-out padding (ours defaults to
+      none), it rounds each path table up to an even block count
+      (`genisoimage.c`: `if (path_blocks & 1) path_blocks++`), and it
+      resolves name collisions with a zero-padded three-digit suffix where
+      we use a plain counter. None is visible to a reader.
+
+- [ ] Implement Joliet (a Supplementary Volume Descriptor per ECMA-119 8.5
+      with a UCS-2 escape sequence per 8.5.6, plus its own directory
+      hierarchy and Path Table Group) and/or the ISO 9660:1999 Enhanced
+      Volume Descriptor. Neither is needed for depth reasons (see the
+      measurement above); the Enhanced VD matters only if we want to match
+      `-iso-level 4` output field for field.
+- [ ] Implement the UDF bridge layer (ECMA-167 + OSTA UDF 1.02), reusing
+      the extents the ECMA-119 layer already assigned. This is the phase
+      that actually matters for large-file Windows media. Reserve sectors
+      32–65 and 256–258 plus the per-file File Entry block ahead of the
+      path tables, and decide the trailing-pad length before writing the
+      anchor at sector N.
 - [ ] Implement El Torito boot catalog support with two boot entries (BIOS
       boot sector + no-emulation UEFI boot image), matching `oscdimg`'s
       `-bootdata:2#p0,e,b<bios-boot>#pEF,e,b<efisys.bin>`. The boot-sector
-      blobs themselves (`etfsboot.com`, `efisys.bin`) are reused verbatim
-      from the source image, not generated.
+      blobs (`etfsboot.com`, `efisys.bin`) are reused verbatim from the
+      source image, not generated — and, per the finding above, we should
+      keep them genuinely verbatim by not emitting a boot info table,
+      which is what oscdimg does.
 
 ## Top-level orchestration
 
