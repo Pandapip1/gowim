@@ -72,9 +72,20 @@ func compress(data []byte) []byte {
 		head[h] = int32(pos)
 	}
 
-	findMatch := func(pos int) (bestLen int, bestOff int) {
+	// insertHash is insert, but for a hash already computed by a prior
+	// findMatch(pos) call at the same position, avoiding a redundant
+	// hash4 recomputation.
+	insertHash := func(pos int, h uint32) {
 		if pos+hashMinBytes > n {
-			return 0, 0
+			return
+		}
+		prevChain[pos] = head[h]
+		head[h] = int32(pos)
+	}
+
+	findMatch := func(pos int) (bestLen int, bestOff int, hash uint32, hashOK bool) {
+		if pos+hashMinBytes > n {
+			return 0, 0, 0, false
 		}
 		h := hash4(buf[pos:])
 		cand := head[h]
@@ -97,7 +108,7 @@ func compress(data []byte) []byte {
 			cand = prevChain[c]
 			chainLen++
 		}
-		return bestLen, bestOff
+		return bestLen, bestOff, h, true
 	}
 
 	encodeLiteral := func(b byte) {
@@ -127,29 +138,34 @@ func compress(data []byte) []byte {
 
 	pos := 0
 	for pos < n {
-		bestLen, bestOff := findMatch(pos)
+		bestLen, bestOff, h, hOK := findMatch(pos)
 		if bestLen >= minEncodeMatchLength {
 			// Simple lazy matching: see if starting one byte later
 			// yields a strictly longer match; if so, emit a
 			// literal now and let the next iteration take the
 			// better match.
 			if pos+1 < n {
-				nextLen, _ := findMatch(pos + 1)
+				nextLen, _, _, _ := findMatch(pos + 1)
 				if nextLen > bestLen {
 					encodeLiteral(buf[pos])
-					insert(pos)
+					insertHash(pos, h)
 					pos++
 					continue
 				}
 			}
 			encodeMatch(bestOff, bestLen)
-			for i := 0; i < bestLen; i++ {
+			insertHash(pos, h)
+			for i := 1; i < bestLen; i++ {
 				insert(pos + i)
 			}
 			pos += bestLen
 		} else {
 			encodeLiteral(buf[pos])
-			insert(pos)
+			if hOK {
+				insertHash(pos, h)
+			} else {
+				insert(pos)
+			}
 			pos++
 		}
 	}

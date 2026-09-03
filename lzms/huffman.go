@@ -92,7 +92,6 @@ func (h *huffmanCode) buildDecodeAids() {
 		}
 	}
 
-	h.symsByLength = h.symsByLength[:0]
 	var firstSymIdx [maxCodewordLen + 2]int
 	idx := 0
 	for l := 1; l <= maxCodewordLen; l++ {
@@ -100,18 +99,24 @@ func (h *huffmanCode) buildDecodeAids() {
 		idx += lenCounts[l]
 	}
 	// Fill in symbols, ascending by symbol value within each length
-	// (matches gen_codewords' assignment order).
+	// (matches gen_codewords' assignment order). Written directly into
+	// h.symsByLength (grown/truncated in place) rather than via a
+	// throwaway tmp slice, since this runs on every adaptive-Huffman
+	// rebuild for all three alphabets.
+	if cap(h.symsByLength) < idx {
+		h.symsByLength = make([]int, idx)
+	} else {
+		h.symsByLength = h.symsByLength[:idx]
+	}
 	cursor := firstSymIdx
-	tmp := make([]int, idx)
 	for sym := 0; sym < h.numSyms; sym++ {
 		l := h.lens[sym]
 		if l == 0 {
 			continue
 		}
-		tmp[cursor[l]] = sym
+		h.symsByLength[cursor[l]] = sym
 		cursor[l]++
 	}
-	h.symsByLength = append(h.symsByLength, tmp...)
 	h.firstSymIdx = firstSymIdx
 
 	var firstCode [maxCodewordLen + 2]uint32
