@@ -14,6 +14,14 @@ func newBitWriter() *bitWriter {
 	return &bitWriter{}
 }
 
+// newBitWriterCap is newBitWriter with a capacity hint for the output
+// buffer, to avoid some of writeBits' incremental append reallocation when
+// the caller already knows roughly how large the output will be (LZX
+// output is essentially never much larger than its input).
+func newBitWriterCap(hint int) *bitWriter {
+	return &bitWriter{out: make([]byte, 0, hint)}
+}
+
 // writeBits appends the low n bits of value (n <= 32) to the stream, most
 // significant of those n bits first.
 func (w *bitWriter) writeBits(value uint32, n uint) {

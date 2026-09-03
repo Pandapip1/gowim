@@ -488,7 +488,7 @@ func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
 		alignedLens2, alignedCodes2 = nil, nil
 	}
 
-	w := newBitWriter()
+	w := newBitWriterCap(len(data) + 64)
 	writeBlockInto(w, firstData, order, first, mainLens1, zeros, lenLens1, zerosLen, mainCodes1, lenCodes1, alignedLens1, alignedCodes1)
 	writeBlockInto(w, secondData, order, second, mainLens2, mainLens1, lenLens2, lenLens1, mainCodes2, lenCodes2, alignedLens2, alignedCodes2)
 	return w.flush()
@@ -505,7 +505,7 @@ func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte,
 	nMainSyms := numMainSyms(order)
 	zeros := make([]byte, nMainSyms)
 	zerosLen := make([]byte, lenCodeNumSymbols)
-	w := newBitWriter()
+	w := newBitWriterCap(len(data) + 64)
 	writeBlockInto(w, data, order, toks, mainLens, zeros, lenLens, zerosLen, mainCodes, lenCodes, alignedLens, alignedCodes)
 	return w.flush()
 }

@@ -208,7 +208,7 @@ func trySplitChunkStats(data []byte, order, nMainSyms int, toks []token) []byte 
 	segToks = append(segToks, toks[tokStart:])
 	segData = append(segData, data[byteStart:])
 
-	w := newBitWriter()
+	w := newBitWriterCap(len(data) + 64)
 	prevMainLens := make([]byte, nMainSyms)
 	prevLenLens := make([]byte, lenCodeNumSymbols)
 	for i, st := range segToks {

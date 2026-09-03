@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Pandapip1/gowim/lzms"
 	"github.com/Pandapip1/gowim/lzx"
@@ -62,17 +63,19 @@ func compressChunksParallel(data []byte, compressionType CompressionType, chunkS
 		wg       sync.WaitGroup
 		mu       sync.Mutex
 		firstErr error
+		next     uint64
 	)
-	next := uint64(0)
 	for w := uint64(0); w < workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for {
-				mu.Lock()
-				i := next
-				next++
-				mu.Unlock()
+				// A plain atomic increment (rather than mu) to claim
+				// the next chunk index: this is the only thing that
+				// needs synchronizing per chunk, and with many chunks
+				// across many workers a shared mutex here becomes real
+				// contention that a lock-free counter avoids.
+				i := atomic.AddUint64(&next, 1) - 1
 				if i >= numChunks {
 					return
 				}

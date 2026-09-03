@@ -236,6 +236,16 @@ func lzCopy(out []byte, pos, offset, length, blockEnd int) error {
 		return fmt.Errorf("lzx: %w: match length out of range", ErrInvalidData)
 	}
 	src := pos - offset
+	if offset >= length {
+		// Source and destination ranges are disjoint, so a bulk copy
+		// (vectorized by the runtime) produces the same bytes as the
+		// byte-by-byte loop below, just faster. When offset < length
+		// the ranges overlap (an RLE-style self-referential repeat)
+		// and each byte's source may itself have just been written by
+		// this same copy, so it must proceed one byte at a time.
+		copy(out[pos:pos+length], out[src:src+length])
+		return nil
+	}
 	for i := 0; i < length; i++ {
 		out[pos+i] = out[src+i]
 	}

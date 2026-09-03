@@ -114,10 +114,18 @@ func (h *nodeHeap) Pop() interface{} {
 func buildLengths(freqs *[numSymbols]uint32) [numSymbols]uint8 {
 	var lens [numSymbols]uint8
 
+	// All leaf and internal nodes (at most numSymbols leaves and
+	// numSymbols-1 internal nodes for a standard binary Huffman tree, so
+	// 2*numSymbols-1 total) come from one preallocated backing slice
+	// instead of individual heap allocations per node -- the capacity
+	// bound means backing never reallocates, so pointers taken into it
+	// stay valid for the tree's lifetime.
+	backing := make([]hnode, 0, 2*numSymbols-1)
 	nodes := make([]*hnode, 0, numSymbols)
 	for sym := 0; sym < numSymbols; sym++ {
 		if freqs[sym] > 0 {
-			nodes = append(nodes, &hnode{weight: uint64(freqs[sym]), seq: len(nodes), sym: sym})
+			backing = append(backing, hnode{weight: uint64(freqs[sym]), seq: len(nodes), sym: sym})
+			nodes = append(nodes, &backing[len(backing)-1])
 		}
 	}
 	switch len(nodes) {
@@ -137,7 +145,8 @@ func buildLengths(freqs *[numSymbols]uint32) [numSymbols]uint8 {
 	for h.Len() > 1 {
 		a := heap.Pop(&h).(*hnode)
 		b := heap.Pop(&h).(*hnode)
-		parent := &hnode{weight: a.weight + b.weight, seq: seq, sym: -1, left: a, right: b}
+		backing = append(backing, hnode{weight: a.weight + b.weight, seq: seq, sym: -1, left: a, right: b})
+		parent := &backing[len(backing)-1]
 		seq++
 		heap.Push(&h, parent)
 	}

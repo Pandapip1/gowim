@@ -1,5 +1,7 @@
 package lzms
 
+import "sync"
+
 // This file implements LZMS's x86 call/jump address translation filter,
 // ported from lzms_x86_filter() (and its helpers find_next_opcode_default()
 // and translate_if_needed()) in wimlib's src/lzms_common.c (see lzms.go for
@@ -47,6 +49,19 @@ func putLE32(b []byte, off int, v uint32) {
 	b[off+3] = byte(v >> 24)
 }
 
+// lastTargetUsagesPool recycles the 65536-entry int32 scratch buffer used by
+// x86Filter, which is called once per compressed chunk (compress()/
+// decompress() each call it once on their whole input). Without pooling,
+// every chunk would allocate and zero a fresh 256KB slice; pooling avoids
+// the repeated allocation while the filter's own loop still resets the
+// buffer's contents (a fresh sentinel value, not zero) before use, so a
+// reused buffer's stale contents from a prior call are never observed.
+var lastTargetUsagesPool = sync.Pool{
+	New: func() any {
+		return make([]int32, 65536)
+	},
+}
+
 // x86Filter translates relative addresses embedded in x86 instructions
 // into absolute addresses (undo == false), or undoes this translation
 // (undo == true). It is a direct port of lzms_x86_filter().
@@ -56,7 +71,8 @@ func x86Filter(data []byte, undo bool) {
 		return
 	}
 
-	lastTargetUsages := make([]int32, 65536)
+	lastTargetUsages := lastTargetUsagesPool.Get().([]int32)
+	defer lastTargetUsagesPool.Put(lastTargetUsages)
 	for i := range lastTargetUsages {
 		lastTargetUsages[i] = -int32(x86IDWindowSize) - 1
 	}
