@@ -165,7 +165,7 @@ const maxRefineItersHardCap = 32
 // function's doc for the actual iteration logic. Factored out from
 // refineParseWith only so callers that always want findMatches don't need
 // to name it explicitly.
-func refineParse(data []byte, order, nMainSyms int, initial costModel, o encodeOptions) (toks []token, mainLens, lenLens []byte, encoded []byte) {
+func refineParse(data []byte, order, nMainSyms int, initial costModel, o encodeOptions) (toks []token, mainLens, lenLens []byte, encoded []byte, alignedLens []byte, alignedCodes []uint16) {
 	return refineParseWith(data, order, nMainSyms, initial, func(d []byte, m costModel) []token {
 		return findMatchesWith(d, m, o)
 	}, o)
@@ -216,7 +216,7 @@ func refineParse(data []byte, order, nMainSyms int, initial costModel, o encodeO
 // place. The best result seen across all attempted rounds (which may
 // not be the last one) is what's returned, keeping the same "try both,
 // keep smaller" safety property as everywhere else in this encoder.
-func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse func([]byte, costModel) []token, o encodeOptions) (toks []token, mainLens, lenLens []byte, encoded []byte) {
+func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse func([]byte, costModel) []token, o encodeOptions) (toks []token, mainLens, lenLens []byte, encoded []byte, alignedLens []byte, alignedCodes []uint16) {
 	bestToks := parse(data, initial)
 	bestMainLens, bestLenLens := buildTables(bestToks, nMainSyms)
 	bestEncoded := encodeBlock(data, order, bestToks, bestMainLens, bestLenLens,
@@ -231,8 +231,16 @@ func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse
 	// affected chunk for no possible further benefit.
 	seen := map[uint64]bool{tokensFingerprint(bestToks): true}
 
-	alignedLens, _ := buildAlignedTable(bestToks)
-	model := costModel{mainLens: bestMainLens, lenLens: bestLenLens, alignedLens: alignedLens}
+	// bestAlignedLens/bestAlignedCodes track the aligned-offset table that
+	// corresponds to whichever round's tokens are currently bestToks --
+	// each round already builds a full buildAlignedTable(nt) below to feed
+	// its own resulting cost model, so retaining that exact result here
+	// whenever a round becomes the new best lets callers that need the
+	// winning round's aligned table (e.g. compressLookahead's own ALIGNED
+	// trial) reuse it instead of paying for a second, fully redundant
+	// buildAlignedTable(bestToks) call over the same tokens.
+	bestAlignedLens, bestAlignedCodes := buildAlignedTable(bestToks)
+	model := costModel{mainLens: bestMainLens, lenLens: bestLenLens, alignedLens: bestAlignedLens}
 	noImprove := 0
 	for i := 0; i < o.maxRefineIters && noImprove < o.refinePatience; i++ {
 		nt := parse(data, model)
@@ -241,10 +249,11 @@ func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse
 		enc := encodeBlock(data, order, nt, nMainLens, nLenLens,
 			canonicalCodewords(nMainLens, maxMainCodewordLen), canonicalCodewords(nLenLens, maxLenCodewordLen), nil, nil)
 
-		nAlignedLens, _ := buildAlignedTable(nt)
+		nAlignedLens, nAlignedCodes := buildAlignedTable(nt)
 		model = costModel{mainLens: nMainLens, lenLens: nLenLens, alignedLens: nAlignedLens}
 		if len(enc) < len(bestEncoded) {
 			bestToks, bestMainLens, bestLenLens, bestEncoded = nt, nMainLens, nLenLens, enc
+			bestAlignedLens, bestAlignedCodes = nAlignedLens, nAlignedCodes
 			noImprove = 0
 		} else {
 			noImprove++
@@ -254,7 +263,7 @@ func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse
 		}
 		seen[fp] = true
 	}
-	return bestToks, bestMainLens, bestLenLens, bestEncoded
+	return bestToks, bestMainLens, bestLenLens, bestEncoded, bestAlignedLens, bestAlignedCodes
 }
 
 // tokensFingerprint returns a compact, order-sensitive FNV-1a hash of toks'
@@ -293,7 +302,7 @@ func tokensFingerprint(toks []token) uint64 {
 // encodings -- the non-DP half of compress()'s work, split out so it can
 // run concurrently with compressOptimal (see compress above).
 func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel, o encodeOptions) []byte {
-	toks, mainLens, lenLens, refinedVerbatim := refineParse(data, order, nMainSyms, pass1Model, o)
+	toks, mainLens, lenLens, refinedVerbatim, alignedLens, alignedCodes := refineParse(data, order, nMainSyms, pass1Model, o)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
@@ -327,8 +336,11 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel, 
 		// identical either way, simply encoding both and keeping
 		// whichever is smaller is exact and correctness-preserving -- no
 		// cost model or estimation needed, unlike the match-selection
-		// heuristics above.
-		alignedLens, alignedCodes := buildAlignedTable(toks)
+		// heuristics above. alignedLens/alignedCodes here are the exact
+		// buildAlignedTable(toks) result already computed by
+		// refineParseWith's own winning round (see refineParse above) --
+		// reused as-is rather than recomputed, since toks is that same
+		// winning round's bestToks.
 		aligned = encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 	}()
 	if o.blockSplit {
@@ -382,7 +394,7 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel, 
 // compress() keeps whichever of the two is actually smaller rather than
 // assuming this one wins.
 func compressOptimal(data []byte, order, nMainSyms int, pass1Model costModel, o encodeOptions) []byte {
-	_, _, _, best := refineParseWith(data, order, nMainSyms, pass1Model, func(d []byte, m costModel) []token {
+	_, _, _, best, _, _ := refineParseWith(data, order, nMainSyms, pass1Model, func(d []byte, m costModel) []token {
 		return findMatchesOptimalWith(d, m, o)
 	}, o)
 	return best
