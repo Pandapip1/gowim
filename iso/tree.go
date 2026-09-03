@@ -302,9 +302,43 @@ type Options struct {
 	// Partition on a legacy MBR disk is identified purely by partition type
 	// 0xEF (distinct from the 0xEE "protective MBR" type a GPT disk uses),
 	// and the active flag is not part of how UEFI's own ESP discovery works.
-	// Disk signature and bootstrap code (bytes 0 to 445) are left zero: this
-	// package is UEFI-only and neither field affects ESP discovery.
+	// Disk signature and bootstrap code (bytes 0 to 445) are left zero unless
+	// LegacyBIOSMBR supplies real bootstrap bytes there (see below); neither
+	// field affects UEFI's own ESP discovery either way.
 	HybridMBR bool
+
+	// LegacyBIOSMBR, when non-nil, must be exactly 512 bytes: a1ive GRUB's
+	// boot_hybrid.img (grub-core/boot/i386/pc/boot.S built with -DHYBRID_BOOT,
+	// see contrib/grub/build-grub.sh in nano11-go), used as the System Area's
+	// base bytes instead of zero, with its embedded kernel_sector field (an
+	// 8-byte little-endian LBA at offset 0x1B0, in 512-byte sectors) patched
+	// to point at the BootEntry with Platform BootPlatformX86 -- the El
+	// Torito BIOS ("no emulation") image GRUB itself will jump straight into.
+	//
+	// Without this, a BIOS/CSM firmware booting a USB stick written
+	// byte-for-byte from this image (dd, GNOME Disks, etc.) has no El Torito
+	// CD-emulation context to fall back on: it just loads the MBR sector and
+	// runs it as ordinary x86 code, so *something* real has to be there. This
+	// is the same field xorriso's own `--grub2-mbr`/`--grub2-boot-info`
+	// (as used by grub-mkrescue) patches -- see libisofs/system_area.c's
+	// "Patch MBR for GRUB2" code, which computes the same value this package
+	// does: (BootEntry's own extent, in 2048-byte Logical Sectors) * 4 + 4.
+	// The "*4" converts to 512-byte sectors (matching HybridMBR's own
+	// convention); the "+4" skips exactly one 2048-byte block, because the
+	// registered image is expected to be cdboot.img (a fixed 2048 bytes --
+	// El Torito's own CD-emulation loader, functionally Windows'
+	// etfsboot.com) immediately followed by GRUB's diskboot.img/core.img,
+	// which is what `grub-mkimage -O i386-pc-eltorito` produces and is
+	// exactly what build-grub.sh's BIOS output is built from.
+	//
+	// This field is independent of HybridMBR: either can be set alone, or
+	// both together (the common case -- LegacyBIOSMBR's 8-byte patch at
+	// 0x1B0 and HybridMBR's partition entry at 0x1BE occupy disjoint byte
+	// ranges and coexist in the same System Area sector without conflict).
+	// Requires exactly one BootEntry with Platform BootPlatformX86 whose
+	// image is a single contiguous extent (true of every entry this package
+	// writes; see BootEntry).
+	LegacyBIOSMBR []byte
 }
 
 // maxSectionSizeDefault is the largest Data Length this package will put in

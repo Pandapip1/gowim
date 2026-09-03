@@ -234,6 +234,15 @@ type bootLayout struct {
 	hybridSet     bool
 	hybridLBA     uint32
 	hybridSectors uint16
+
+	// biosSet and biosLBA are filled in by finishBoot when
+	// Options.LegacyBIOSMBR is set: they record the resolved extent (in
+	// 2048-byte Logical Sectors) of the first BootEntry with Platform
+	// BootPlatformX86 -- the El Torito BIOS ("no emulation") image whose
+	// absolute LBA gets patched into the legacy MBR at offset 0x1B0. See
+	// hybridmbr.go.
+	biosSet bool
+	biosLBA uint32
 }
 
 // bootCatalogSource is the Source backing the generated boot catalog.
@@ -356,6 +365,18 @@ func (l *layout) initBoot() error {
 			return errors.New("iso: HybridMBR requires a BootEntry with Platform BootPlatformUEFI")
 		}
 	}
+	if l.b.opts.LegacyBIOSMBR != nil {
+		found := false
+		for _, e := range b.opts.BootEntries {
+			if e.Platform == BootPlatformX86 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("iso: LegacyBIOSMBR requires a BootEntry with Platform BootPlatformX86")
+		}
+	}
 	l.boot = bl
 	return nil
 }
@@ -437,6 +458,10 @@ func (l *layout) finishBoot() error {
 			l.boot.hybridSet = true
 			l.boot.hybridLBA = n.sections[0].extent
 			l.boot.hybridSectors = sectors
+		}
+		if l.b.opts.LegacyBIOSMBR != nil && e.Platform == BootPlatformX86 && !l.boot.biosSet {
+			l.boot.biosSet = true
+			l.boot.biosLBA = n.sections[0].extent
 		}
 
 		if e.BootInfoTable {
