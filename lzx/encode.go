@@ -80,7 +80,12 @@ func compress(input []byte, o encodeOptions) []byte {
 	// matcher.go's costModel doc and gowim's own TODO.md for why this
 	// package doesn't implement the latter).
 	toks1 := findMatchesWith(data, costModel{}, o)
-	mainLens1, lenLens1 := buildTables(toks1, nMainSyms)
+	// toks1 is used only here (by buildTables/tokenFreqs), not shared with
+	// buildAlignedTable or writeBlockInto for this exact slice, so there is
+	// no redundant offsetSlot work to dedup -- slots is still threaded
+	// through for signature consistency.
+	slots1 := tokenOffsetSlots(toks1)
+	mainLens1, lenLens1 := buildTables(toks1, nMainSyms, slots1)
 	pass1Model := costModel{mainLens: mainLens1, lenLens: lenLens1}
 
 	// The bounded-lookahead parse (and everything downstream of it:
@@ -218,8 +223,12 @@ func refineParse(data []byte, order, nMainSyms int, initial costModel, o encodeO
 // keep smaller" safety property as everywhere else in this encoder.
 func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse func([]byte, costModel) []token, o encodeOptions) (toks []token, mainLens, lenLens []byte, encoded []byte, alignedLens []byte, alignedCodes []uint16) {
 	bestToks := parse(data, initial)
-	bestMainLens, bestLenLens := buildTables(bestToks, nMainSyms)
-	bestEncoded := encodeBlock(data, order, bestToks, bestMainLens, bestLenLens,
+	// bestSlots is computed once here and reused below by buildTables
+	// (tokenFreqs), encodeBlock (writeBlockInto), and buildAlignedTable --
+	// all three run over this exact bestToks slice in this scope.
+	bestSlots := tokenOffsetSlots(bestToks)
+	bestMainLens, bestLenLens := buildTables(bestToks, nMainSyms, bestSlots)
+	bestEncoded := encodeBlock(data, order, bestToks, bestSlots, bestMainLens, bestLenLens,
 		canonicalCodewords(bestMainLens, maxMainCodewordLen), canonicalCodewords(bestLenLens, maxLenCodewordLen), nil, nil)
 
 	// seen guards against fixed points and longer cycles: since each
@@ -233,23 +242,26 @@ func refineParseWith(data []byte, order, nMainSyms int, initial costModel, parse
 
 	// bestAlignedLens/bestAlignedCodes track the aligned-offset table that
 	// corresponds to whichever round's tokens are currently bestToks --
-	// each round already builds a full buildAlignedTable(nt) below to feed
-	// its own resulting cost model, so retaining that exact result here
-	// whenever a round becomes the new best lets callers that need the
-	// winning round's aligned table (e.g. compressLookahead's own ALIGNED
-	// trial) reuse it instead of paying for a second, fully redundant
-	// buildAlignedTable(bestToks) call over the same tokens.
-	bestAlignedLens, bestAlignedCodes := buildAlignedTable(bestToks)
+	// each round already builds a full buildAlignedTable(nt, ntSlots)
+	// below to feed its own resulting cost model, so retaining that exact
+	// result here whenever a round becomes the new best lets callers that
+	// need the winning round's aligned table (e.g. compressLookahead's
+	// own ALIGNED trial) reuse it instead of paying for a second, fully
+	// redundant buildAlignedTable call over the same tokens.
+	bestAlignedLens, bestAlignedCodes := buildAlignedTable(bestToks, bestSlots)
 	model := costModel{mainLens: bestMainLens, lenLens: bestLenLens, alignedLens: bestAlignedLens}
 	noImprove := 0
 	for i := 0; i < o.maxRefineIters && noImprove < o.refinePatience; i++ {
 		nt := parse(data, model)
 		fp := tokensFingerprint(nt)
-		nMainLens, nLenLens := buildTables(nt, nMainSyms)
-		enc := encodeBlock(data, order, nt, nMainLens, nLenLens,
+		// ntSlots is likewise computed once and reused by buildTables,
+		// encodeBlock, and buildAlignedTable for this round's nt slice.
+		ntSlots := tokenOffsetSlots(nt)
+		nMainLens, nLenLens := buildTables(nt, nMainSyms, ntSlots)
+		enc := encodeBlock(data, order, nt, ntSlots, nMainLens, nLenLens,
 			canonicalCodewords(nMainLens, maxMainCodewordLen), canonicalCodewords(nLenLens, maxLenCodewordLen), nil, nil)
 
-		nAlignedLens, nAlignedCodes := buildAlignedTable(nt)
+		nAlignedLens, nAlignedCodes := buildAlignedTable(nt, ntSlots)
 		model = costModel{mainLens: nMainLens, lenLens: nLenLens, alignedLens: nAlignedLens}
 		if len(enc) < len(bestEncoded) {
 			bestToks, bestMainLens, bestLenLens, bestEncoded = nt, nMainLens, nLenLens, enc
@@ -337,11 +349,16 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel, 
 		// whichever is smaller is exact and correctness-preserving -- no
 		// cost model or estimation needed, unlike the match-selection
 		// heuristics above. alignedLens/alignedCodes here are the exact
-		// buildAlignedTable(toks) result already computed by
-		// refineParseWith's own winning round (see refineParse above) --
-		// reused as-is rather than recomputed, since toks is that same
-		// winning round's bestToks.
-		aligned = encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
+		// buildAlignedTable result already computed by refineParseWith's
+		// own winning round (see refineParse above) -- reused as-is
+		// rather than recomputed, since toks is that same winning
+		// round's bestToks. toks' slots aren't returned by refineParse
+		// (refineParseWith's internal slots are for whichever round is
+		// currently best mid-loop, not guaranteed to be the final
+		// returned one without widening its return contract further), so
+		// compute them once here for encodeBlock's own use.
+		toksSlots := tokenOffsetSlots(toks)
+		aligned = encodeBlock(data, order, toks, toksSlots, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 	}()
 	if o.blockSplit {
 		go func() {
@@ -471,10 +488,12 @@ func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
 	// Decide VERBATIM vs ALIGNED for one half, using the existing
 	// standalone single-block encoder for the comparison (same byte-length
 	// comparison the whole-chunk case above already uses).
-	chooseAligned := func(blkData []byte, blkToks []token, mainLens, lenLens []byte, mainCodes, lenCodes []uint16) (bool, []byte, []uint16) {
-		v := encodeBlock(blkData, order, blkToks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
-		aLens, aCodes := buildAlignedTable(blkToks)
-		a := encodeBlock(blkData, order, blkToks, mainLens, lenLens, mainCodes, lenCodes, aLens, aCodes)
+	// blkSlots must be tokenOffsetSlots(blkToks) for this exact blkToks
+	// slice -- shared here across both encodeBlock calls and buildAlignedTable.
+	chooseAligned := func(blkData []byte, blkToks []token, blkSlots []int, mainLens, lenLens []byte, mainCodes, lenCodes []uint16) (bool, []byte, []uint16) {
+		v := encodeBlock(blkData, order, blkToks, blkSlots, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+		aLens, aCodes := buildAlignedTable(blkToks, blkSlots)
+		a := encodeBlock(blkData, order, blkToks, blkSlots, mainLens, lenLens, mainCodes, lenCodes, aLens, aCodes)
 		return len(a) < len(v), aLens, aCodes
 	}
 
@@ -492,19 +511,26 @@ func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
+	// firstSlots/secondSlots are each computed once here and reused by
+	// buildTables (tokenFreqs), chooseAligned's buildAlignedTable and
+	// encodeBlock calls, and the final writeBlockInto call below -- all of
+	// which run over the exact same first/second toks slice respectively.
+	firstSlots := tokenOffsetSlots(first)
+	secondSlots := tokenOffsetSlots(second)
+
 	go func() {
 		defer wg.Done()
-		mainLens1, lenLens1 = buildTables(first, nMainSyms)
+		mainLens1, lenLens1 = buildTables(first, nMainSyms, firstSlots)
 		mainCodes1 = canonicalCodewords(mainLens1, maxMainCodewordLen)
 		lenCodes1 = canonicalCodewords(lenLens1, maxLenCodewordLen)
-		useAligned1, alignedLens1, alignedCodes1 = chooseAligned(firstData, first, mainLens1, lenLens1, mainCodes1, lenCodes1)
+		useAligned1, alignedLens1, alignedCodes1 = chooseAligned(firstData, first, firstSlots, mainLens1, lenLens1, mainCodes1, lenCodes1)
 	}()
 	go func() {
 		defer wg.Done()
-		mainLens2, lenLens2 = buildTables(second, nMainSyms)
+		mainLens2, lenLens2 = buildTables(second, nMainSyms, secondSlots)
 		mainCodes2 = canonicalCodewords(mainLens2, maxMainCodewordLen)
 		lenCodes2 = canonicalCodewords(lenLens2, maxLenCodewordLen)
-		useAligned2, alignedLens2, alignedCodes2 = chooseAligned(secondData, second, mainLens2, lenLens2, mainCodes2, lenCodes2)
+		useAligned2, alignedLens2, alignedCodes2 = chooseAligned(secondData, second, secondSlots, mainLens2, lenLens2, mainCodes2, lenCodes2)
 	}()
 	wg.Wait()
 
@@ -516,8 +542,8 @@ func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
 	}
 
 	w := newBitWriterCap(len(data) + 64)
-	writeBlockInto(w, firstData, order, first, mainLens1, zeros, lenLens1, zerosLen, mainCodes1, lenCodes1, alignedLens1, alignedCodes1)
-	writeBlockInto(w, secondData, order, second, mainLens2, mainLens1, lenLens2, lenLens1, mainCodes2, lenCodes2, alignedLens2, alignedCodes2)
+	writeBlockInto(w, firstData, order, first, firstSlots, mainLens1, zeros, lenLens1, zerosLen, mainCodes1, lenCodes1, alignedLens1, alignedCodes1)
+	writeBlockInto(w, secondData, order, second, secondSlots, mainLens2, mainLens1, lenLens2, lenLens1, mainCodes2, lenCodes2, alignedLens2, alignedCodes2)
 	return w.flush()
 }
 
@@ -528,10 +554,11 @@ func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
 // single-block case (compress() always uses it for whole-chunk encoding);
 // see writeBlockInto for the shared multi-block-capable core, used when
 // splitting a chunk into more than one block (see trySplitChunk).
-func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) []byte {
+// slots must be tokenOffsetSlots(toks) for this exact toks slice.
+func encodeBlock(data []byte, order int, toks []token, slots []int, mainLens, lenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) []byte {
 	nMainSyms := numMainSyms(order)
 	w := newBitWriterCap(len(data) + 64)
-	writeBlockInto(w, data, order, toks, mainLens, zeroMainLens[:nMainSyms], lenLens, zeroLenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
+	writeBlockInto(w, data, order, toks, slots, mainLens, zeroMainLens[:nMainSyms], lenLens, zeroLenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 	return w.flush()
 }
 
@@ -542,8 +569,9 @@ func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte,
 // lengths when chaining multiple blocks into one continuous bitstream (LZX
 // blocks are not byte-aligned relative to each other; only an UNCOMPRESSED
 // block realigns -- see decode.go), or an all-zero baseline for the first
-// (or only) block in a chunk.
-func writeBlockInto(w *bitWriter, data []byte, order int, toks []token, mainLens, prevMainLens, lenLens, prevLenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) {
+// (or only) block in a chunk. slots must be tokenOffsetSlots(toks) for this
+// exact toks slice.
+func writeBlockInto(w *bitWriter, data []byte, order int, toks []token, slots []int, mainLens, prevMainLens, lenLens, prevLenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) {
 	nMainSyms := numMainSyms(order)
 	useAligned := alignedLens != nil
 
@@ -575,15 +603,12 @@ func writeBlockInto(w *bitWriter, data []byte, order int, toks []token, mainLens
 	writeCodewordLens(w, lenLens, prevLenLens[:lenCodeNumSymbols])
 
 	// Literals and matches.
-	for _, t := range toks {
+	for i, t := range toks {
 		if !t.isMatch {
 			w.writeBits(uint32(mainCodes[t.literal]), uint(mainLens[t.literal]))
 			continue
 		}
-		slot := t.repeat
-		if slot < 0 {
-			slot = offsetSlot(uint32(t.offset))
-		}
+		slot := slots[i]
 		lengthField := t.length - minMatchLen
 		header := lengthField
 		if header > numPrimaryLens {
@@ -623,14 +648,15 @@ func writeBlockInto(w *bitWriter, data []byte, order int, toks []token, mainLens
 // match's extra offset value, at slots >= minAlignedOffsetSlot) from toks'
 // symbol frequencies. Repeat-offset matches never reach an aligned slot
 // (their slots are always 0-2, well below minAlignedOffsetSlot), so only
-// fresh matches contribute.
-func buildAlignedTable(toks []token) (lens []byte, codes []uint16) {
+// fresh matches contribute. slots must be tokenOffsetSlots(toks) for this
+// exact toks slice.
+func buildAlignedTable(toks []token, slots []int) (lens []byte, codes []uint16) {
 	freqs := make([]uint32, alignedCodeNumSymbols)
-	for _, t := range toks {
+	for i, t := range toks {
 		if !t.isMatch || t.repeat >= 0 {
 			continue
 		}
-		slot := offsetSlot(uint32(t.offset))
+		slot := slots[i]
 		if slot < minAlignedOffsetSlot {
 			continue
 		}
@@ -643,24 +669,23 @@ func buildAlignedTable(toks []token) (lens []byte, codes []uint16) {
 }
 
 // buildTables computes main/length Huffman codeword lengths from toks'
-// symbol frequencies, per the LZX main/length code alphabets.
-func buildTables(toks []token, nMainSyms int) (mainLens, lenLens []byte) {
-	mainFreqs, lenFreqs := tokenFreqs(toks, nMainSyms)
+// symbol frequencies, per the LZX main/length code alphabets. slots must be
+// tokenOffsetSlots(toks) for this exact toks slice.
+func buildTables(toks []token, nMainSyms int, slots []int) (mainLens, lenLens []byte) {
+	mainFreqs, lenFreqs := tokenFreqs(toks, nMainSyms, slots)
 	return buildLengths(mainFreqs, maxMainCodewordLen), buildLengths(lenFreqs, maxLenCodewordLen)
 }
 
 // tokenFreqs computes the raw main/length symbol frequency counts toks
 // would produce, per the LZX main/length code alphabets -- the shared
-// counting logic behind buildTables.
-func tokenFreqs(toks []token, nMainSyms int) (mainFreqs, lenFreqs []uint32) {
+// counting logic behind buildTables. slots must be tokenOffsetSlots(toks)
+// for this exact toks slice.
+func tokenFreqs(toks []token, nMainSyms int, slots []int) (mainFreqs, lenFreqs []uint32) {
 	mainFreqs = make([]uint32, nMainSyms)
 	lenFreqs = make([]uint32, lenCodeNumSymbols)
-	for _, t := range toks {
+	for i, t := range toks {
 		if t.isMatch {
-			slot := t.repeat
-			if slot < 0 {
-				slot = offsetSlot(uint32(t.offset))
-			}
+			slot := slots[i]
 			lengthField := t.length - minMatchLen
 			header := lengthField
 			if header > numPrimaryLens {
@@ -675,6 +700,39 @@ func tokenFreqs(toks []token, nMainSyms int) (mainFreqs, lenFreqs []uint32) {
 		}
 	}
 	return mainFreqs, lenFreqs
+}
+
+// tokenOffsetSlots precomputes, once per distinct toks slice, the exact
+// per-token slot value that tokenFreqs/buildAlignedTable/writeBlockInto each
+// independently recompute via offsetSlot: for a match token, t.repeat if
+// it's a repeat-offset match (>= 0), else offsetSlot(t.offset); for a
+// non-match (literal) token, -1 (a sentinel the three consumers never read,
+// since they all gate slot use behind t.isMatch or an equivalent check).
+//
+// A performance audit found offsetSlot -- a bounded but non-trivial linear
+// scan over up to maxOffsetSlots (50) table entries -- being called
+// redundantly on the same match token by up to 3 separate per-toks-element
+// loops (tokenFreqs, buildAlignedTable, writeBlockInto's inner loop) at call
+// sites where all three run over the exact same toks slice (see
+// refineParseWith, trySplitChunk, trySplitChunkStats). This computes that
+// value exactly once per token per distinct toks slice actually needed, so
+// callers can thread the result into whichever of those functions consume
+// it for that slice instead of each recomputing it. It does not change
+// which value is computed, so it cannot change compressed output.
+func tokenOffsetSlots(toks []token) []int {
+	slots := make([]int, len(toks))
+	for i, t := range toks {
+		if !t.isMatch {
+			slots[i] = -1
+			continue
+		}
+		slot := t.repeat
+		if slot < 0 {
+			slot = offsetSlot(uint32(t.offset))
+		}
+		slots[i] = slot
+	}
+	return slots
 }
 
 // offsetSlot returns the offset slot (>= 3) whose range

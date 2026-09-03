@@ -212,19 +212,23 @@ func trySplitChunkStats(data []byte, order, nMainSyms int, toks []token) []byte 
 	prevMainLens := zeroMainLens[:nMainSyms]
 	prevLenLens := zeroLenLens
 	for i, st := range segToks {
-		mainLens, lenLens := buildTables(st, nMainSyms)
+		// stSlots is computed once per segment and reused by buildTables
+		// (tokenFreqs), buildAlignedTable, and both encodeBlock/writeBlockInto
+		// calls below -- all of which run over this exact st slice.
+		stSlots := tokenOffsetSlots(st)
+		mainLens, lenLens := buildTables(st, nMainSyms, stSlots)
 		mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 		lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
 		sd := segData[i]
-		v := encodeBlock(sd, order, st, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
-		alignedLens, alignedCodes := buildAlignedTable(st)
-		a := encodeBlock(sd, order, st, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
+		v := encodeBlock(sd, order, st, stSlots, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+		alignedLens, alignedCodes := buildAlignedTable(st, stSlots)
+		a := encodeBlock(sd, order, st, stSlots, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 		if len(a) >= len(v) {
 			alignedLens, alignedCodes = nil, nil
 		}
 
-		writeBlockInto(w, sd, order, st, mainLens, prevMainLens, lenLens, prevLenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
+		writeBlockInto(w, sd, order, st, stSlots, mainLens, prevMainLens, lenLens, prevLenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 		prevMainLens, prevLenLens = mainLens, lenLens
 	}
 	return w.flush()

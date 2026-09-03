@@ -374,14 +374,15 @@ func TestAlignedBlockCanBeSmaller(t *testing.T) {
 		toks = append(toks, token{isMatch: true, offset: int(base + extra), length: 10, repeat: -1})
 	}
 
-	mainLens, lenLens := buildTables(toks, nMainSyms)
+	slots := tokenOffsetSlots(toks)
+	mainLens, lenLens := buildTables(toks, nMainSyms, slots)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
 	data := make([]byte, defaultBlockSize) // dummy; only its length is used for the block header
-	verbatim := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
-	alignedLens, alignedCodes := buildAlignedTable(toks)
-	aligned := encodeBlock(data, order, toks, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
+	verbatim := encodeBlock(data, order, toks, slots, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+	alignedLens, alignedCodes := buildAlignedTable(toks, slots)
+	aligned := encodeBlock(data, order, toks, slots, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 
 	if len(aligned) >= len(verbatim) {
 		t.Fatalf("expected ALIGNED encoding to be smaller for skewed low-offset-bits data: verbatim=%d aligned=%d", len(verbatim), len(aligned))
@@ -548,7 +549,7 @@ func TestTrySplitChunkProducesValidSplit(t *testing.T) {
 	lzxPreprocess(pre)
 
 	toks1 := findMatches(pre, costModel{})
-	mainLens1, lenLens1 := buildTables(toks1, nMainSyms)
+	mainLens1, lenLens1 := buildTables(toks1, nMainSyms, tokenOffsetSlots(toks1))
 	toks := findMatches(pre, costModel{mainLens: mainLens1, lenLens: lenLens1})
 
 	split := trySplitChunk(pre, order, toks, nMainSyms)
@@ -601,10 +602,11 @@ func findMatchesOptimalRoundTrip(t *testing.T, name string, orig []byte) {
 
 	order, _ := windowOrder(len(pre))
 	nMainSyms := numMainSyms(order)
-	mainLens, lenLens := buildTables(toks, nMainSyms)
+	slots := tokenOffsetSlots(toks)
+	mainLens, lenLens := buildTables(toks, nMainSyms, slots)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
-	out := encodeBlock(pre, order, toks, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+	out := encodeBlock(pre, order, toks, slots, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
 
 	got, err := Decompress(out, len(orig))
 	if err != nil {
@@ -827,7 +829,7 @@ func TestTrySplitChunkStatsProducesValidSplit(t *testing.T) {
 	lzxPreprocess(pre)
 
 	toks1 := findMatches(pre, costModel{})
-	mainLens1, lenLens1 := buildTables(toks1, nMainSyms)
+	mainLens1, lenLens1 := buildTables(toks1, nMainSyms, tokenOffsetSlots(toks1))
 	toks := findMatches(pre, costModel{mainLens: mainLens1, lenLens: lenLens1})
 
 	split := trySplitChunkStats(pre, order, nMainSyms, toks)
