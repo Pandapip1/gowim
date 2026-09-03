@@ -275,20 +275,22 @@ func canonicalCodewords(lens []byte, maxLen int) []uint16 {
 // per-symbol codeword lengths, using the classic "first code / first symbol
 // index per length" bit-at-a-time algorithm.
 type huffDecoder struct {
-	maxLen      int
-	count       []int    // count[l] = number of codewords of length l
-	firstCode   []uint32 // firstCode[l] = numeric value of the first codeword of length l
-	firstSymIdx []int    // firstSymIdx[l] = index into symsByLen of the first symbol of length l
-	symsByLen   []uint16 // symbols sorted by (length asc, symbol asc), grouped by length
+	maxLen int
+	// count/firstCode/firstSymIdx are fixed-size arrays rather than
+	// slices: every call site passes one of the package's four
+	// maxLen constants (maxMainCodewordLen, maxLenCodewordLen,
+	// maxPrecodeCodewordLen, maxAlignedCodewordLen), all <=
+	// maxMainCodewordLen (16), so sizing them to the largest possible
+	// maxLen+1 lets them live inline in *huffDecoder's own allocation
+	// instead of needing 3 separate slice allocations per call.
+	count       [maxMainCodewordLen + 1]int    // count[l] = number of codewords of length l
+	firstCode   [maxMainCodewordLen + 1]uint32 // firstCode[l] = numeric value of the first codeword of length l
+	firstSymIdx [maxMainCodewordLen + 1]int    // firstSymIdx[l] = index into symsByLen of the first symbol of length l
+	symsByLen   []uint16                       // symbols sorted by (length asc, symbol asc), grouped by length
 }
 
 func newHuffDecoder(lens []byte, maxLen int) *huffDecoder {
-	d := &huffDecoder{
-		maxLen:      maxLen,
-		count:       make([]int, maxLen+1),
-		firstCode:   make([]uint32, maxLen+1),
-		firstSymIdx: make([]int, maxLen+1),
-	}
+	d := &huffDecoder{maxLen: maxLen}
 	for _, l := range lens {
 		if l > 0 {
 			d.count[l]++
@@ -303,7 +305,7 @@ func newHuffDecoder(lens []byte, maxLen int) *huffDecoder {
 		idx += d.count[l]
 	}
 	d.symsByLen = make([]uint16, idx)
-	next := append([]int(nil), d.firstSymIdx...)
+	next := d.firstSymIdx // [maxMainCodewordLen+1]int is a value type: this copies it
 	for sym, l := range lens {
 		if l == 0 {
 			continue
@@ -317,15 +319,29 @@ func newHuffDecoder(lens []byte, maxLen int) *huffDecoder {
 // decode reads one Huffman-encoded symbol from r. If the code is degenerate
 // (no symbols at all), it returns 0, false.
 func (d *huffDecoder) decode(r *bitReader) (uint16, bool) {
+	// Ensure once for the whole walk (d.maxLen <= 16, well under
+	// ensure's 32-bit limit) and do the per-bit work against local
+	// copies of r.buf/r.nbits, writing them back only once a symbol is
+	// found (or the loop exhausts maxLen). buf>>63 then buf<<=1 is
+	// exactly what peek(1) then remove(1) compute, so this is bit-for-
+	// bit identical to calling r.readBits(1) in the loop -- just without
+	// re-entering ensure/peek/remove and round-tripping through r's
+	// fields on every one of up to maxLen iterations.
+	r.ensure(uint(d.maxLen))
+	buf, nbits := r.buf, r.nbits
 	code := uint32(0)
 	for l := 1; l <= d.maxLen; l++ {
-		code = (code << 1) | r.readBits(1)
+		code = (code << 1) | uint32(buf>>63)
+		buf <<= 1
+		nbits--
 		if d.count[l] > 0 {
 			rel := code - d.firstCode[l]
 			if rel < uint32(d.count[l]) {
+				r.buf, r.nbits = buf, nbits
 				return d.symsByLen[d.firstSymIdx[l]+int(rel)], true
 			}
 		}
 	}
+	r.buf, r.nbits = buf, nbits
 	return 0, false
 }

@@ -129,7 +129,12 @@ func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []tok
 		if pos+3 > n {
 			return nil
 		}
-		var cands []freshCandidate
+		// Capacity hint: most positions find only a handful of strictly-
+		// improving candidates along the walk, well under
+		// maxFreshCandidates, so a small fixed hint avoids most of the
+		// early reallocations without over-allocating for the common
+		// case.
+		cands := make([]freshCandidate, 0, 8)
 		bestLen := 0
 		cur := head[hash(pos)]
 		depth := 0
@@ -299,23 +304,6 @@ func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []tok
 		return flatLiteralBits
 	}
 
-	// repeatLengthSamples bounds how many distinct lengths are tried per
-	// repeat-offset candidate: the full length found, plus a midpoint
-	// shorter length (letting the DP "under-shoot" a long repeat run if a
-	// different choice afterward is cheaper), rather than every length
-	// from minMatchLen up to the full length -- trying every length is
-	// what a from-scratch optimal parser would do, but is unbounded cost
-	// for highly repetitive input (a run of identical bytes can have a
-	// repeat length up to maxMatchLen at nearly every position). How many
-	// samples to take is Options.DPRepeatLengthSamples (options.go): at 1
-	// only the full length is tried, halving the repeat-edge count.
-	repeatLengthSamples := func(full int) []int {
-		if full <= minMatchLen+4 || o.repeatLengthSamples < 2 {
-			return []int{full}
-		}
-		return []int{full, full / 2}
-	}
-
 	for i := 0; i < n; i++ {
 		cur := states[i]
 		if len(cur) == 0 {
@@ -337,12 +325,28 @@ func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []tok
 		// from position i, so this is computed once per position, not
 		// once per state.
 		hash2Offset, hash2OK := -1, false
+		var hash2Cost int
 		if q := prevOcc2[i]; o.dpHash2 && q >= 0 {
 			off2 := i - int(q)
 			slot2 := offsetSlot(uint32(off2))
 			if numChars+slot2*numLenHeaders < nMainSyms {
 				hash2Offset, hash2OK = off2, true
+				// Depends only on slot2/off2, not on which beam state
+				// is relaxing from position i, so compute it once per
+				// position rather than once per state below.
+				hash2Cost = model.matchCost(slot2, minMatchLen) + model.offsetExtraCost(slot2, off2)
 			}
+		}
+
+		// Per-candidate cost depends only on cand/model, not on which
+		// beam state is relaxing from position i, so compute it once
+		// per position (here) rather than once per (state, candidate)
+		// pair (inside the per-state loop below) -- same values, same
+		// mergeState call order, just computed earlier.
+		freshCosts := make([]int, len(freshCands))
+		for fi, cand := range freshCands {
+			slot := offsetSlot(uint32(cand.offset))
+			freshCosts[fi] = model.matchCost(slot, cand.length) + model.offsetExtraCost(slot, cand.offset)
 		}
 
 		for si, s := range cur {
@@ -358,7 +362,30 @@ func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []tok
 				if l < minMatchLen {
 					continue
 				}
-				for _, length := range repeatLengthSamples(l) {
+				// Inline of the former repeatLengthSamples(l) helper:
+				// the full length found, plus a midpoint shorter
+				// length (letting the DP "under-shoot" a long repeat
+				// run if a different choice afterward is cheaper),
+				// rather than every length from minMatchLen up to the
+				// full length -- trying every length is what a
+				// from-scratch optimal parser would do, but is
+				// unbounded cost for highly repetitive input. How many
+				// samples to take is Options.DPRepeatLengthSamples
+				// (options.go): at 1 only the full length is tried,
+				// halving the repeat-edge count. Written as a fixed
+				// [2]int + count instead of returning a []int so this
+				// doesn't heap-allocate on every (state, recent-offset)
+				// pair -- up to beamWidth*numRecentOffsets times per
+				// position.
+				var lens [2]int
+				lens[0] = l
+				numLens := 1
+				if l > minMatchLen+4 && o.repeatLengthSamples >= 2 {
+					lens[1] = l / 2
+					numLens = 2
+				}
+				for li := 0; li < numLens; li++ {
+					length := lens[li]
 					if length < minMatchLen {
 						continue
 					}
@@ -368,20 +395,15 @@ func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []tok
 				}
 			}
 
-			for _, cand := range freshCands {
-				slot := offsetSlot(uint32(cand.offset))
-				extraBits := model.offsetExtraCost(slot, cand.offset)
-				c := model.matchCost(slot, cand.length) + extraBits
+			for fi, cand := range freshCands {
+				c := freshCosts[fi]
 				nq := applyMatch(s.queue, -1, cand.offset)
 				mergeState(i+cand.length, s.cost+c, nq, dpEdge{isMatch: true, offset: cand.offset, length: cand.length, repeat: -1, from: i, fromState: si})
 			}
 
 			if hash2OK {
-				slot2 := offsetSlot(uint32(hash2Offset))
-				extraBits2 := model.offsetExtraCost(slot2, hash2Offset)
-				c2 := model.matchCost(slot2, minMatchLen) + extraBits2
 				nq2 := applyMatch(s.queue, -1, hash2Offset)
-				mergeState(i+minMatchLen, s.cost+c2, nq2, dpEdge{isMatch: true, offset: hash2Offset, length: minMatchLen, repeat: -1, from: i, fromState: si})
+				mergeState(i+minMatchLen, s.cost+hash2Cost, nq2, dpEdge{isMatch: true, offset: hash2Offset, length: minMatchLen, repeat: -1, from: i, fromState: si})
 			}
 		}
 

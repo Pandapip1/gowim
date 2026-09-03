@@ -2,6 +2,21 @@ package lzx
 
 import "sync"
 
+// zeroMainLens/zeroLenLens are read-only all-zero "previous block" length
+// baselines, shared across every encodeBlock/trySplitChunk call instead of
+// each allocating its own. writeCodewordLens/codewordLenTokens only ever
+// read prevLens (delta() does prevLens[pos]), never write it, and the
+// content is always all-zero bytes regardless of nMainSyms/order -- so
+// sharing one backing array (safely, since it's never mutated, including
+// across the concurrent goroutines in trySplitChunk/compressLookahead) is
+// output-identical to each call allocating its own zeroed slice.
+// zeroMainLens is sized to the largest possible nMainSyms (256 numChars +
+// 50 maxOffsetSlots * 8 numLenHeaders = 656; see numMainSyms).
+var (
+	zeroMainLens = make([]byte, numChars+maxOffsetSlots*numLenHeaders)
+	zeroLenLens  = make([]byte, lenCodeNumSymbols)
+)
+
 // compress implements this package's WIM-flavor LZX encoder. Per the scope
 // documented in lzx.go, it:
 //
@@ -438,8 +453,8 @@ func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
 	// completely independent of each other (each only reads its own
 	// half's data/tokens), so run them concurrently in two goroutines
 	// rather than one after the other.
-	zeros := make([]byte, nMainSyms)
-	zerosLen := make([]byte, lenCodeNumSymbols)
+	zeros := zeroMainLens[:nMainSyms]
+	zerosLen := zeroLenLens
 
 	// Decide VERBATIM vs ALIGNED for one half, using the existing
 	// standalone single-block encoder for the comparison (same byte-length
@@ -503,10 +518,8 @@ func trySplitChunk(data []byte, order int, toks []token, nMainSyms int) []byte {
 // splitting a chunk into more than one block (see trySplitChunk).
 func encodeBlock(data []byte, order int, toks []token, mainLens, lenLens []byte, mainCodes, lenCodes []uint16, alignedLens []byte, alignedCodes []uint16) []byte {
 	nMainSyms := numMainSyms(order)
-	zeros := make([]byte, nMainSyms)
-	zerosLen := make([]byte, lenCodeNumSymbols)
 	w := newBitWriterCap(len(data) + 64)
-	writeBlockInto(w, data, order, toks, mainLens, zeros, lenLens, zerosLen, mainCodes, lenCodes, alignedLens, alignedCodes)
+	writeBlockInto(w, data, order, toks, mainLens, zeroMainLens[:nMainSyms], lenLens, zeroLenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
 	return w.flush()
 }
 
@@ -696,7 +709,9 @@ type codewordLenToken struct {
 }
 
 func codewordLenTokens(lens, prevLens []byte) []codewordLenToken {
-	var toks []codewordLenToken
+	// At most one token per input position (fewer once runs compress),
+	// so this capacity hint is an exact upper bound.
+	toks := make([]codewordLenToken, 0, len(lens))
 	n := len(lens)
 
 	delta := func(pos int) int {
