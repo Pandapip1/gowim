@@ -70,6 +70,14 @@ func compress(input []byte, o encodeOptions) []byte {
 	}
 	nMainSyms := numMainSyms(order)
 
+	// prevOcc2 (buildHash2PrevOcc's most-recent-2-byte-occurrence table) is
+	// a pure function of data alone -- see its own doc in matcher.go -- so
+	// it's computed exactly once per chunk, here, and threaded through
+	// every parse call below (pass 1, refineParseWith's initial parse, and
+	// each refinement round, across both the lookahead and DP parsers)
+	// instead of each one separately rebuilding an identical table.
+	prevOcc2 := buildHash2PrevOcc(data)
+
 	// Two-pass parse: pass 1 uses a flat, data-independent cost estimate
 	// (costModel{}) to choose among candidate matches, since no real
 	// Huffman codeword lengths exist yet. Its resulting token frequencies
@@ -79,7 +87,7 @@ func compress(input []byte, o encodeOptions) []byte {
 	// optimization a full iterative optimal parser would do (see
 	// matcher.go's costModel doc and gowim's own TODO.md for why this
 	// package doesn't implement the latter).
-	toks1 := findMatchesWith(data, costModel{}, o)
+	toks1 := findMatchesWith(data, costModel{}, o, prevOcc2)
 	// toks1 is used only here (by buildTables/tokenFreqs), not shared with
 	// buildAlignedTable or writeBlockInto for this exact slice, so there is
 	// no redundant offsetSlot work to dedup -- slots is still threaded
@@ -99,7 +107,7 @@ func compress(input []byte, o encodeOptions) []byte {
 	// dominates compress()'s cost. With it set there is nothing to overlap,
 	// so the lookahead parse simply runs on this goroutine.
 	if !o.dp {
-		return compressLookahead(data, order, nMainSyms, pass1Model, o)
+		return compressLookahead(data, order, nMainSyms, pass1Model, o, prevOcc2)
 	}
 
 	var lookaheadBest, optBest []byte
@@ -107,11 +115,11 @@ func compress(input []byte, o encodeOptions) []byte {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		lookaheadBest = compressLookahead(data, order, nMainSyms, pass1Model, o)
+		lookaheadBest = compressLookahead(data, order, nMainSyms, pass1Model, o, prevOcc2)
 	}()
 	go func() {
 		defer wg.Done()
-		optBest = compressOptimal(data, order, nMainSyms, pass1Model, o)
+		optBest = compressOptimal(data, order, nMainSyms, pass1Model, o, prevOcc2)
 	}()
 	wg.Wait()
 
@@ -170,9 +178,9 @@ const maxRefineItersHardCap = 32
 // function's doc for the actual iteration logic. Factored out from
 // refineParseWith only so callers that always want findMatches don't need
 // to name it explicitly.
-func refineParse(data []byte, order, nMainSyms int, initial costModel, o encodeOptions) (toks []token, mainLens, lenLens []byte, encoded []byte, alignedLens []byte, alignedCodes []uint16) {
+func refineParse(data []byte, order, nMainSyms int, initial costModel, o encodeOptions, prevOcc2 []int32) (toks []token, mainLens, lenLens []byte, encoded []byte, alignedLens []byte, alignedCodes []uint16) {
 	return refineParseWith(data, order, nMainSyms, initial, func(d []byte, m costModel) []token {
-		return findMatchesWith(d, m, o)
+		return findMatchesWith(d, m, o, prevOcc2)
 	}, o)
 }
 
@@ -313,8 +321,8 @@ func tokensFingerprint(toks []token) uint64 {
 // smallest of its VERBATIM, ALIGNED, 2-block-split, and splitStats
 // encodings -- the non-DP half of compress()'s work, split out so it can
 // run concurrently with compressOptimal (see compress above).
-func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel, o encodeOptions) []byte {
-	toks, mainLens, lenLens, refinedVerbatim, alignedLens, alignedCodes := refineParse(data, order, nMainSyms, pass1Model, o)
+func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel, o encodeOptions, prevOcc2 []int32) []byte {
+	toks, mainLens, lenLens, refinedVerbatim, alignedLens, alignedCodes := refineParse(data, order, nMainSyms, pass1Model, o, prevOcc2)
 	mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 	lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
@@ -410,9 +418,9 @@ func compressLookahead(data []byte, order, nMainSyms int, pass1Model costModel, 
 // input (see optimal.go's doc for the precise scope/limitation), so
 // compress() keeps whichever of the two is actually smaller rather than
 // assuming this one wins.
-func compressOptimal(data []byte, order, nMainSyms int, pass1Model costModel, o encodeOptions) []byte {
+func compressOptimal(data []byte, order, nMainSyms int, pass1Model costModel, o encodeOptions, prevOcc2 []int32) []byte {
 	_, _, _, best, _, _ := refineParseWith(data, order, nMainSyms, pass1Model, func(d []byte, m costModel) []token {
-		return findMatchesOptimalWith(d, m, o)
+		return findMatchesOptimalWith(d, m, o, prevOcc2)
 	}, o)
 	return best
 }

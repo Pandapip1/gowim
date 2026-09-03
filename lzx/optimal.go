@@ -57,10 +57,16 @@ package lzx
 // takes the resolved caller-facing knobs (see Options in options.go), which
 // is what compressOptimal threads through.
 func findMatchesOptimal(data []byte, model costModel) []token {
-	return findMatchesOptimalWith(data, model, defaultEncodeOptions())
+	return findMatchesOptimalWith(data, model, defaultEncodeOptions(), buildHash2PrevOcc(data))
 }
 
-func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []token {
+// findMatchesOptimalWith takes prevOcc2 (buildHash2PrevOcc(data)) as a
+// parameter rather than computing it internally -- see findMatchesWith's
+// own doc in matcher.go for why: it is a pure function of data alone, and
+// compress() in encode.go calls this function's parse closure repeatedly
+// on the same data via refineParseWith, so the caller computes it once per
+// chunk and threads it through instead of rebuilding it on every call.
+func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions, prevOcc2 []int32) []token {
 	n := len(data)
 	if n == 0 {
 		return nil
@@ -68,7 +74,6 @@ func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []tok
 
 	order, _ := windowOrder(n) // n > 0 here, and callers never exceed maxWindowSize
 	nMainSyms := numMainSyms(order)
-	prevOcc2 := buildHash2PrevOcc(data)
 
 	head := make([]int32, hashSize)
 	for i := range head {
