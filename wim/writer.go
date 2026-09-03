@@ -283,7 +283,7 @@ func WriteTo(w io.WriteSeeker, images []*ImageMetadata, bt *BlobTable, xmlData *
 
 	// Blob table and XML data: both stored uncompressed and flagged as
 	// metadata-class resources, matching real WIMs (see doc comment above).
-	btBytes, err := bt.AppendTo(nil)
+	btBytes, err := bt.AppendTo(make([]byte, 0, bt.EncodedLen()))
 	if err != nil {
 		return 0, wrapErr("blob table", err)
 	}
@@ -396,9 +396,23 @@ type sliceWriteSeeker struct {
 func (s *sliceWriteSeeker) Write(p []byte) (int, error) {
 	end := s.pos + int64(len(p))
 	if end > int64(len(s.buf)) {
-		grown := make([]byte, end)
-		copy(grown, s.buf)
-		s.buf = grown
+		if end <= int64(cap(s.buf)) {
+			s.buf = s.buf[:end]
+		} else {
+			// Grow geometrically rather than to the exact requested
+			// size: WriteTo issues many small Writes (once per blob,
+			// plus the metadata/blob-table/XML/integrity sections),
+			// so growing to exactly `end` every time would make
+			// Assemble's in-memory path O(total size x number of
+			// writes) instead of O(total size).
+			newCap := 2 * int64(cap(s.buf))
+			if newCap < end {
+				newCap = end
+			}
+			grown := make([]byte, end, newCap)
+			copy(grown, s.buf)
+			s.buf = grown
+		}
 	}
 	copy(s.buf[s.pos:end], p)
 	s.pos = end
