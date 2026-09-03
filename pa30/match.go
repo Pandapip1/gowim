@@ -237,6 +237,16 @@ func updateLRU(lru *[3]int, val int) {
 // correctly handles overlapping (run-length-style) copies.
 func copyMatch(out *[]byte, offset, length int) {
 	start := len(*out) - offset
+	if offset >= length {
+		// Source and destination ranges are disjoint, so a single
+		// append of the whole source slice (vectorized internally,
+		// and safe here since the source data is read from the
+		// pre-growth backing array regardless of whether append
+		// reallocates) produces the same bytes as the byte-by-byte
+		// loop below, just faster.
+		*out = append(*out, (*out)[start:start+length]...)
+		return
+	}
 	for i := 0; i < length; i++ {
 		*out = append(*out, (*out)[start+i])
 	}
