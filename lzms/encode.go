@@ -26,7 +26,6 @@ const (
 	hashBits             = 17
 	hashSize             = 1 << hashBits
 	hashMinBytes         = 4
-	maxChainLen          = 64
 )
 
 func hash4(b []byte) uint32 {
@@ -34,7 +33,7 @@ func hash4(b []byte) uint32 {
 	return (v * 2654435761) >> (32 - hashBits)
 }
 
-func compress(data []byte) []byte {
+func compress(data []byte, maxChainLen int) []byte {
 	// The x86 translation filter is applied unconditionally by the
 	// format (the decoder always undoes it), so the encoder must apply
 	// it before match-finding, exactly mirroring lzms_x86_filter() being

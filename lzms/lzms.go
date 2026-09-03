@@ -88,8 +88,26 @@ package lzms
 // that together make up one LZMS block); it carries no WIM chunk framing,
 // and the caller must separately record the uncompressed size in order to
 // call Decompress.
+//
+// Compress uses this package's default speed/ratio tuning. Use CompressWith
+// to pick a different point on that tradeoff (see Options); Compress(data)
+// is exactly CompressWith(data, Options{}).
 func Compress(data []byte) []byte {
-	return compress(data)
+	return CompressWith(data, Options{})
+}
+
+// CompressWith is Compress with an explicit speed/compression-ratio
+// tradeoff. See Options for the knob it exposes: widening MaxChainLen lets
+// the match finder search further per position for a chance at a longer or
+// closer match, at the cost of more encoder time; narrowing it trades away
+// match quality for speed. This never changes the format -- LZMS matches
+// are already fully general offset/length pairs -- so the result always
+// decodes back to an identical copy of data via Decompress(result,
+// len(data)), the same as Compress's output. The zero Options is the
+// default tuning, so CompressWith(data, Options{}) and Compress(data)
+// produce identical bytes.
+func CompressWith(data []byte, opts Options) []byte {
+	return compress(data, opts.resolve())
 }
 
 // Decompress decompresses an LZMS-compressed buffer produced by Compress
