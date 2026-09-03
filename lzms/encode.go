@@ -157,8 +157,9 @@ func compress(data []byte) []byte {
 	rc.flush()
 	os.flush()
 
-	out := make([]byte, 0, len(rc.out)+len(os.bytes()))
+	osBytes := os.bytes()
+	out := make([]byte, 0, len(rc.out)+len(osBytes))
 	out = append(out, rc.out...)
-	out = append(out, os.bytes()...)
+	out = append(out, osBytes...)
 	return out
 }

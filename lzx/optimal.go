@@ -396,7 +396,9 @@ func findMatchesOptimalWith(data []byte, model costModel, o encodeOptions) []tok
 		}
 	}
 
-	var toks []token
+	// pos strictly decreases by at least 1 each iteration (see edge
+	// construction above), so the traversal takes at most n steps.
+	toks := make([]token, 0, n)
 	pos, si := n, bestIdx
 	for pos > 0 {
 		e := states[pos][si].edge

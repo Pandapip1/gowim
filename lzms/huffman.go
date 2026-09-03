@@ -186,12 +186,7 @@ func buildCanonicalHuffmanCode(numSyms, maxLen int, freqs []uint32, lens []uint8
 			used = append(used, symFreq{sym, freqs[sym]})
 		}
 	}
-	sort.Slice(used, func(i, j int) bool {
-		if used[i].freq != used[j].freq {
-			return used[i].freq < used[j].freq
-		}
-		return used[i].sym < used[j].sym
-	})
+	sort.Sort(byFreqAscSymAsc(used))
 
 	numUsed := len(used)
 
@@ -236,6 +231,21 @@ func buildCanonicalHuffmanCode(numSyms, maxLen int, freqs []uint32, lens []uint8
 type symFreq struct {
 	sym  int
 	freq uint32
+}
+
+// byFreqAscSymAsc implements sort.Interface for []symFreq, ordering by
+// ascending frequency and, for ties, ascending symbol number. It exists so
+// the hot canonical-Huffman path can use sort.Sort (a concrete, inlinable
+// comparison) instead of sort.Slice's reflection-based closure calls.
+type byFreqAscSymAsc []symFreq
+
+func (s byFreqAscSymAsc) Len() int      { return len(s) }
+func (s byFreqAscSymAsc) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s byFreqAscSymAsc) Less(i, j int) bool {
+	if s[i].freq != s[j].freq {
+		return s[i].freq < s[j].freq
+	}
+	return s[i].sym < s[j].sym
 }
 
 // buildTree is a direct port of build_tree(): given ascending frequencies

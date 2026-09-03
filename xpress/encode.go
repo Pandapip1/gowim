@@ -29,7 +29,11 @@ func Compress(data []byte) []byte {
 	codewords := canonicalCodewords(lens)
 
 	header := packHuffmanLengths(lens)
-	out := make([]byte, huffmanHeaderSize)
+	// Compressed output is essentially never larger than the input (XPRESS
+	// items are never longer than the literals/matches they replace), so
+	// sizing the initial buffer to fit the whole input up front avoids
+	// almost all of growTo's incremental reallocation.
+	out := make([]byte, huffmanHeaderSize, huffmanHeaderSize+len(data)+16)
 	copy(out, header[:])
 
 	w := newBitWriter(out, huffmanHeaderSize)

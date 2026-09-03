@@ -48,7 +48,13 @@ func newBitWriter(out []byte, start int) *bitWriter {
 	return w
 }
 
-// growTo ensures len(w.out) >= n, zero-extending as needed.
+// growTo ensures len(w.out) >= n, zero-extending as needed. Since this is
+// called incrementally (a few bytes at a time) as items are written, it
+// grows the backing array geometrically rather than to the exact requested
+// size, to avoid O(n^2) reallocation+copy cost across a whole item stream.
+// Only len(w.out) (and hence the eventual w.out[:w.nextByte] returned by
+// flush) is ever observed by callers, so the extra capacity is invisible in
+// the output.
 func (w *bitWriter) growTo(n int) {
 	if len(w.out) >= n {
 		return
@@ -57,7 +63,11 @@ func (w *bitWriter) growTo(n int) {
 		w.out = w.out[:n]
 		return
 	}
-	grown := make([]byte, n)
+	newCap := 2 * cap(w.out)
+	if newCap < n {
+		newCap = n
+	}
+	grown := make([]byte, n, newCap)
 	copy(grown, w.out)
 	w.out = grown
 }

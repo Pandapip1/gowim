@@ -2,6 +2,28 @@ package lzx
 
 import "sort"
 
+// symFreqDesc pairs a symbol with its frequency for the length-assignment
+// sort in buildLengths.
+type symFreqDesc struct {
+	sym  int
+	freq uint32
+}
+
+// byFreqDescSymAsc implements sort.Interface for []symFreqDesc, ordering by
+// descending frequency and, for ties, ascending symbol number. A concrete
+// sort.Interface avoids the reflection/closure overhead of sort.Slice on
+// this hot per-block path.
+type byFreqDescSymAsc []symFreqDesc
+
+func (s byFreqDescSymAsc) Len() int      { return len(s) }
+func (s byFreqDescSymAsc) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s byFreqDescSymAsc) Less(i, j int) bool {
+	if s[i].freq != s[j].freq {
+		return s[i].freq > s[j].freq
+	}
+	return s[i].sym < s[j].sym
+}
+
 // This file implements canonical Huffman code construction (for the
 // encoder) and decoding (for the decoder) shared by all four LZX Huffman
 // alphabets (precode, main code, length code, aligned offset code).
@@ -199,22 +221,13 @@ func buildLengths(freqs []uint32, maxLen int) []byte {
 
 	// Assign lengths to symbols: most frequent symbols get the shortest
 	// available lengths, per the fixed-up blCount histogram.
-	type symFreq struct {
-		sym  int
-		freq uint32
-	}
-	var used []symFreq
+	used := make([]symFreqDesc, 0, len(freqs))
 	for sym, f := range freqs {
 		if f > 0 {
-			used = append(used, symFreq{sym, f})
+			used = append(used, symFreqDesc{sym, f})
 		}
 	}
-	sort.Slice(used, func(i, j int) bool {
-		if used[i].freq != used[j].freq {
-			return used[i].freq > used[j].freq
-		}
-		return used[i].sym < used[j].sym
-	})
+	sort.Sort(byFreqDescSymAsc(used))
 	pos := 0
 	for l := 1; l <= maxLen; l++ {
 		for c := 0; c < blCount[l]; c++ {

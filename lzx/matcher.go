@@ -306,10 +306,13 @@ func findMatches(data []byte, model costModel) []token {
 
 func findMatchesWith(data []byte, model costModel, o encodeOptions) []token {
 	n := len(data)
-	var toks []token
 	if n == 0 {
-		return toks
+		return nil
 	}
+	// Heuristic capacity hint: real-world data rarely averages worse than
+	// one token per 4 bytes, so this avoids most of the slice growth
+	// reallocations without affecting the tokens produced.
+	toks := make([]token, 0, n/4+1)
 
 	order, _ := windowOrder(n) // n > 0 here, and callers never exceed maxWindowSize
 	nMainSyms := numMainSyms(order)
@@ -554,11 +557,66 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions) []token {
 		total int
 	}
 
+	// litLookahead caches the (rep, fresh, fresh2) triple computed for the
+	// "emit a literal now" option's 1-step continuation at position i+1
+	// (see the consider(literal) call below). When that literal option is
+	// the one actually taken, the main loop's next iteration needs the
+	// exact same triple at the exact same position with the exact same
+	// queue (queue is untouched by a literal), and the BST has gained no
+	// new insertions in between (only bstInsert(i) itself, which already
+	// happened before this continuation was computed) -- so it is safe to
+	// reuse rather than recompute. This does NOT extend to the rep/fresh/
+	// fresh2 continuations evaluated at i+match.length: those speculative
+	// evaluations run before insertRange(i, i+match.length) inserts the
+	// intervening positions into the BST, so recomputing after the match
+	// is committed can (correctly) find better fresh candidates that
+	// weren't there yet.
+	var litLookahead struct {
+		valid              bool
+		pos                int
+		queue              [numRecentOffsets]int32
+		rep, fresh, fresh2 candidateMatch
+	}
+
+	litContinuation := func(pos int, q [numRecentOffsets]int32) int {
+		if pos >= n {
+			litLookahead.valid = false
+			return 0
+		}
+		r := bestRepeatCandidate(pos, q)
+		f := bestFreshCandidate(pos)
+		f2 := bestFreshCandidate2(pos)
+		litLookahead = struct {
+			valid              bool
+			pos                int
+			queue              [numRecentOffsets]int32
+			rep, fresh, fresh2 candidateMatch
+		}{true, pos, q, r, f, f2}
+
+		best := r
+		if f.found && (!best.found || f.value > best.value) {
+			best = f
+		}
+		if f2.found && (!best.found || f2.value > best.value) {
+			best = f2
+		}
+		if best.found && best.value <= 0 {
+			return 0
+		}
+		return best.value
+	}
+
 	i := 0
 	for i < n {
-		rep := bestRepeatCandidate(i, queue)
-		fresh := bestFreshCandidate(i)
-		fresh2 := bestFreshCandidate2(i)
+		var rep, fresh, fresh2 candidateMatch
+		if litLookahead.valid && litLookahead.pos == i && litLookahead.queue == queue {
+			rep, fresh, fresh2 = litLookahead.rep, litLookahead.fresh, litLookahead.fresh2
+		} else {
+			rep = bestRepeatCandidate(i, queue)
+			fresh = bestFreshCandidate(i)
+			fresh2 = bestFreshCandidate2(i)
+		}
+		litLookahead.valid = false
 		// bestFreshCandidate (via bstSearch) must run before bstInsert(i):
 		// inserting i's own tree entry first would let it match against
 		// itself at offset 0. bestFreshCandidate2 doesn't use the BST at
@@ -575,7 +633,7 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions) []token {
 			}
 		}
 
-		consider(lookaheadOption{total: continuationValue(i+1, queue)}) // literal now
+		consider(lookaheadOption{total: litContinuation(i+1, queue)}) // literal now
 		if rep.found && rep.value > 0 {
 			consider(lookaheadOption{cand: rep, total: rep.value + continuationValue(i+rep.length, applyMatch(queue, rep.repeat, rep.offset))})
 		}
