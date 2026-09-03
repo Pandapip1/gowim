@@ -1,6 +1,6 @@
 package lzx
 
-import "sort"
+import "slices"
 
 // symFreqDesc pairs a symbol with its frequency for the length-assignment
 // sort in buildLengths.
@@ -9,19 +9,23 @@ type symFreqDesc struct {
 	freq uint32
 }
 
-// byFreqDescSymAsc implements sort.Interface for []symFreqDesc, ordering by
-// descending frequency and, for ties, ascending symbol number. A concrete
-// sort.Interface avoids the reflection/closure overhead of sort.Slice on
-// this hot per-block path.
-type byFreqDescSymAsc []symFreqDesc
-
-func (s byFreqDescSymAsc) Len() int      { return len(s) }
-func (s byFreqDescSymAsc) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
-func (s byFreqDescSymAsc) Less(i, j int) bool {
-	if s[i].freq != s[j].freq {
-		return s[i].freq > s[j].freq
+// compareFreqDescSymAsc orders []symFreqDesc by descending frequency and,
+// for ties, ascending symbol number, per slices.SortFunc's contract
+// (negative if a sorts before b, positive if after, zero if equivalent).
+// Symbols are unique integers, so (freq desc, sym asc) is a total order
+// with no possible ties -- any correct sort (this one included) produces
+// the identical permutation, so replacing the former sort.Interface-based
+// sort.Sort call with slices.SortFunc (avoiding sort.Interface's
+// reflection/closure/heap-escape overhead on this hot per-block path)
+// cannot change buildLengths' output.
+func compareFreqDescSymAsc(a, b symFreqDesc) int {
+	if a.freq != b.freq {
+		if a.freq > b.freq {
+			return -1
+		}
+		return 1
 	}
-	return s[i].sym < s[j].sym
+	return a.sym - b.sym
 }
 
 // This file implements canonical Huffman code construction (for the
@@ -147,19 +151,26 @@ func buildLengths(freqs []uint32, maxLen int) []byte {
 	}
 	root := heapIdx[0]
 
-	// Walk the tree to get raw (possibly-too-long) depths per symbol.
+	// Walk the tree to get raw (possibly-too-long) depths per symbol. An
+	// explicit stack rather than a recursive closure: since depth[] is
+	// populated independently per leaf (no ordering between leaves
+	// matters, only which depth each one gets), visiting nodes in any
+	// order -- including this stack's LIFO order, which need not match
+	// the recursive version's exact call order -- produces the identical
+	// depth[] result.
 	depth := make([]int, n)
-	var walk func(idx, d int)
-	walk = func(idx, d int) {
-		nd := &nodes[idx]
+	type walkFrame struct{ idx, d int }
+	stack := []walkFrame{{root, 0}}
+	for len(stack) > 0 {
+		f := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		nd := &nodes[f.idx]
 		if nd.isLeaf {
-			depth[nd.sym] = d
-			return
+			depth[nd.sym] = f.d
+			continue
 		}
-		walk(nd.left, d+1)
-		walk(nd.right, d+1)
+		stack = append(stack, walkFrame{nd.left, f.d + 1}, walkFrame{nd.right, f.d + 1})
 	}
-	walk(root, 0)
 
 	// Build a length histogram, clamping anything over maxLen down into
 	// bucket maxLen (creating a Kraft-inequality overflow to fix up next).
@@ -186,17 +197,12 @@ func buildLengths(freqs []uint32, maxLen int) []byte {
 		// into maxLen, compensating by removing two units from maxLen's
 		// bucket (this keeps the total leaf count constant while reducing
 		// the Kraft sum until it satisfies the inequality for maxLen).
-		overflow := 0
-		for l := maxLen + 1; l <= 64 && l <= n; l++ {
-			// depths beyond maxLen were already clamped into blCount[maxLen]
-			// above; nothing to do here directly, but we still need to know
-			// how many "excess" units exist. Recompute directly instead.
-		}
-		// Recompute overflow as: total Kraft numerator excess. Simplest
+		// Compute overflow as: total Kraft numerator excess. Simplest
 		// robust approach -- iteratively fix using bit-length counts only.
 		// Count how many raw depths exceeded maxLen; each contributes one
 		// unit that was folded into blCount[maxLen] but represents a
 		// too-long codeword needing redistribution.
+		overflow := 0
 		for _, d := range depth {
 			if d > maxLen {
 				overflow++
@@ -227,7 +233,7 @@ func buildLengths(freqs []uint32, maxLen int) []byte {
 			used = append(used, symFreqDesc{sym, f})
 		}
 	}
-	sort.Sort(byFreqDescSymAsc(used))
+	slices.SortFunc(used, compareFreqDescSymAsc)
 	pos := 0
 	for l := 1; l <= maxLen; l++ {
 		for c := 0; c < blCount[l]; c++ {

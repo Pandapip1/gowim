@@ -180,7 +180,7 @@ func splitBytesToTokenBoundaries(toks []token, splitBytes []int) []int {
 // subsequent block's tables delta-coded against the previous block's real
 // lengths (see writeBlockInto). Returns nil if no valid split points
 // exist.
-func trySplitChunkStats(data []byte, order, nMainSyms int, toks []token) []byte {
+func trySplitChunkStats(data []byte, order, nMainSyms int, toks []token, toksSlots []int) []byte {
 	splitBytes := lzxBlockSplitPoints(toks, len(data))
 	boundaries := splitBytesToTokenBoundaries(toks, splitBytes)
 	if len(boundaries) == 0 {
@@ -191,10 +191,19 @@ func trySplitChunkStats(data []byte, order, nMainSyms int, toks []token) []byte 
 	bytePos := 0
 	bi := 0
 	var segToks [][]token
+	// segSlots holds, for each segment, the corresponding sub-slice of
+	// toksSlots (the caller's already-computed tokenOffsetSlots(toks)):
+	// tokenOffsetSlots is elementwise (each output entry depends only on
+	// the matching input token), so tokenOffsetSlots(toks[a:b]) always
+	// equals tokenOffsetSlots(toks)[a:b] -- segments are literal
+	// sub-slices of toks (same [tokStart:idx] bounds used for segToks
+	// below), so slicing toksSlots the same way needs no recomputation.
+	var segSlots [][]int
 	var segData [][]byte
 	for idx, t := range toks {
 		if bi < len(boundaries) && idx == boundaries[bi] {
 			segToks = append(segToks, toks[tokStart:idx])
+			segSlots = append(segSlots, toksSlots[tokStart:idx])
 			segData = append(segData, data[byteStart:bytePos])
 			tokStart, byteStart = idx, bytePos
 			bi++
@@ -206,25 +215,29 @@ func trySplitChunkStats(data []byte, order, nMainSyms int, toks []token) []byte 
 		}
 	}
 	segToks = append(segToks, toks[tokStart:])
+	segSlots = append(segSlots, toksSlots[tokStart:])
 	segData = append(segData, data[byteStart:])
 
 	w := newBitWriterCap(len(data) + 64)
 	prevMainLens := zeroMainLens[:nMainSyms]
 	prevLenLens := zeroLenLens
 	for i, st := range segToks {
-		// stSlots is computed once per segment and reused by buildTables
-		// (tokenFreqs), buildAlignedTable, and both encodeBlock/writeBlockInto
-		// calls below -- all of which run over this exact st slice.
-		stSlots := tokenOffsetSlots(st)
+		stSlots := segSlots[i]
 		mainLens, lenLens := buildTables(st, nMainSyms, stSlots)
 		mainCodes := canonicalCodewords(mainLens, maxMainCodewordLen)
 		lenCodes := canonicalCodewords(lenLens, maxLenCodewordLen)
 
+		// VERBATIM-vs-ALIGNED for this segment only needs a byte-length
+		// comparison (neither candidate's actual bytes are used here --
+		// the real encoding happens once below, via writeBlockInto, against
+		// this segment's real chained prevMainLens/prevLenLens), so
+		// countBlockBits/countBlockBitsToBytes gets that comparison without
+		// materializing either candidate's bitstream.
 		sd := segData[i]
-		v := encodeBlock(sd, order, st, stSlots, mainLens, lenLens, mainCodes, lenCodes, nil, nil)
+		vBytes := countBlockBitsToBytes(countBlockBits(len(sd), order, st, stSlots, mainLens, lenLens, nil))
 		alignedLens, alignedCodes := buildAlignedTable(st, stSlots)
-		a := encodeBlock(sd, order, st, stSlots, mainLens, lenLens, mainCodes, lenCodes, alignedLens, alignedCodes)
-		if len(a) >= len(v) {
+		aBytes := countBlockBitsToBytes(countBlockBits(len(sd), order, st, stSlots, mainLens, lenLens, alignedLens))
+		if aBytes >= vBytes {
 			alignedLens, alignedCodes = nil, nil
 		}
 

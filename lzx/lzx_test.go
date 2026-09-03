@@ -552,7 +552,7 @@ func TestTrySplitChunkProducesValidSplit(t *testing.T) {
 	mainLens1, lenLens1 := buildTables(toks1, nMainSyms, tokenOffsetSlots(toks1))
 	toks := findMatches(pre, costModel{mainLens: mainLens1, lenLens: lenLens1})
 
-	split := trySplitChunk(pre, order, toks, nMainSyms)
+	split := trySplitChunk(pre, order, toks, tokenOffsetSlots(toks), nMainSyms)
 	if split == nil {
 		t.Fatal("expected trySplitChunk to produce a split for this data")
 	}
@@ -832,7 +832,7 @@ func TestTrySplitChunkStatsProducesValidSplit(t *testing.T) {
 	mainLens1, lenLens1 := buildTables(toks1, nMainSyms, tokenOffsetSlots(toks1))
 	toks := findMatches(pre, costModel{mainLens: mainLens1, lenLens: lenLens1})
 
-	split := trySplitChunkStats(pre, order, nMainSyms, toks)
+	split := trySplitChunkStats(pre, order, nMainSyms, toks, tokenOffsetSlots(toks))
 	if split == nil {
 		t.Fatal("expected trySplitChunkStats to produce a split for this data")
 	}
