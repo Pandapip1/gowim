@@ -272,6 +272,39 @@ type Options struct {
 	// findable even if a drive's idea of the last recorded sector differs
 	// from the image's by a few blocks.
 	PadSectors uint32
+
+	// HybridMBR stamps a Master Boot Record into the System Area (sectors 0
+	// to 15, ECMA-119 6.2.1) declaring one MBR partition, type 0xEF ("EFI
+	// System"), whose sectors are the very same no-emulation UEFI boot image
+	// (the BootEntry with Platform BootPlatformUEFI) that the El Torito
+	// catalog already points a virtual-CD-ROM-aware firmware at.
+	//
+	// El Torito is understood only by BIOS CD emulation and by a virtual
+	// CD-ROM (QEMU/OVMF, a real optical drive): USB boot enumeration looks
+	// for a GPT/MBR partition table with an EFI System Partition and knows
+	// nothing about El Torito, so without this an El Torito-only image
+	// written byte-for-byte to a USB stick (dd, GNOME Disks' "Restore Disk
+	// Image", etc.) is not seen as bootable at all. This is the "isohybrid"
+	// trick Debian/Ubuntu's own installer media uses to be dd-able to USB.
+	//
+	// Requires exactly one BootEntry with Platform BootPlatformUEFI whose
+	// image is a single contiguous extent (true of every entry this package
+	// writes; see BootEntry).
+	//
+	// Field layout and values match utils/isohybrid.c's initialise_mbr (the
+	// `mode & EFI` branch, https://git.zytor.com/syslinux/syslinux.git) —
+	// the reference implementation of this technique — with one entry: CHS
+	// fields set to the LBA-only convention (FE FF FF), Boot Indicator left
+	// 0 rather than 0x80, and the LBA/sector-count fields point at the UEFI
+	// image. That the partition is type 0xEF and is NOT marked with the
+	// legacy Boot Indicator/active flag is independently documented at UEFI
+	// 2.10 section 5.2.1 ("Legacy Master Boot Record (MBR)"): an EFI System
+	// Partition on a legacy MBR disk is identified purely by partition type
+	// 0xEF (distinct from the 0xEE "protective MBR" type a GPT disk uses),
+	// and the active flag is not part of how UEFI's own ESP discovery works.
+	// Disk signature and bootstrap code (bytes 0 to 445) are left zero: this
+	// package is UEFI-only and neither field affects ESP discovery.
+	HybridMBR bool
 }
 
 // maxSectionSizeDefault is the largest Data Length this package will put in

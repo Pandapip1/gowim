@@ -225,6 +225,15 @@ type bootLayout struct {
 	catalogSrc *bootCatalogSource
 	// images[i] is the tree node named by Options.BootEntries[i].
 	images []*node
+
+	// hybridSet, hybridLBA and hybridSectors are filled in by finishBoot
+	// when Options.HybridMBR is set: they record the resolved extent (in
+	// 2048-byte Logical Sectors) and Sector Count (in 512-byte units,
+	// already the unit hybridMBR's partition entry needs) of the first
+	// BootEntry with Platform BootPlatformUEFI. See hybridmbr.go.
+	hybridSet     bool
+	hybridLBA     uint32
+	hybridSectors uint16
 }
 
 // bootCatalogSource is the Source backing the generated boot catalog.
@@ -335,6 +344,18 @@ func (l *layout) initBoot() error {
 		}
 		bl.images = append(bl.images, n)
 	}
+	if l.b.opts.HybridMBR {
+		found := false
+		for _, e := range b.opts.BootEntries {
+			if e.Platform == BootPlatformUEFI {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("iso: HybridMBR requires a BootEntry with Platform BootPlatformUEFI")
+		}
+	}
 	l.boot = bl
 	return nil
 }
@@ -411,6 +432,12 @@ func (l *layout) finishBoot() error {
 		put731(d[8:12], n.sections[0].extent) // offset 8-0B: Load RBA
 		putZero(d[12:32])
 		off += bootCatalogEntrySize
+
+		if l.b.opts.HybridMBR && e.Platform == BootPlatformUEFI && !l.boot.hybridSet {
+			l.boot.hybridSet = true
+			l.boot.hybridLBA = n.sections[0].extent
+			l.boot.hybridSectors = sectors
+		}
 
 		if e.BootInfoTable {
 			tbl, err := l.bootInfoTable(n)

@@ -93,8 +93,9 @@ func buildLayout(b *Builder) *layout {
 	l.add(&fragment{
 		name: "System Area",
 		size: func(*layout) (uint32, error) { return systemAreaSectors, nil },
-		// ECMA-119 6.2.1 leaves the content unspecified; zero-filled here.
-		write: func(_ *layout, w *sectorWriter) error { return w.zeroSectors(systemAreaSectors) },
+		// ECMA-119 6.2.1 leaves the content unspecified: zero-filled, unless
+		// Options.HybridMBR asks for a hybrid MBR instead. See hybridmbr.go.
+		write: func(l *layout, w *sectorWriter) error { return l.writeSystemArea(w) },
 	})
 
 	l.add(&fragment{
