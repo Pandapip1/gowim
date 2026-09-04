@@ -3,6 +3,7 @@ package wim
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -329,6 +330,152 @@ func TestReadFileCompressedReturnsErrCompressedResourceUnmodified(t *testing.T) 
 	}
 	if err != ErrCompressedResource {
 		t.Fatalf("error was wrapped/modified: %v, want the sentinel unmodified", err)
+	}
+}
+
+// TestChildEmptyDirectory covers the zero-children case, which the
+// name->child index must handle without a nil-map panic.
+func TestChildEmptyDirectory(t *testing.T) {
+	empty := &DirEntry{Attributes: FileAttributeDirectory, SecurityID: SecurityIDNone}
+	if got := empty.Child("anything"); got != nil {
+		t.Fatalf("Child on empty directory = %v, want nil", got)
+	}
+}
+
+// TestChildCaseInsensitive covers the exact scenario described in the
+// package's Child doc comment: looking up a name that differs only in case
+// from a real child's name must still find it, via the cached index.
+func TestChildCaseInsensitive(t *testing.T) {
+	root := buildTestTree()
+	windows, err := root.Lookup("Windows/System32/drivers")
+	if err != nil {
+		t.Fatalf("Lookup(drivers) error = %v", err)
+	}
+	for _, name := range []string{"prnms001.inf", "PRNMS001.INF", "PrNmS001.iNf"} {
+		got := windows.Child(name)
+		if got == nil || got.NameUTF8() != "prnms001.inf" {
+			t.Fatalf("Child(%q) = %v, want prnms001.inf", name, got)
+		}
+	}
+}
+
+// TestChildIndexInvalidatedByMutation exercises the index cache's
+// invalidation path directly: it forces the index to be built (a first
+// Child call), mutates Children (add, then remove), and confirms every
+// subsequent Child call reflects the current state rather than a stale
+// cached map.
+func TestChildIndexInvalidatedByMutation(t *testing.T) {
+	dir := &DirEntry{Attributes: FileAttributeDirectory, SecurityID: SecurityIDNone}
+
+	// Build the index against an empty directory.
+	if got := dir.Child("a.txt"); got != nil {
+		t.Fatalf("Child(a.txt) on empty dir = %v, want nil", got)
+	}
+
+	a := &DirEntry{Name: stringToUTF16LE("a.txt"), Streams: []Stream{{Hash: Hash{1}}}}
+	dir.Children = append(dir.Children, a)
+	if got := dir.Child("A.TXT"); got != a {
+		t.Fatalf("Child(A.TXT) after add = %v, want %v", got, a)
+	}
+
+	b := &DirEntry{Name: stringToUTF16LE("b.txt"), Streams: []Stream{{Hash: Hash{2}}}}
+	dir.Children = append(dir.Children, b)
+	if got := dir.Child("b.txt"); got != b {
+		t.Fatalf("Child(b.txt) after second add = %v, want %v", got, b)
+	}
+	// The first child must still resolve correctly after the index was
+	// rebuilt for the second add.
+	if got := dir.Child("a.txt"); got != a {
+		t.Fatalf("Child(a.txt) after second add = %v, want %v", got, a)
+	}
+
+	// Remove a.txt (mirroring how Remove itself reassigns Children) and
+	// confirm the index no longer finds it, while b.txt still resolves.
+	dir.Children = append(dir.Children[:0:0], b)
+	if got := dir.Child("a.txt"); got != nil {
+		t.Fatalf("Child(a.txt) after removal = %v, want nil", got)
+	}
+	if got := dir.Child("b.txt"); got != b {
+		t.Fatalf("Child(b.txt) after removal of a.txt = %v, want %v", got, b)
+	}
+}
+
+// TestChildIndexRemoveViaPackageAPI covers the same invalidation concern but
+// through the package's own mutating APIs (Add/Remove/Rename), rather than
+// direct field surgery, so a regression in how those APIs reassign Children
+// would also be caught here.
+func TestChildIndexRemoveViaPackageAPI(t *testing.T) {
+	root := buildTestTree()
+
+	// Warm the index at the drivers directory, then add a sibling via Add.
+	drivers, err := root.Lookup("Windows/System32/drivers")
+	if err != nil {
+		t.Fatalf("Lookup error = %v", err)
+	}
+	if drivers.Child("newdrv.inf") != nil {
+		t.Fatal("newdrv.inf unexpectedly present before Add")
+	}
+	if _, err := root.Add(`Windows\System32\drivers\newdrv.inf`, Hash{5}); err != nil {
+		t.Fatalf("Add error = %v", err)
+	}
+	if drivers.Child("NEWDRV.INF") == nil {
+		t.Fatal("newdrv.inf not found via cached DirEntry after Add")
+	}
+
+	if err := root.Remove("Windows/System32/drivers/prnms001.inf"); err != nil {
+		t.Fatalf("Remove error = %v", err)
+	}
+	if drivers.Child("prnms001.inf") != nil {
+		t.Fatal("prnms001.inf still resolves via cached DirEntry after Remove")
+	}
+	if drivers.Child("newdrv.inf") == nil {
+		t.Fatal("newdrv.inf missing via cached DirEntry after sibling Remove")
+	}
+
+	if err := root.Rename("Windows/System32/drivers/newdrv.inf", "Windows/System32/drivers/renamed.inf"); err != nil {
+		t.Fatalf("Rename error = %v", err)
+	}
+	if drivers.Child("newdrv.inf") != nil {
+		t.Fatal("newdrv.inf still resolves via cached DirEntry after Rename")
+	}
+	if drivers.Child("RENAMED.INF") == nil {
+		t.Fatal("renamed.inf not found via cached DirEntry after Rename")
+	}
+}
+
+// TestChildLargeDirectory mirrors the real-scale scenario the performance
+// audit measured (a directory with tens of thousands of children, like a
+// real image's Windows\WinSxS\Manifests) and exercises the index path at
+// that scale: every synthetic child must still resolve by exact name and by
+// a case-varied name, and a name that was never added must not.
+func TestChildLargeDirectory(t *testing.T) {
+	const n = 28069
+	dir := &DirEntry{Attributes: FileAttributeDirectory, SecurityID: SecurityIDNone}
+	names := make([]string, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("amd64_component.name.%05d_31bf3856ad364e35_10.0.22621.6120_none_%08x.manifest", i, i)
+		names[i] = name
+		dir.Children = append(dir.Children, &DirEntry{
+			Name:    stringToUTF16LE(name),
+			Streams: []Stream{{Hash: Hash{byte(i), byte(i >> 8)}}},
+		})
+	}
+
+	// Spot-check across the range (first, middle, last) both exact-case and
+	// upper-cased, plus a miss.
+	for _, i := range []int{0, 1, n / 2, n - 2, n - 1} {
+		got := dir.Child(names[i])
+		if got == nil || got.NameUTF8() != names[i] {
+			t.Fatalf("Child(%q) = %v, want the entry at index %d", names[i], got, i)
+		}
+		upper := fmt.Sprintf("AMD64_COMPONENT.NAME.%05d_31BF3856AD364E35_10.0.22621.6120_NONE_%08X.MANIFEST", i, i)
+		got = dir.Child(upper)
+		if got == nil || got.NameUTF8() != names[i] {
+			t.Fatalf("Child(%q) (case-varied) = %v, want the entry at index %d", upper, got, i)
+		}
+	}
+	if got := dir.Child("does-not-exist.manifest"); got != nil {
+		t.Fatalf("Child(missing) = %v, want nil", got)
 	}
 }
 

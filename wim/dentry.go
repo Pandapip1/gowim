@@ -1,6 +1,9 @@
 package wim
 
-import "fmt"
+import (
+	"fmt"
+	"sync/atomic"
+)
 
 // DirEntryFixedSize is the size of the fixed-length portion of a directory
 // entry on disk (WIM_DENTRY_DISK_SIZE).
@@ -82,6 +85,20 @@ type DirEntry struct {
 	// Children are the entries in this directory (nil/empty for non-directories
 	// or empty directories).
 	Children []*DirEntry
+
+	// childIndex caches a name->child lookup index built from Children, so
+	// that Child (see path.go) does not have to linearly re-scan and
+	// re-decode every sibling's UTF-16 name on every single lookup (see
+	// path.go's buildChildIndex doc comment for the measured impact). It is
+	// validated against, and rebuilt from, the current Children slice on
+	// every Child call (see sameChildrenSlice), so callers that mutate
+	// Children directly (append/reassign, as this package's own Add, Remove,
+	// Rename, and AttachAt all do) never observe a stale index - the only
+	// requirement is that Children is not mutated *concurrently* with a
+	// Child call on the same DirEntry, which this package does not do
+	// anywhere (concurrent callers, such as component.BuildFromImage's
+	// worker pool, only ever read the tree in parallel, never mutate it).
+	childIndex atomic.Pointer[dirEntryChildIndex]
 }
 
 // IsDirectory reports whether the entry has the directory attribute.
