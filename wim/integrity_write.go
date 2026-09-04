@@ -5,6 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"io"
+	"runtime"
+	"sync"
+	"sync/atomic"
 )
 
 // ErrNoIntegrityTable is returned by Reader.VerifyIntegrity when the WIM has
@@ -118,21 +122,110 @@ func (r *Reader) VerifyIntegrity() error {
 		return err
 	}
 
-	buf := make([]byte, it.ChunkSize)
-	off := uint64(HeaderSize)
-	for i, want := range it.Hashes {
-		chunkLen := uint64(it.ChunkSize)
-		if off+chunkLen > end {
-			chunkLen = end - off
-		}
-		if _, err := r.ra.ReadAt(buf[:chunkLen], int64(off)); err != nil {
-			return wrapErr(fmt.Sprintf("verify integrity: read chunk %d", i), err)
-		}
-		got := Hash(sha1.Sum(buf[:chunkLen]))
-		if got != want {
-			return fmt.Errorf("wim: integrity check failed at chunk %d (file offset %d, %d bytes)", i, off, chunkLen)
-		}
-		off += chunkLen
+	return verifyIntegrityChunksParallel(r.ra, it, uint64(HeaderSize), end)
+}
+
+// verifyIntegrityChunksParallel recomputes SHA-1 hashes over each chunk
+// described by it (chunks of it.ChunkSize bytes, the last possibly shorter,
+// covering [start, end) of ra) and compares them against it.Hashes,
+// returning an error describing the lowest-index mismatching (or unreadable)
+// chunk, or nil if every chunk matches.
+//
+// This is the read/verify-side counterpart of compressChunksParallel in
+// compress.go and follows the same pattern: chunks are independent by the
+// integrity table's own chunking scheme (see the doc comment above
+// integrityAccumulator -- no chaining between chunks), so a bounded worker
+// pool (min(numChunks, GOMAXPROCS)) claims chunk indices via a lock-free
+// atomic counter and each worker reads its chunk through ra.ReadAt (which,
+// backed by a real *os.File as every VerifyIntegrity caller's Reader is
+// constructed with, supports concurrent positional reads) into its own
+// private buffer -- never a buffer shared across workers, which is exactly
+// what forced the old code to alternate strictly between a single read and a
+// single hash. Each result is known to belong at hashes index i up front (a
+// fixed byte range), so it's compared in place with no merge/reduction step,
+// mirroring DecodeResourceData's parallel chunk decoding.
+//
+// Verification correctness and behavior are unchanged from the prior serial
+// loop: same hash algorithm and chunk boundaries, same rejection of a
+// corrupted table on any single differing chunk. The only externally
+// observable difference is which chunk gets reported first when a WIM has
+// more than one bad chunk -- this always reports the lowest chunk index
+// (tracked explicitly below, since which worker happens to finish first is
+// not otherwise deterministic), which matches what the serial loop would
+// have reported.
+func verifyIntegrityChunksParallel(ra io.ReaderAt, it *IntegrityTable, start, end uint64) error {
+	numChunks := uint64(len(it.Hashes))
+	if numChunks == 0 {
+		return nil
 	}
-	return nil
+
+	workers := uint64(runtime.GOMAXPROCS(0))
+	if workers > numChunks {
+		workers = numChunks
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		firstIdx = numChunks // sentinel: no error recorded yet
+		next     uint64
+		stopped  atomic.Bool
+	)
+	record := func(i uint64, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if i < firstIdx {
+			firstIdx = i
+			firstErr = err
+		}
+	}
+	for w := uint64(0); w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Each worker owns its own chunk-sized buffer: unlike the old
+			// single shared buffer, this lets every worker's read and hash
+			// proceed independently, with no false dependency between
+			// chunks that are, by format, unrelated to each other.
+			buf := make([]byte, it.ChunkSize)
+			for {
+				if stopped.Load() {
+					return
+				}
+				// A plain atomic increment (rather than mu) to claim the
+				// next chunk index, same rationale as
+				// compressChunksParallel: with many chunks across many
+				// workers a shared mutex here becomes real contention that
+				// a lock-free counter avoids.
+				i := atomic.AddUint64(&next, 1) - 1
+				if i >= numChunks {
+					return
+				}
+
+				off := start + i*uint64(it.ChunkSize)
+				chunkLen := uint64(it.ChunkSize)
+				if off+chunkLen > end {
+					chunkLen = end - off
+				}
+
+				if _, err := ra.ReadAt(buf[:chunkLen], int64(off)); err != nil {
+					record(i, wrapErr(fmt.Sprintf("verify integrity: read chunk %d", i), err))
+					stopped.Store(true)
+					continue
+				}
+				got := Hash(sha1.Sum(buf[:chunkLen]))
+				if got != it.Hashes[i] {
+					record(i, fmt.Errorf("wim: integrity check failed at chunk %d (file offset %d, %d bytes)", i, off, chunkLen))
+					stopped.Store(true)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	return firstErr
 }
