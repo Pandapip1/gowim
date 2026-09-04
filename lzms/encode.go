@@ -33,7 +33,8 @@ func hash4(b []byte) uint32 {
 	return (v * 2654435761) >> (32 - hashBits)
 }
 
-func compress(data []byte, maxChainLen int) []byte {
+func compress(data []byte, opts resolvedOptions) []byte {
+	maxChainLen := opts.maxChainLen
 	// The x86 translation filter is applied unconditionally by the
 	// format (the decoder always undoes it), so the encoder must apply
 	// it before match-finding, exactly mirroring lzms_x86_filter() being
@@ -54,6 +55,31 @@ func compress(data []byte, maxChainLen int) []byte {
 	lengthCode := newHuffmanCode(numLengthSyms, lenCodeRebuildFreq)
 
 	var mainState, matchState, lzState uint32
+
+	encodeLiteral := func(b byte) {
+		rc.encodeBit(0, &mainState, numMainProbs, probs.main[:])
+		literalCode.encodeSymbol(os, int(b))
+	}
+
+	if opts.literalOnly {
+		// Skip match-finding entirely (no hash table, no chain
+		// insertion, no findMatch calls) and code every byte as a
+		// literal, in order. See Options.LiteralOnly's doc for why this
+		// is not a raw/stored path: every byte here still pays real
+		// adaptive-Huffman coding cost.
+		for _, b := range buf {
+			encodeLiteral(b)
+		}
+
+		rc.flush()
+		os.flush()
+
+		osBytes := os.bytes()
+		out := make([]byte, 0, len(rc.out)+len(osBytes))
+		out = append(out, rc.out...)
+		out = append(out, osBytes...)
+		return out
+	}
 
 	// A simple hash-chain match finder over 4-byte prefixes.
 	head := make([]int32, hashSize)
@@ -108,11 +134,6 @@ func compress(data []byte, maxChainLen int) []byte {
 			chainLen++
 		}
 		return bestLen, bestOff, h, true
-	}
-
-	encodeLiteral := func(b byte) {
-		rc.encodeBit(0, &mainState, numMainProbs, probs.main[:])
-		literalCode.encodeSymbol(os, int(b))
 	}
 
 	encodeMatch := func(offset, length int) {
