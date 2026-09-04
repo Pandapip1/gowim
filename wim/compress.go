@@ -110,6 +110,50 @@ func compressChunksParallel(data []byte, compressionType CompressionType, chunkS
 	return chunks, nil
 }
 
+// assembleCompressedPayload builds the chunk-table-framed payload (or, for a
+// single chunk, the bare chunk) from chunks, exactly as
+// EncodeResourceDataWith writes it. uncompressedSize is only used to size
+// the chunk table's entries (chunkTableEntrySize), never to size the
+// returned buffer's capacity: the returned slice's backing array is
+// allocated at exactly len(table) + the sum of every chunks[i]'s length --
+// the true final size -- rather than at len(table) + uncompressedSize
+// (which is the UNcompressed total, and can be several times larger than
+// the actual output for well-compressing data). This is split out from
+// EncodeResourceDataWith mainly so a test can inspect cap() of the result
+// directly to confirm the allocation is exact and no append call inside
+// this function ever has to grow (and reallocate/copy) the backing array.
+func assembleCompressedPayload(chunks [][]byte, uncompressedSize uint64) []byte {
+	numChunks := uint64(len(chunks))
+	if numChunks > 1 {
+		entrySize := chunkTableEntrySize(uncompressedSize)
+		table := make([]byte, int(numChunks-1)*entrySize)
+		var off uint64
+		for i := uint64(0); i < numChunks-1; i++ {
+			off += uint64(len(chunks[i]))
+			e := int(i) * entrySize
+			if entrySize == 4 {
+				le.PutUint32(table[e:e+4], uint32(off))
+			} else {
+				le.PutUint64(table[e:e+8], off)
+			}
+		}
+		// off already accumulated the compressed length of every chunk but
+		// the last one while the table was being built above; add the last
+		// chunk's length to get the exact final compressed total, instead
+		// of over-allocating for uncompressedSize.
+		totalCompressed := off + uint64(len(chunks[numChunks-1]))
+		out := make([]byte, 0, len(table)+int(totalCompressed))
+		out = append(out, table...)
+		for _, c := range chunks {
+			out = append(out, c...)
+		}
+		return out
+	}
+	out := make([]byte, 0, len(chunks[0]))
+	out = append(out, chunks[0]...)
+	return out
+}
+
 // EncodeResourceData takes a resource's full uncompressed bytes and produces
 // the correctly-framed on-disk payload bytes plus the ResFlag* bits that
 // should be set on that resource's ResourceHeader, for a non-solid resource.
@@ -193,28 +237,7 @@ func EncodeResourceDataWith(data []byte, compressionType CompressionType, chunkS
 		return nil, 0, err
 	}
 
-	var out []byte
-	if numChunks > 1 {
-		entrySize := chunkTableEntrySize(uncompressedSize)
-		table := make([]byte, int(numChunks-1)*entrySize)
-		var off uint64
-		for i := uint64(0); i < numChunks-1; i++ {
-			off += uint64(len(chunks[i]))
-			e := int(i) * entrySize
-			if entrySize == 4 {
-				le.PutUint32(table[e:e+4], uint32(off))
-			} else {
-				le.PutUint64(table[e:e+8], off)
-			}
-		}
-		out = make([]byte, 0, len(table)+int(uncompressedSize))
-		out = append(out, table...)
-	} else {
-		out = make([]byte, 0, len(chunks[0]))
-	}
-	for _, c := range chunks {
-		out = append(out, c...)
-	}
+	out := assembleCompressedPayload(chunks, uncompressedSize)
 
 	if uint64(len(out)) >= uncompressedSize {
 		// Whole-resource fallback: compression didn't help overall (or, for
