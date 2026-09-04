@@ -71,11 +71,13 @@ One file per concern, following this repo's convention:
 | `constants.go` | alphabet/match-length/offset constants |
 | `bitwriter.go` | the interleaved coding-unit/raw-byte output stream |
 | `bitreader.go` | its decode-side counterpart |
-| `huffman.go` | canonical Huffman code construction (encode) and decode table (decode); the 256-byte codeword-length header pack/unpack |
-| `lz77.go` | the hash-chain greedy/lazy LZ77 match finder used by `Compress` |
-| `encode.go` | `Compress` |
+| `huffman.go` | canonical Huffman code construction (encode) and decode table (decode); the 256-byte codeword-length header pack/unpack; the fixed flat code the `None` preset uses |
+| `lz77.go` | the hash-chain greedy/lazy LZ77 match finder used by the default encoder |
+| `options.go` | `Options`, the `None` preset |
+| `encode.go` | `Compress`/`CompressWith` |
 | `decode.go` | `Decompress` |
 | `xpress_test.go` | synthetic round-trip tests plus real wimlib ground-truth tests |
+| `options_test.go` | the flat-code identity-mapping proof, `None` round-trip tests, and a `Compress` vs `None` benchmark |
 
 ## Usage
 
@@ -88,6 +90,37 @@ compressed := xpress.Compress(data)
 // resource header's uncompressed-size field).
 decompressed, err := xpress.Decompress(compressed, len(data))
 ```
+
+## Presets
+
+`Compress(data)` is exactly `CompressWith(data, xpress.Options{})` - the
+zero `Options` is this package's default tuning (the greedy/lazy LZ77 parse
+plus adaptive canonical Huffman code described above), matching the
+zero-value-means-default convention `lzx.Options` and `lzms.Options` use.
+
+`xpress.None()` selects the one non-default preset this package offers: it
+skips all compression search entirely - no LZ77 match finding
+(`lz77.go`'s hash-chain match finder never runs) and no adaptive Huffman
+tree construction (`huffman.go`'s `buildLengths`, and the `container/heap`
+machinery it uses, never run). Every input byte is emitted as a literal
+under a fixed "flat" 8-bit code in which the codeword for literal byte `b`
+is exactly `b` (see `huffman.go`'s `flatLens` for why this identity holds,
+and `TestCanonicalCodewordsFlatIsIdentity` for the test that locks it in).
+The result is still a fully spec-compliant XPRESS stream, decodable by this
+package's own `Decompress` - and any other conforming decoder - with no
+special-casing at all:
+
+```go
+compressed := xpress.CompressWith(data, xpress.None())
+```
+
+Output size is close to `len(data)` plus the fixed 256-byte Huffman header
+(literals are coded 1:1 into 8-bit codewords, so there is essentially no
+compression), and encoding is dramatically faster than the default preset
+since no per-byte search of any kind runs - only a single linear pass
+writing each byte's fixed codeword. Use it when raw encoder speed matters
+more than ratio, or as a simple reference encoding to compare other output
+against.
 
 ## Tests
 

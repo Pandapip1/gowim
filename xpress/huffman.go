@@ -70,6 +70,39 @@ func canonicalCodewords(lens [numSymbols]uint8) [numSymbols]uint16 {
 	return codewords
 }
 
+// flatLens is the fixed codeword-length table the None preset uses (see
+// Options.SkipSearch and None in options.go): every literal symbol (0-255)
+// gets length 8, and every match-header symbol (256-511, including
+// endOfData) gets length 0 -- unused, since a None-preset stream never
+// emits a match and never has a spare codeword to carry the end-of-data
+// marker either.
+//
+// 256 codewords of length 8 exactly saturate the code space: by Kraft's
+// inequality, sum(2^-len) over all codewords must be <= 1 for a valid
+// prefix code, and here it is exactly 1 (256 * 2^-8 == 1). That leaves no
+// room for any other codeword at any length, which is why every
+// match-header symbol -- endOfData included -- must be 0 here rather than
+// some small nonzero length "just in case": there is no unused prefix left
+// to assign one.
+//
+// Because canonicalCodewords assigns codewords in increasing-length-then-
+// increasing-symbol order (see its doc), and every literal here shares the
+// same length, the assignment for the literals reduces to plain binary
+// counting up from 0 in symbol order: canonicalCodewords(flatLens)[b] == b
+// for every b in [0,255]. This is the "flat 8-bit identity code" the None
+// preset relies on, and TestCanonicalCodewordsFlatIsIdentity locks it in.
+var flatLens = func() [numSymbols]uint8 {
+	var lens [numSymbols]uint8
+	for sym := 0; sym < numChars; sym++ {
+		lens[sym] = 8
+	}
+	return lens
+}()
+
+// flatCodewords is canonicalCodewords(flatLens), precomputed once at
+// package init since flatLens never changes.
+var flatCodewords = canonicalCodewords(flatLens)
+
 // --- Length construction (encoder side) -------------------------------
 
 // hnode is a node in the Huffman construction tree; sym >= 0 marks a leaf.
