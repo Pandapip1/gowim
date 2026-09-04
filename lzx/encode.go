@@ -68,6 +68,17 @@ func compress(input []byte, o encodeOptions) []byte {
 		// Compress already validated len(data) <= maxWindowSize.
 		panic(err)
 	}
+
+	// Options.Uncompressed (see options.go's None preset) skips everything
+	// below -- match-finding, parsing, block-splitting, Huffman tables --
+	// going straight from the (already E8-filtered) data to a single raw
+	// UNCOMPRESSED block. See uncompressed.go's writeUncompressedBlock.
+	if o.uncompressed {
+		w := newBitWriterCap(len(data) + 32)
+		writeUncompressedBlock(w, data, order)
+		return w.flush()
+	}
+
 	nMainSyms := numMainSyms(order)
 
 	// prevOcc2 (buildHash2PrevOcc's most-recent-2-byte-occurrence table) is

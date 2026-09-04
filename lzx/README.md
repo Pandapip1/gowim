@@ -50,16 +50,21 @@ This package **deliberately does not implement**:
   only ever produces) one chunk's plaintext/compressed bytes per call.
 - **CAB-LZX's sliding window / multi-block streaming model**, or LZX DELTA's
   reference-data extensions. Neither is used by WIM.
-- **Compression-ratio or match-finding optimality.** `Compress` uses a
-  straightforward greedy LZ77 match finder (bounded-depth hash chains, no
-  lazy matching or optimal parse) and **always emits `VERBATIM` blocks** —
-  it never builds an "aligned offset" Huffman tree, and never emits an
-  `UNCOMPRESSED` block. This is a valid, spec-compliant subset: block type
-  is signaled per block, and wimlib's own compressor already relies on this
-  (its own comment notes it never emits `UNCOMPRESSED` blocks either), so
-  any compliant decoder — including wimlib's — must already accept an
-  all-`VERBATIM` stream. It is simply not the most compact possible
-  encoding for a given input.
+- **Compression-ratio or match-finding optimality**, at any of the ladder's
+  compressing presets (`Fastest` through `Max`, see
+  [Speed/ratio presets](#speedratio-presets)): `Compress` uses a bounded
+  lookahead LZ77 match finder plus a bounded beam DP parse, keeping
+  `VERBATIM` or `ALIGNED` blocks (whichever encodes smaller), and a small
+  bounded set of block-split trials — never an `UNCOMPRESSED` block at these
+  presets. This is a valid, spec-compliant subset: block type is signaled
+  per block, and wimlib's own compressor relies on exactly this (its own
+  comment notes it never emits `UNCOMPRESSED` blocks either), so any
+  compliant decoder — including wimlib's — must already accept an
+  all-`VERBATIM`/`ALIGNED` stream. It is simply not the most compact
+  possible encoding for a given input. The one exception is the explicit
+  `None()` preset (`Options.Uncompressed`), which skips compression
+  altogether and emits a real `UNCOMPRESSED` block for exactly that reason —
+  see [Speed/ratio presets](#speedratio-presets).
 - **Window orders beyond 21** (buffers larger than 2097152 bytes = wimlib's
   own documented `LZX_MAX_WINDOW_ORDER`). `Compress` panics on larger input.
   WIM itself never asks for more than one 32768-byte chunk per call, so this
@@ -108,7 +113,11 @@ for this package:
    otherwise. The original CAB-LZX format always spent a fixed 24 bits.
 4. **wimlib's own compressor never emits `UNCOMPRESSED` blocks** (a design
    choice noted directly in its source, not a hard format restriction) —
-   consistent with this package's own choice to only ever emit `VERBATIM`.
+   consistent with this package's own compressing presets, which only ever
+   emit `VERBATIM`/`ALIGNED`. This package's `None()` preset is the one
+   deliberate exception: it exists specifically to skip compression, so it
+   emits `UNCOMPRESSED` on purpose (see
+   [Speed/ratio presets](#speedratio-presets)).
 
 ## Layout
 
@@ -120,7 +129,8 @@ for this package:
 | `huffman.go` | canonical Huffman code construction (length-limited, for the encoder) and decoding (simple "first code per length" bit-at-a-time decoder) |
 | `e8filter.go` | the x86 CALL-instruction (`0xE8`) address-translation filter, ported directly from wimlib's scalar reference implementation |
 | `decode.go` | block-header parsing, block decoding (`VERBATIM`/`ALIGNED`/`UNCOMPRESSED`), LZ77 match copying |
-| `encode.go` | block writing (`VERBATIM` only), codeword-length delta encoding |
+| `encode.go` | `compress()`'s top-level pipeline, block writing (`VERBATIM`/`ALIGNED`), codeword-length delta encoding |
+| `uncompressed.go` | `None()`/`Options.Uncompressed`'s entire output path: a single raw `UNCOMPRESSED` block, no parse involved |
 | `matcher.go` | the bounded-lookahead LZ77 parser, the repeat-offset queue, and the cost model |
 | `matchfinder.go` | the two interchangeable fresh-offset match-finder structures the parser can be built on: a binary tree (the default) and a hash chain |
 | `optimal.go` | the bounded multi-state beam DP parse tried alongside the lookahead parse |
@@ -218,6 +228,28 @@ size-neutral on both corpora and on every rung — between −0.068% and
 +0.019% — while being worth 1.22x at the default settings, where pass 1 is
 the only part of `compress()` that is not overlapped with anything else.
 Every serial time in the table above is therefore now pessimistic.
+
+#### `None()`: skipping compression altogether
+
+`None()` (`Options{Uncompressed: true}`) is not a further rung below
+`Fastest` on the ladder above. The ladder is one pipeline (match-finding
+then Huffman coding) run at different budgets, so consecutive rungs differ
+by single-digit percentages of time and size; `None` instead skips that
+pipeline entirely and emits the chunk as a single raw LZX `UNCOMPRESSED`
+block (see [Scope](#scope) and `uncompressed.go`) — no match-finding, no
+parsing, no block-splitting trials, no Huffman-table construction at all.
+Its output size is always exactly `len(data)` plus a small fixed overhead
+(the block header, 16-bit realignment padding, and a 12-byte recent-offsets
+fill — at most 19 bytes total), regardless of how compressible the input
+actually is, which is strictly faster than `Fastest` and strictly larger
+than every compressing preset. It exists for callers who already know their
+data won't compress (already-compressed or encrypted blobs) or who are
+optimizing purely for encoder latency and can accept giving up the ratio.
+The block type is real (`LZX_BLOCKTYPE_UNCOMPRESSED`, decoded by both this
+package and wimlib — see [Layout](#layout)'s `decode.go` row), and the E8
+filter is still applied first exactly as for every other preset, so `None`'s
+output round-trips through a real WIM/wimlib decoder too, not just this
+package's own `Decompress`.
 
 Every preset produces a valid LZX chunk; the format never changes. Both the
 default and the `DisableDP` path were verified byte-for-byte through real

@@ -57,8 +57,12 @@
 //   - wimlib's own compressor never emits LZX_BLOCKTYPE_UNCOMPRESSED
 //     blocks (see the comment on lzx_flush_block in src/lzx_compress.c);
 //     this package's decoder still supports decoding one, for robustness
-//     against any real-world producer that does, but this package's own
-//     encoder does not emit them either.
+//     against any real-world producer that does. This package's own
+//     encoder does not emit one either at any of its normal (compressing)
+//     preset settings -- except under the explicit Options.Uncompressed /
+//     None() preset (see options.go), which exists precisely to skip
+//     compression altogether and requires an UNCOMPRESSED block to do so;
+//     see uncompressed.go.
 //
 // # Scope
 //
@@ -97,8 +101,11 @@
 //     search of its own. Each block independently VERBATIM or ALIGNED
 //     (whichever a same-tokens trial encoding of each comes out smaller
 //     as -- see encode.go's encodeBlock/writeBlockInto/
-//     buildAlignedTable) -- it never emits an uncompressed block, nor does
-//     it use a full iterative bit-cost model across the whole file (beyond
+//     buildAlignedTable) -- it does not emit an uncompressed block at any
+//     of these compressing presets (Options.Uncompressed / None() is a
+//     separate, explicitly-requested path that emits nothing else -- see
+//     uncompressed.go), nor does it use a full iterative bit-cost model
+//     across the whole file (beyond
 //     the two-pass Huffman-informed re-parse in compress(), which is not
 //     the same as a full iterative optimizer). This is a valid, spec-compliant subset (block
 //     type is signaled per-block, and wimlib's own compressor already
@@ -116,8 +123,12 @@
 //
 // The decoder (Decompress) supports all three LZX block types
 // (VERBATIM, ALIGNED, UNCOMPRESSED) since real-world data -- including
-// wimlib-produced ALIGNED blocks -- must decode correctly; only the
-// encoder (Compress) is scoped down to VERBATIM-only, per above.
+// wimlib-produced ALIGNED blocks -- must decode correctly. The encoder
+// (Compress/CompressWith) is scoped down to VERBATIM/ALIGNED, per above, at
+// every ordinary (compressing) preset; the sole exception is the explicit
+// Options.Uncompressed / None() preset (see options.go and
+// uncompressed.go), which exists to skip compression altogether and so
+// necessarily emits UNCOMPRESSED blocks instead.
 package lzx
 
 import "errors"

@@ -70,6 +70,7 @@ func TestPresetsRoundTrip(t *testing.T) {
 		"Balanced": Balanced(),
 		"Default":  DefaultOptions(),
 		"Max":      Max(),
+		"None":     None(),
 		// Escape-hatch combinations, including values resolve() has to
 		// clamp: a caller passing nonsense gets slow-or-bad compression,
 		// never a panic or a corrupt chunk.

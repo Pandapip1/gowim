@@ -15,7 +15,8 @@ package lzx
 // (Fastest, Fast, Balanced, DefaultOptions, Max -- an ordered ladder, each
 // a specific measured combination of the fields below) are the intended
 // interface, and the individual fields are the escape hatch for tuning
-// beyond them. See each preset's own doc for its measured position.
+// beyond them. See each preset's own doc for its measured position. None is
+// a separate preset, not a rung on that ladder -- see its own doc for why.
 //
 // Nothing here changes the format: every setting produces a valid LZX
 // chunk that any conforming decoder (this package's Decompress, or
@@ -231,6 +232,34 @@ type Options struct {
 	// bounded by single-threaded encoder latency can still want the ~3%
 	// serial saving, but it is not part of any preset.
 	DisableBlockSplit bool
+
+	// Uncompressed skips match-finding, parsing, block-splitting and
+	// Huffman-table construction entirely, and emits the chunk as a single
+	// raw LZX UNCOMPRESSED block (blockTypeUncompressed) instead -- see
+	// uncompressed.go's writeUncompressedBlock. When set, every other field
+	// in this struct is ignored, since there is no parse left for any of
+	// them to tune.
+	//
+	// This is still a fully valid, spec-compliant WIM-flavor LZX chunk:
+	// this package's own Decompress (and any real conforming decoder, e.g.
+	// wimlib) already supports decoding this block type (see decode.go's
+	// blockTypeUncompressed case) for robustness against any producer that
+	// emits one, even though wimlib's own encoder never does (see lzx.go's
+	// package doc) -- this package's encoder is now such a producer. The E8
+	// filter is still applied first, exactly as for every other block type
+	// (see compress in encode.go), so the result round-trips through a real
+	// WIM/wimlib decoder too, not just this package's own.
+	//
+	// This is the fastest possible path this package offers -- strictly
+	// faster than Fastest, since it does no comparison-based match search
+	// at all -- at the cost of giving up compression outright: output is
+	// always exactly len(data) plus a small fixed per-chunk overhead (the
+	// block header, realignment padding, and the 12-byte recent-offsets
+	// fill -- at most 19 bytes total, see writeUncompressedBlock), never
+	// smaller than that regardless of how redundant data is. See None,
+	// which is exactly Options{Uncompressed: true} and is the intended
+	// named entry point for this.
+	Uncompressed bool
 }
 
 // Package defaults, i.e. what each Options field's zero value resolves to.
@@ -263,6 +292,7 @@ type encodeOptions struct {
 	blockSplit          bool
 	hashChain           bool
 	greedyPass1         bool
+	uncompressed        bool
 
 	// greedyParse makes findMatchesWith (matcher.go) score each position's
 	// candidates by their own value alone, with no lookahead continuation.
@@ -301,6 +331,7 @@ func (o Options) resolve() encodeOptions {
 		blockSplit:          !o.DisableBlockSplit,
 		hashChain:           o.HashChainMatcher,
 		greedyPass1:         !o.FullFirstPass,
+		uncompressed:        o.Uncompressed,
 	}
 	if r.repeatLengthSamples > maxRepeatLengthSamplesValue {
 		r.repeatLengthSamples = maxRepeatLengthSamplesValue
@@ -515,4 +546,32 @@ func Max() Options {
 		MaxFreshCandidates: 32,
 		RefinePatience:     6,
 	}
+}
+
+// None skips this encoder entirely and emits the chunk as a single raw LZX
+// UNCOMPRESSED block -- no match-finding, no parsing, no block-splitting
+// trials, no Huffman-table construction. It is exactly Options{Uncompressed:
+// true}; see that field's own doc for the block layout and the fixed
+// per-chunk overhead (at most 19 bytes) this trades away all compression
+// for.
+//
+// None is deliberately NOT the sixth rung below Fastest on the (Fastest,
+// Fast, Balanced, DefaultOptions, Max) ladder documented above. That ladder
+// is an ordered set of measured (speed, size) points along one pipeline --
+// the same match finder(s) and Huffman-coding machinery, just spending more
+// or less effort on them -- so consecutive rungs differ by single-digit
+// percentages of both time and size. None isn't a further point on that
+// curve: it doesn't spend less effort on the same pipeline, it runs no
+// pipeline at all, and its size cost isn't a few more percent but the
+// entire compression ratio the ladder exists to buy. Placing it as
+// "Fastest, but a bit faster and a bit bigger" would misrepresent the
+// tradeoff it actually makes, so it is offered as its own named preset
+// instead.
+//
+// It exists for callers who already know their input won't compress
+// (already-compressed or encrypted blobs, say) and would rather skip paying
+// for a parse that cannot help, or for callers optimizing purely for
+// encoder latency who can accept the size cost outright.
+func None() Options {
+	return Options{Uncompressed: true}
 }
