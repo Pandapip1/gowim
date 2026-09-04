@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"hash"
 )
 
 // ErrNoIntegrityTable is returned by Reader.VerifyIntegrity when the WIM has
@@ -53,7 +54,8 @@ var ErrNoIntegrityTable = errors.New("wim: WIM has no integrity table")
 // above this type for the exact range this covers within WriteTo.
 type integrityAccumulator struct {
 	chunkSize uint32
-	cur       []byte
+	h         hash.Hash
+	pos       uint32 // bytes written into h since the last chunk boundary
 	hashes    []Hash
 }
 
@@ -61,30 +63,33 @@ func newIntegrityAccumulator(chunkSize uint32) *integrityAccumulator {
 	if chunkSize == 0 {
 		chunkSize = IntegrityChunkSize
 	}
-	return &integrityAccumulator{chunkSize: chunkSize, cur: make([]byte, 0, chunkSize)}
+	return &integrityAccumulator{chunkSize: chunkSize, h: sha1.New()}
 }
 
 func (a *integrityAccumulator) write(p []byte) {
 	for len(p) > 0 {
-		need := int(a.chunkSize) - len(a.cur)
+		need := int(a.chunkSize) - int(a.pos)
 		n := len(p)
 		if n > need {
 			n = need
 		}
-		a.cur = append(a.cur, p[:n]...)
+		a.h.Write(p[:n])
+		a.pos += uint32(n)
 		p = p[n:]
-		if len(a.cur) == int(a.chunkSize) {
-			a.hashes = append(a.hashes, Hash(sha1.Sum(a.cur)))
-			a.cur = a.cur[:0]
+		if a.pos == a.chunkSize {
+			a.hashes = append(a.hashes, Hash(a.h.Sum(nil)))
+			a.h.Reset()
+			a.pos = 0
 		}
 	}
 }
 
 // finish flushes any partial final chunk and returns the complete hash list.
 func (a *integrityAccumulator) finish() []Hash {
-	if len(a.cur) > 0 {
-		a.hashes = append(a.hashes, Hash(sha1.Sum(a.cur)))
-		a.cur = nil
+	if a.pos > 0 {
+		a.hashes = append(a.hashes, Hash(a.h.Sum(nil)))
+		a.h.Reset()
+		a.pos = 0
 	}
 	return a.hashes
 }
