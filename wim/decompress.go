@@ -2,11 +2,27 @@ package wim
 
 import (
 	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"github.com/Pandapip1/gowim/lzms"
 	"github.com/Pandapip1/gowim/lzx"
 	"github.com/Pandapip1/gowim/xpress"
 )
+
+// minParallelDecodeChunks is the smallest chunk count at which
+// DecodeResourceData bothers spinning up a worker pool. Below this, the
+// goroutine/WaitGroup/atomic-counter overhead is not worth it: with 1-2
+// chunks there is at most one other chunk that could ever run concurrently
+// with the first, so the serial loop already does effectively the same
+// work with none of the synchronization cost. compressChunksParallel (the
+// encode-side counterpart this mirrors) has no such threshold -- it always
+// spins up min(numChunks, GOMAXPROCS) workers -- but its worker-pool setup
+// is the same handful of cheap operations either way; the same reasoning
+// that makes a threshold merely unnecessary there makes it cheap insurance
+// here too, so it's included explicitly.
+const minParallelDecodeChunks = 4
 
 // decompressChunkInto decompresses one chunk's compressed bytes with the
 // codec selected by ctype (one of the HdrFlagCompress* constants) directly
@@ -90,6 +106,20 @@ func DecodeResourceData(payload []byte, ctype CompressionType, chunkSize uint32,
 	}
 
 	out := make([]byte, uncompressedSize)
+
+	// Each chunk's start offset within out is fully determined up front by
+	// the chunk table plus chunkSize -- chunkPos below is a running total of
+	// prior chunks' uncompressed sizes, which (unlike the compressed-side
+	// offsets table) never depends on any other chunk's actual decoded
+	// bytes. That means, unlike compressChunksParallel (whose chunks[i]
+	// entries hold compressed sizes that are unknown until that chunk is
+	// actually compressed), every chunk here can be decoded directly into
+	// its final position in out with no serial accumulator and no
+	// reduction/copy step afterward: chunk i's bounds in payload (from
+	// offsets) and its bounds in out (from chunkPos/usize) are both known
+	// before any chunk is touched.
+	chunkPos := make([]int, numChunks)
+	chunkBounds := make([][2]int, numChunks) // [start,end) within payload
 	pos := 0
 	for i := uint64(0); i < numChunks; i++ {
 		start := chunksStart + int(offsets[i])
@@ -102,19 +132,82 @@ func DecodeResourceData(payload []byte, ctype CompressionType, chunkSize uint32,
 		if start < 0 || end > len(payload) || start > end {
 			return nil, fmt.Errorf("wim: decode resource: chunk %d has invalid bounds [%d,%d) in payload of length %d", i, start, end, len(payload))
 		}
-		chunkData := payload[start:end]
+		chunkBounds[i] = [2]int{start, end}
 		usize := int(chunkUncompressedSize(i, numChunks, uncompressedSize, chunkSize))
-		dst := out[pos : pos+usize]
+		chunkPos[i] = pos
 		pos += usize
+	}
+
+	decodeChunk := func(i uint64) error {
+		b := chunkBounds[i]
+		chunkData := payload[b[0]:b[1]]
+		usize := int(chunkUncompressedSize(i, numChunks, uncompressedSize, chunkSize))
+		dst := out[chunkPos[i] : chunkPos[i]+usize]
 
 		if len(chunkData) == usize {
 			// Stored raw: compression did not shrink this chunk.
 			copy(dst, chunkData)
-			continue
+			return nil
 		}
 		if err := decompressChunkInto(dst, ctype, chunkData); err != nil {
-			return nil, fmt.Errorf("wim: decode resource: chunk %d: %w", i, err)
+			return fmt.Errorf("wim: decode resource: chunk %d: %w", i, err)
 		}
+		return nil
+	}
+
+	if numChunks < minParallelDecodeChunks {
+		for i := uint64(0); i < numChunks; i++ {
+			if err := decodeChunk(i); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	}
+
+	// Parallel path: each chunk decodes independently straight into its own
+	// disjoint sub-slice of out (see decompressChunkInto's doc comment and
+	// this function's own doc comment above), so a bounded worker pool
+	// pulling chunk indices off a lock-free counter -- the same shape as
+	// compressChunksParallel in compress.go -- needs no reduction step:
+	// workers just write into out and are done.
+	workers := uint64(runtime.GOMAXPROCS(0))
+	if workers > numChunks {
+		workers = numChunks
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		next     uint64
+	)
+	for w := uint64(0); w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := atomic.AddUint64(&next, 1) - 1
+				if i >= numChunks {
+					return
+				}
+				if err := decodeChunk(i); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return out, nil
 }
