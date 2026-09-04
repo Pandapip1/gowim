@@ -7,24 +7,39 @@ import (
 )
 
 // TestCanonicalCodewordsFlatIsIdentity locks in the property compressNone
-// relies on: with every literal symbol's length set to exactly 8 and every
-// match-header symbol's length set to 0 (flatLens, in huffman.go),
-// canonicalCodewords assigns literal byte b the codeword b itself. This
-// holds because 256 codewords of length 8 exactly saturate the code space
-// (256 * 2^-8 == 1, Kraft's inequality with equality), and
-// canonicalCodewords assigns same-length codewords in increasing symbol
-// order starting from 0 -- i.e. plain binary counting.
+// relies on: with literal symbols 0-254 at length 8 and both literal 255
+// and endOfData at length 9 (flatLens, in huffman.go), canonicalCodewords
+// assigns literal byte b the codeword b itself for every b except 255.
+// This holds because canonicalCodewords assigns all length-8 codewords
+// (0-254) before either length-9 one, and same-length codewords are
+// assigned in increasing symbol order starting from 0 -- i.e. plain binary
+// counting -- while endOfData (256) gets the second, and only other,
+// length-9 codeword.
 func TestCanonicalCodewordsFlatIsIdentity(t *testing.T) {
 	codewords := canonicalCodewords(flatLens)
-	for b := 0; b < numChars; b++ {
+	for b := 0; b < numChars-1; b++ {
 		if got := codewords[b]; got != uint16(b) {
 			t.Fatalf("canonicalCodewords(flatLens)[%d] = %d, want %d", b, got, b)
 		}
 	}
-	// No match-header symbol (256-511) has a codeword at all: flatLens
-	// gives them all length 0, so canonicalCodewords never assigns them
-	// one, and each stays the zero value.
+	// Literal 255 and endOfData share the length-9 class. Per RFC 1951
+	// 3.2.2, a length class's first codeword is (count of all shorter
+	// codewords) << 1: 255 length-8 codewords shift to 510 (0x1fe), which
+	// literal 255 (assigned first, in symbol order) gets; endOfData
+	// (256) gets the next one, 511 (0x1ff).
+	if got := codewords[numChars-1]; got != 0x1fe {
+		t.Fatalf("canonicalCodewords(flatLens)[255] = %#x, want 0x1fe", got)
+	}
+	if got := codewords[endOfData]; got != 0x1ff {
+		t.Fatalf("canonicalCodewords(flatLens)[endOfData] = %#x, want 0x1ff", got)
+	}
+	// No other match-header symbol has a codeword at all: flatLens gives
+	// them all length 0, so canonicalCodewords never assigns them one,
+	// and each stays the zero value.
 	for sym := numChars; sym < numSymbols; sym++ {
+		if sym == endOfData {
+			continue
+		}
 		if got := codewords[sym]; got != 0 {
 			t.Fatalf("canonicalCodewords(flatLens)[%d] = %d, want 0 (unused symbol)", sym, got)
 		}
@@ -98,13 +113,12 @@ func TestNoneRoundTrip(t *testing.T) {
 
 // TestNoneOutputSize checks the overhead None() adds is what its design
 // promises: the fixed 256-byte Huffman header, one literal byte's worth of
-// bits per input byte (the flat code is 8 bits per literal, i.e. 1:1 with
-// the input), and no end-of-data marker (flatLens[endOfData] is 0, so
-// compressNone's trailing writeBits call writes zero bits). The exact
-// byte count also depends on the bitwriter's coding-unit delay bookkeeping
-// (bitwriter.go), which can leave up to one 16-bit unit's worth of slack
-// depending on where the last partial unit falls -- so this checks a small
-// window around the exact size rather than pinning bitwriter internals.
+// bits per input byte (8 bits per literal for all but byte 255, which along
+// with the trailing end-of-data marker costs 9 bits each), and slack from
+// the bitwriter's coding-unit delay bookkeeping (bitwriter.go), which can
+// leave up to one 16-bit unit's worth of padding depending on where the
+// last partial unit falls -- so this checks a small window around the
+// expected size rather than pinning bitwriter internals.
 func TestNoneOutputSize(t *testing.T) {
 	rng := rand.New(rand.NewSource(3))
 	data := make([]byte, 10000)
@@ -113,7 +127,7 @@ func TestNoneOutputSize(t *testing.T) {
 	out := CompressWith(data, None())
 
 	base := huffmanHeaderSize + len(data)
-	const maxOverhead = 4 // at most two trailing 2-byte coding-unit slots
+	const maxOverhead = 8 // the 9-bit end-of-data marker plus up to two trailing 2-byte coding-unit slots
 	if len(out) < base || len(out) > base+maxOverhead {
 		t.Fatalf("None() output size = %d, want in [%d, %d] (header %d + literals %d, +/- bitwriter flush slack)",
 			len(out), base, base+maxOverhead, huffmanHeaderSize, len(data))

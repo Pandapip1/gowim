@@ -103,12 +103,15 @@ skips all compression search entirely - no LZ77 match finding
 (`lz77.go`'s hash-chain match finder never runs) and no adaptive Huffman
 tree construction (`huffman.go`'s `buildLengths`, and the `container/heap`
 machinery it uses, never run). Every input byte is emitted as a literal
-under a fixed "flat" 8-bit code in which the codeword for literal byte `b`
-is exactly `b` (see `huffman.go`'s `flatLens` for why this identity holds,
-and `TestCanonicalCodewordsFlatIsIdentity` for the test that locks it in).
-The result is still a fully spec-compliant XPRESS stream, decodable by this
-package's own `Decompress` - and any other conforming decoder - with no
-special-casing at all:
+under a fixed "flat" code in which the codeword for literal byte `b`
+is exactly `b`, for every byte except 255 (see `huffman.go`'s `flatLens`
+for why this identity holds and why byte 255 is the one exception -
+it shares a length class with the end-of-data marker so the stream can
+still carry one - and `TestCanonicalCodewordsFlatIsIdentity` for the test
+that locks it in). The result is still a fully spec-compliant XPRESS
+stream, end-of-data marker included, decodable by this package's own
+`Decompress` - and any other conforming decoder - with no special-casing
+at all:
 
 ```go
 compressed := xpress.CompressWith(data, xpress.None())

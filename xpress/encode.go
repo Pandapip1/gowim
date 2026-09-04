@@ -60,15 +60,10 @@ func compressNone(data []byte) []byte {
 	for _, b := range data {
 		writeItem(w, item{literal: b}, &flatLens, &flatCodewords)
 	}
-	// Unlike compressDefault, this does not actually write an end-of-data
-	// marker: flatLens[endOfData] is 0 (see flatLens's doc for why no
-	// codeword is available for it), so writeBits below writes zero bits
-	// and is a no-op. This package's own Decompress does not need the
-	// marker regardless (it stops as soon as it has produced expectedSize
-	// bytes; see decode.go) -- it exists only for decoders such as WIMGAPI
-	// that scan for an explicit end marker (see xpress.go), which a
-	// None-preset stream cannot support because its flat code leaves no
-	// spare codeword to carry it.
+	// Write the end-of-data marker, same as compressDefault: flatLens
+	// deliberately reserves a length-9 codeword for endOfData (see its
+	// doc) precisely so this isn't a no-op -- some XPRESS decoders
+	// (notably Microsoft's WIMGAPI) require it.
 	w.writeBits(uint32(flatCodewords[endOfData]), uint32(flatLens[endOfData]))
 
 	return w.flush()

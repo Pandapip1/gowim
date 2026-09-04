@@ -71,31 +71,35 @@ func canonicalCodewords(lens [numSymbols]uint8) [numSymbols]uint16 {
 }
 
 // flatLens is the fixed codeword-length table the None preset uses (see
-// Options.SkipSearch and None in options.go): every literal symbol (0-255)
-// gets length 8, and every match-header symbol (256-511, including
-// endOfData) gets length 0 -- unused, since a None-preset stream never
-// emits a match and never has a spare codeword to carry the end-of-data
-// marker either.
+// Options.SkipSearch and None in options.go): literal symbols 0-254 get
+// length 8, literal symbol 255 and endOfData get length 9, and every other
+// match-header symbol gets length 0 (unused, since a None-preset stream
+// never emits a match).
 //
-// 256 codewords of length 8 exactly saturate the code space: by Kraft's
-// inequality, sum(2^-len) over all codewords must be <= 1 for a valid
-// prefix code, and here it is exactly 1 (256 * 2^-8 == 1). That leaves no
-// room for any other codeword at any length, which is why every
-// match-header symbol -- endOfData included -- must be 0 here rather than
-// some small nonzero length "just in case": there is no unused prefix left
-// to assign one.
+// A full 256 codewords of length 8 would exactly saturate the code space
+// (256 * 2^-8 == 1 by Kraft's inequality), leaving no room for any other
+// codeword -- including endOfData's, which real decoders such as
+// Microsoft's WIMGAPI require (see compressDefault's doc in encode.go).
+// Trading one literal (255) down to length 9 frees exactly enough budget
+// for two length-9 codewords: 255*2^-8 + 2*2^-9 == 1. One of those goes to
+// the now length-9 literal 255, the other to endOfData, so a None-preset
+// stream still carries a valid end-of-data marker.
 //
 // Because canonicalCodewords assigns codewords in increasing-length-then-
-// increasing-symbol order (see its doc), and every literal here shares the
-// same length, the assignment for the literals reduces to plain binary
-// counting up from 0 in symbol order: canonicalCodewords(flatLens)[b] == b
-// for every b in [0,255]. This is the "flat 8-bit identity code" the None
-// preset relies on, and TestCanonicalCodewordsFlatIsIdentity locks it in.
+// increasing-symbol order (see its doc), all 255 length-8 codewords (for
+// literals 0-254) are assigned before either length-9 codeword, and the
+// assignment among same-length symbols reduces to plain binary counting up
+// from 0 in symbol order. So canonicalCodewords(flatLens)[b] == b for every
+// b in [0,254] -- byte 255 is the one exception, costing 9 bits instead of
+// 8 since it shares its length class with endOfData.
+// TestCanonicalCodewordsFlatIsIdentity locks this in.
 var flatLens = func() [numSymbols]uint8 {
 	var lens [numSymbols]uint8
-	for sym := 0; sym < numChars; sym++ {
+	for sym := 0; sym < numChars-1; sym++ {
 		lens[sym] = 8
 	}
+	lens[numChars-1] = 9
+	lens[endOfData] = 9
 	return lens
 }()
 
