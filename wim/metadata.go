@@ -44,16 +44,25 @@ func (m *ImageMetadata) AppendTo(dst []byte) ([]byte, error) {
 	}
 
 	// Security data first; its length is where the dentry region begins.
-	sdBytes := m.Security.AppendTo(nil)
-	base := uint64(len(sdBytes))
+	base := m.Security.EncodedLen()
+	offsets, treeLen := assignSubdirOffsets(m.Root, base)
+	total := base + treeLen
 
-	treeBytes, err := appendDirEntryTreeBased(nil, m.Root, base)
+	// Grow dst once to its final exact length, so both the security data
+	// and the dentry tree are written directly into final position instead
+	// of through throwaway intermediates that get copied a second time.
+	if need := len(dst) + int(total); cap(dst) < need {
+		grown := make([]byte, len(dst), need)
+		copy(grown, dst)
+		dst = grown
+	}
+
+	dst = m.Security.AppendTo(dst)
+	var err error
+	dst, err = appendDirEntryTreeWithOffsets(dst, m.Root, offsets)
 	if err != nil {
 		return dst, err
 	}
-
-	dst = append(dst, sdBytes...)
-	dst = append(dst, treeBytes...)
 	return dst, nil
 }
 
@@ -69,19 +78,23 @@ func appendDirEntryTreeBased(dst []byte, root *DirEntry, base uint64) ([]byte, e
 	if root == nil {
 		return dst, fmt.Errorf("wim: cannot serialize a nil dentry tree root")
 	}
-	offsets, _ := assignSubdirOffsets(root)
-	biased := make(map[*DirEntry]uint64, len(offsets))
-	for d, off := range offsets {
-		if off != 0 {
-			biased[d] = off + base
-		} else {
-			biased[d] = 0
-		}
+	offsets, _ := assignSubdirOffsets(root, base)
+	return appendDirEntryTreeWithOffsets(dst, root, offsets)
+}
+
+// appendDirEntryTreeWithOffsets serializes the dentry tree rooted at root
+// using precomputed (already-biased) subdir offsets, as produced by
+// assignSubdirOffsets. Factored out of appendDirEntryTreeBased so callers that
+// already need the offsets map (e.g. to size a destination buffer up front)
+// don't have to recompute it.
+func appendDirEntryTreeWithOffsets(dst []byte, root *DirEntry, offsets map[*DirEntry]uint64) ([]byte, error) {
+	if root == nil {
+		return dst, fmt.Errorf("wim: cannot serialize a nil dentry tree root")
 	}
 
 	var err error
 	// Root dentry + its end-of-directory marker.
-	if dst, err = root.appendDentry(dst, biased[root]); err != nil {
+	if dst, err = root.appendDentry(dst, offsets[root]); err != nil {
 		return dst, err
 	}
 	dst = append(dst, make([]byte, 8)...)
@@ -89,9 +102,9 @@ func appendDirEntryTreeBased(dst []byte, root *DirEntry, base uint64) ([]byte, e
 	// Pre-order walk writing each directory's children.
 	var walk func(dir *DirEntry) error
 	walk = func(dir *DirEntry) error {
-		if dir.IsDirectory() && biased[dir] != 0 {
+		if dir.IsDirectory() && offsets[dir] != 0 {
 			for _, c := range dir.Children {
-				if dst, err = c.appendDentry(dst, biased[c]); err != nil {
+				if dst, err = c.appendDentry(dst, offsets[c]); err != nil {
 					return err
 				}
 			}

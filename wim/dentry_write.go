@@ -56,11 +56,13 @@ func (d *DirEntry) extraStreamsToWrite() []Stream {
 }
 
 // assignSubdirOffsets walks the tree in wimlib's order, assigning each
-// directory a subdir offset relative to the start of the dentry region, and
-// returns the total size of the region. It mirrors calculate_subdir_offsets:
-// the root dentry and its trailing end-of-directory marker come first, then a
-// pre-order walk lays out each directory's children contiguously.
-func assignSubdirOffsets(root *DirEntry) (map[*DirEntry]uint64, uint64) {
+// directory a subdir offset relative to the start of the dentry region (biased
+// by 'base' so the tree can be placed at byte offset 'base' within a larger
+// resource), and returns the total size of the region (unbiased). It mirrors
+// calculate_subdir_offsets: the root dentry and its trailing end-of-directory
+// marker come first, then a pre-order walk lays out each directory's children
+// contiguously.
+func assignSubdirOffsets(root *DirEntry, base uint64) (map[*DirEntry]uint64, uint64) {
 	offsets := make(map[*DirEntry]uint64)
 	// The root dentry itself occupies root.outLen() bytes, followed by an
 	// 8-byte end-of-directory marker; children regions start after that.
@@ -71,7 +73,7 @@ func assignSubdirOffsets(root *DirEntry) (map[*DirEntry]uint64, uint64) {
 			offsets[dir] = 0
 			return
 		}
-		offsets[dir] = cursor
+		offsets[dir] = cursor + base
 		for _, c := range dir.Children {
 			cursor += c.outLen()
 		}
