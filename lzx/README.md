@@ -121,10 +121,11 @@ for this package:
 | `e8filter.go` | the x86 CALL-instruction (`0xE8`) address-translation filter, ported directly from wimlib's scalar reference implementation |
 | `decode.go` | block-header parsing, block decoding (`VERBATIM`/`ALIGNED`/`UNCOMPRESSED`), LZ77 match copying |
 | `encode.go` | block writing (`VERBATIM` only), codeword-length delta encoding |
-| `matcher.go` | the bounded-lookahead binary-tree LZ77 match finder, the repeat-offset queue, and the cost model |
+| `matcher.go` | the bounded-lookahead LZ77 parser, the repeat-offset queue, and the cost model |
+| `matchfinder.go` | the two interchangeable fresh-offset match-finder structures the parser can be built on: a binary tree (the default) and a hash chain |
 | `optimal.go` | the bounded multi-state beam DP parse tried alongside the lookahead parse |
 | `splitstats.go` | wimlib's statistics-driven block-splitting heuristic |
-| `options.go` | `Options`, its zero-means-default resolution, and the `Fast`/`Balanced`/`DefaultOptions`/`Max` preset ladder |
+| `options.go` | `Options`, its zero-means-default resolution, and the `Fastest`/`Fast`/`Balanced`/`DefaultOptions`/`Max` preset ladder |
 
 ## Usage
 
@@ -173,6 +174,7 @@ full corpus across all cores, the way the `wim` package drives this encoder.
 
 | preset | serial | parallel | output | alloc | vs default |
 |---|---|---|---|---|---|
+| `Fastest()` | —* | —* | —* | —* | +2.5%* |
 | `Fast()` | 8.17s | 20.5 MB/s | 10902398 | 11.6 GB | +1.75% |
 | `Balanced()` | 2.07s* | 3.2 MB/s | 10785178 | 87.9 GB | +0.66% |
 | `DefaultOptions()` | 11.64s* | 0.6 MB/s | 10714428 | 473.8 GB | — |
@@ -188,14 +190,34 @@ that GC, not compute, is what limits a many-core run. That is also why
 `Fast`'s parallel speedup exceeds its serial one — turning off the DP
 parser removes most of the allocation, not just the CPU.
 
-There is deliberately no `Fastest` rung. Until 2026-08-18 there was one,
-adding `DisableBlockSplit` on top of `Fast`'s knobs; remeasured on this
-corpus it was at most ~5% faster (and in some runs slower) while costing
-0.116% of output size on real WIM chunks and 1.222% on deliberately
-heterogeneous ones — it made 238 of 560 hetero chunks more than 1% larger
-and not one chunk smaller. Every other step in the ladder is at least 5x
-wide, so a rung that thin was not a rung; a caller who has measured its own
-workload can still set the fields directly.
+`Fastest` is the one rung not measured on that corpus: it was added on
+2026-09-03, after the mounted Windows image those runs came from was gone.
+It is the only rung that changes the match finder's *structure* rather than
+its search budget — a hash chain instead of a binary tree, walked three
+times as deep (`HashChainMatcher`, `MaxChainLen: 48`) — and on the corpus
+this package carries (`matchfinder_test.go`, 18 chunks / 572 KiB of captured
+WIM chunks plus synthetic noise, runs, x86-like code, records and text) it
+measured ~1.33x `Fast`'s serial time for 0.83% more output, worst single
+chunk +4.4%. Its "+2.5% vs default" above is that 0.83% composed with
+`Fast`'s own +1.75%, i.e. an estimate rather than a measurement. `go test
+-bench BenchmarkFastPresets ./lzx` re-runs it.
+
+An earlier, unrelated `Fastest` existed until 2026-08-18, adding
+`DisableBlockSplit` on top of `Fast`'s knobs; remeasured on the WIM corpus
+it was at most ~5% faster (and in some runs slower) while costing 0.116% of
+output size on real WIM chunks and 1.222% on deliberately heterogeneous ones
+— it made 238 of 560 hetero chunks more than 1% larger and not one chunk
+smaller. Every step from `Fast` down is at least 5x wide, so a rung that thin
+was not a rung; a caller who wants it can still set the fields directly.
+
+The whole table also predates the greedy first pass every rung got on
+2026-09-03: `compress()`'s pass 1 exists only to seed a Huffman table for
+the real passes, so it is now parsed greedily rather than with the full
+lookahead (`Options.FullFirstPass` turns that back off). Measured
+size-neutral on both corpora and on every rung — between −0.068% and
++0.019% — while being worth 1.22x at the default settings, where pass 1 is
+the only part of `compress()` that is not overlapped with anything else.
+Every serial time in the table above is therefore now pessimistic.
 
 Every preset produces a valid LZX chunk; the format never changes. Both the
 default and the `DisableDP` path were verified byte-for-byte through real

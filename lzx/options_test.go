@@ -65,6 +65,7 @@ func TestCompressWithZeroOptionsMatchesCompress(t *testing.T) {
 // must still produce a chunk this package's own decoder restores exactly.
 func TestPresetsRoundTrip(t *testing.T) {
 	presets := map[string]Options{
+		"Fastest":  Fastest(),
 		"Fast":     Fast(),
 		"Balanced": Balanced(),
 		"Default":  DefaultOptions(),
@@ -78,6 +79,16 @@ func TestPresetsRoundTrip(t *testing.T) {
 		"nohash2":       {DisableDPHash2: true},
 		"nosplit_nodp":  {DisableDPHash2: true, DisableDP: true, DisableBlockSplit: true},
 		"one_iteration": {MaxRefineIters: 1, RefinePatience: 1},
+		// The 2026-09-03 knobs, including in combinations no preset uses: a
+		// hash chain under the DP parser (which keeps its own tree either
+		// way), absurd and degenerate chain depths, and a first pass forced
+		// back to the full lookahead parser.
+		"chain":         {HashChainMatcher: true},
+		"chain_nodp":    {HashChainMatcher: true, DisableDP: true},
+		"full_pass1":    {FullFirstPass: true},
+		"full_nodp":     {FullFirstPass: true, DisableDP: true, HashChainMatcher: true},
+		"chain_deep":    {HashChainMatcher: true, MaxChainLen: 4096, DisableDP: true},
+		"chain_shallow": {HashChainMatcher: true, MaxChainLen: 1, DisableDP: true},
 	}
 	for name, data := range optionsTestCorpora(t) {
 		for pname, opts := range presets {
@@ -111,6 +122,7 @@ func TestPresetLadderIsOrdered(t *testing.T) {
 		name string
 		opts Options
 	}{
+		{"Fastest", Fastest()},
 		{"Fast", Fast()},
 		{"Balanced", Balanced()},
 		{"Default", DefaultOptions()},
@@ -147,6 +159,7 @@ func TestOptionsResolveDefaults(t *testing.T) {
 		refinePatience:      refinePatience,
 		maxRefineIters:      maxRefineItersHardCap,
 		blockSplit:          true,
+		greedyPass1:         true,
 	}
 	if got != want {
 		t.Errorf("Options{}.resolve() = %+v, want %+v", got, want)
@@ -157,5 +170,15 @@ func TestOptionsResolveDefaults(t *testing.T) {
 	}
 	if r := (Options{BeamWidth: -3, MaxChainLen: -1}).resolve(); r.beamWidth != 1 || r.maxChainLen != 1 {
 		t.Errorf("negative knobs resolved to beamWidth=%d maxChainLen=%d, want both clamped to 1", r.beamWidth, r.maxChainLen)
+	}
+
+	// greedyParse is deliberately NOT settable from Options: compress()
+	// sets it for pass 1 alone (see encode.go), and a resolve() that set it
+	// directly would silently apply it to the passes whose parse is kept.
+	if r := (Options{}).resolve(); r.greedyParse || !r.greedyPass1 {
+		t.Errorf("Options{}.resolve() = greedyParse %v, greedyPass1 %v; want false, true", r.greedyParse, r.greedyPass1)
+	}
+	if r := (Options{FullFirstPass: true}).resolve(); r.greedyPass1 {
+		t.Error("Options{FullFirstPass: true} still resolved to a greedy pass 1")
 	}
 }

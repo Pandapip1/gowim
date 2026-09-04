@@ -87,7 +87,20 @@ func compress(input []byte, o encodeOptions) []byte {
 	// optimization a full iterative optimal parser would do (see
 	// matcher.go's costModel doc and gowim's own TODO.md for why this
 	// package doesn't implement the latter).
-	toks1 := findMatchesWith(data, costModel{}, o, prevOcc2)
+	//
+	// Pass 1 is parsed greedily unless Options.FullFirstPass says otherwise
+	// (see options.go), and that applies ONLY here, on this throwaway pass,
+	// via this local copy of the options: pass 1's tokens are never emitted,
+	// so the sole thing its parse quality can affect is how good a starting
+	// table the later passes get -- a much weaker requirement than the parse
+	// that actually gets written, and one a greedy parse measurably meets
+	// just as well. Pass 1 is also the only part of compress() that is not
+	// overlapped with anything else (the two halves below fork only after
+	// it), so it is worth disproportionately more here than its share of the
+	// work suggests.
+	o1 := o
+	o1.greedyParse = o.greedyPass1
+	toks1 := findMatchesWith(data, costModel{}, o1, prevOcc2)
 	// toks1 is used only here (by buildTables/tokenFreqs), not shared with
 	// buildAlignedTable or writeBlockInto for this exact slice, so there is
 	// no redundant offsetSlot work to dedup -- slots is still threaded

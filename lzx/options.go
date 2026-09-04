@@ -12,8 +12,8 @@ package lzx
 // callers get.
 //
 // Most callers should not set these fields individually: the named presets
-// (Fast, Balanced, DefaultOptions, Max -- an ordered ladder, each a
-// specific measured combination of the fields below) are the intended
+// (Fastest, Fast, Balanced, DefaultOptions, Max -- an ordered ladder, each
+// a specific measured combination of the fields below) are the intended
 // interface, and the individual fields are the escape hatch for tuning
 // beyond them. See each preset's own doc for its measured position.
 //
@@ -24,9 +24,9 @@ package lzx
 //
 // # The preset ladder
 //
-// Fast, Balanced, DefaultOptions and Max are an ordered ladder of measured
-// (speed, size) points, from fastest/largest to slowest/smallest. Each is a
-// specific combination of the fields above, chosen by measuring the
+// Fastest, Fast, Balanced, DefaultOptions and Max are an ordered ladder of
+// measured (speed, size) points, from fastest/largest to slowest/smallest.
+// Each is a specific combination of the fields above, chosen by measuring the
 // individual knobs against each other rather than by guessing which ones
 // would matter -- and, as of the 2026-08-18 remeasurement below, by
 // measuring them on the workload this package actually exists to serve.
@@ -60,6 +60,7 @@ package lzx
 // is why the alloc column is reported alongside.
 //
 //	preset      serial   parallel    output      alloc     vs Default
+//	Fastest        --*        --*         --*        --*   +2.5% size*
 //	Fast         8.17s   20.5 MB/s   10902398    11.6 GB   +1.75% size
 //	Balanced     2.07s*   3.2 MB/s   10785178    87.9 GB   +0.66% size
 //	Default     11.64s*   0.6 MB/s   10714428   473.8 GB   --
@@ -69,13 +70,31 @@ package lzx
 // their serial column is a 30-chunk / 818 KiB subset of the same corpus.
 // Output and alloc columns are always the full 1170-chunk corpus.
 //
+// Fastest is the one rung not measured on those corpora: it was added on
+// 2026-09-03, when this machine no longer had the mounted Windows image
+// those runs came from. Its own doc carries the full measurement it WAS
+// made on (matchfinder_test.go's 572 KiB corpus, which this package carries
+// and anyone can re-run): ~1.33x Fast's serial time for 0.83% more output.
+// The "+2.5% vs Default" above is that 0.83% composed with Fast's own
+// +1.75%, i.e. an estimate, not a measurement, and it is marked as such
+// rather than quietly presented alongside numbers that are.
+//
+// The whole table also predates the greedy first pass that every rung got
+// on 2026-09-03 (see Options.FullFirstPass): every time in it is now
+// pessimistic, by 1.21x at the default settings and 1.06x on Fast, at an
+// output size that measured unchanged. The size and alloc columns still
+// stand.
+//
 // The ladder is deliberately not evenly spaced: the honest measured shape
 // of this encoder is that nearly all of the DP parser's compression win is
 // available at a small fraction of its cost (Balanced is 5x faster than
 // Default for 0.66% more output), and the last half-percent is what costs
-// the remaining order of magnitude. Every step in it is at least 5x wide;
-// see Fast's doc for the rung that was measured, found to be ~5% wide, and
-// removed for it.
+// the remaining order of magnitude. Every step from Fast down is at least
+// 5x wide; see Fast's doc for a rung that was measured, found to be ~5%
+// wide, and removed for it. Fastest, the one rung narrower than 5x, is
+// there because ~1.33x for 0.83% is still a point a caller can want, and
+// because it is the only rung that changes the match finder's structure
+// rather than its budget -- see its own doc.
 type Options struct {
 	// DisableDP skips the bounded multi-state beam DP parser
 	// (optimal.go's findMatchesOptimal) entirely, leaving only the
@@ -100,11 +119,15 @@ type Options struct {
 	// DisableDP is set.
 	MaxFreshCandidates int
 
-	// MaxChainLen bounds the binary-tree match finder's per-position
-	// comparison budget -- the classic zlib-style "search depth" (see
-	// matcher.go's bstSearch/bstInsert). Unlike the other match-finder
-	// knobs here it is shared by BOTH parsers, so it is the only one that
-	// also speeds up a DisableDP run. 0 means defaultMaxChainLen (96).
+	// MaxChainLen bounds the match finder's per-position comparison budget
+	// -- the classic zlib-style "search depth" (see matchfinder.go, where
+	// it bounds the descent of whichever structure HashChainMatcher
+	// selected). Unlike the other match-finder knobs here it is shared by
+	// BOTH parsers, so it is the only one that also speeds up a DisableDP
+	// run. Note that a given value does NOT mean the same amount of work
+	// for both structures: a chain node is far cheaper to visit than a tree
+	// node but tells you far less, so the two want different budgets -- see
+	// Fastest's doc for the sweep. 0 means defaultMaxChainLen (96).
 	MaxChainLen int
 
 	// DPRepeatLengthSamples bounds how many distinct lengths the DP parser
@@ -133,6 +156,63 @@ type Options struct {
 	// independent of RefinePatience (see encode.go's
 	// maxRefineItersHardCap). 0 means defaultMaxRefineIters (32).
 	MaxRefineIters int
+
+	// HashChainMatcher replaces the bounded-lookahead parser's
+	// binary-search-tree match finder with a plain hash chain: one
+	// recency-ordered linked list per hash bucket, walked up to MaxChainLen
+	// deep (see matchfinder.go's newChainMatcher for the structure and for
+	// the two filters it can use that a tree cannot). It affects ONLY that
+	// parser, never the DP parser (optimal.go), which needs a whole ranked
+	// set of fresh candidates per position rather than a single best one --
+	// so on a run with the DP enabled this knob changes only half the work
+	// and, since compress() keeps whichever half encodes smaller, has very
+	// little effect on output at all. It is meant for DisableDP runs, and
+	// Fastest sets it for exactly that reason; see Fastest's doc for the
+	// measured numbers.
+	//
+	// A chain is strictly a weaker search than a tree for the same
+	// comparison budget: it walks candidates in recency order instead of
+	// discarding whole lexicographic subtrees, so it can miss a longer
+	// match the tree would have found. False (the default) keeps the tree.
+	HashChainMatcher bool
+
+	// FullFirstPass makes compress()'s pass 1 -- the throwaway parse whose
+	// only product is a first Huffman table for the real passes to cost
+	// against (see compress() in encode.go) -- use the same full bounded
+	// 4-way lookahead parser as every other pass, instead of the greedy
+	// parse it uses by default. Each position in that pass then costs four
+	// match searches rather than one, since the lookahead's three
+	// continuation terms are each a speculative search at a position the
+	// parse may not even reach.
+	//
+	// False (the default) is the greedy pass, and unusually for this struct
+	// the default here is the CHEAP option rather than the thorough one.
+	// That is because a thorough pass 1 measured as buying nothing: pass 1's
+	// tokens are never emitted, so the only thing its parse quality can
+	// affect is how good a starting table the later passes get, and across
+	// both of this package's corpora and every preset the difference in
+	// final output was between -0.068% and +0.019% -- noise in both
+	// directions, and on Max, the rung that exists to spend anything for
+	// size, the greedy pass came out 0.019% SMALLER on one corpus and
+	// 0.013% larger on the other (see TestGreedyFirstPassIsSizeNeutral,
+	// which pins this on every rung).
+	//
+	// What a thorough pass 1 costs, meanwhile, is large and one-sided, most
+	// of all at the default settings, where pass 1 happens to be the only
+	// part of compress() that is NOT overlapped with anything else: the
+	// lookahead and DP halves fork only once it has finished, so its cost is
+	// pure serial time in an otherwise two-way-parallel encode. Measured on
+	// 9 chunks of matchfinder_test.go's corpus, full versus greedy pass 1:
+	// Default 2188.9ms -> 1793.7ms (1.22x), Fast 230.9ms -> 218.5ms
+	// (1.06x), Balanced 347.0ms -> 346.5ms and Fastest 164.8ms -> 162.4ms,
+	// i.e. nothing on the two rungs whose own parse is cheap enough that
+	// pass 1 is a small share of the total either way.
+	//
+	// The knob is kept, rather than the greedy pass being hard-wired,
+	// because "the seed table does not matter" is a measurement on two
+	// corpora rather than a theorem: a caller who suspects their data is the
+	// exception can turn the thorough pass back on and compare.
+	FullFirstPass bool
 
 	// DisableBlockSplit skips both block-splitting trials -- the bounded
 	// 2-block midpoint split (encode.go's trySplitChunk) and wimlib's
@@ -181,6 +261,16 @@ type encodeOptions struct {
 	refinePatience      int
 	maxRefineIters      int
 	blockSplit          bool
+	hashChain           bool
+	greedyPass1         bool
+
+	// greedyParse makes findMatchesWith (matcher.go) score each position's
+	// candidates by their own value alone, with no lookahead continuation.
+	// It is deliberately not set by resolve(): compress() sets it on the
+	// copy of these options it hands to pass 1, and only when greedyPass1
+	// is on, so that the knob cannot reach the passes whose parse is
+	// actually kept.
+	greedyParse bool
 }
 
 // resolve turns a caller-facing Options into the encoder-facing
@@ -209,6 +299,8 @@ func (o Options) resolve() encodeOptions {
 		refinePatience:      pick(o.RefinePatience, defaultRefinePatience, 1),
 		maxRefineIters:      pick(o.MaxRefineIters, defaultMaxRefineIters, 1),
 		blockSplit:          !o.DisableBlockSplit,
+		hashChain:           o.HashChainMatcher,
+		greedyPass1:         !o.FullFirstPass,
 	}
 	if r.repeatLengthSamples > maxRepeatLengthSamplesValue {
 		r.repeatLengthSamples = maxRepeatLengthSamplesValue
@@ -268,8 +360,10 @@ func defaultEncodeOptions() encodeOptions { return Options{}.resolve() }
 // amplification of its cost on whole-file data, and still no measurable
 // speed win.
 //
-// That asymmetry is why there is no separate "Fastest" rung any more. The
-// preset that set all three knobs existed until 2026-08-18; remeasured on
+// That asymmetry is why the "Fastest" rung that existed until 2026-08-18
+// was removed. (The Fastest below is a different preset, added on
+// 2026-09-03 on a much larger measured speed difference; the two share
+// nothing but the name.) That preset set all three knobs; remeasured on
 // real WIM data it was at most 5% faster than this one (and sometimes
 // slower), for 2.3x the size cost on whole files and 22x on heterogeneous
 // ones. Every other step in this ladder is at least 5x wide, so a rung
@@ -279,11 +373,96 @@ func defaultEncodeOptions() encodeOptions { return Options{}.resolve() }
 // DisableBlockSplit: true} -- the individual fields are exactly the escape
 // hatch for that -- but it should not be reached for by name and by
 // default.
+//
+// # A note on the first pass (2026-09-03)
+//
+// The greedy first pass every rung now gets by default (see
+// Options.FullFirstPass) is worth 230.9ms -> 218.5ms, 1.06x, on this
+// preset, for a size difference of -0.061% / +0.003% on the two corpora --
+// i.e. nothing. The ladder-table serial figure above predates it.
 func Fast() Options {
 	return Options{
 		DisableDP:      true,
 		MaxChainLen:    16,
 		RefinePatience: 1,
+	}
+}
+
+// Fastest is Fast with the match-finder *structure* changed rather than
+// just its budget: a hash chain instead of a binary tree
+// (HashChainMatcher), walked three times as deep (MaxChainLen 48) to buy
+// back most of what a chain gives up at equal depth, plus a greedy first
+// pass.
+//
+// Measured 2026-09-03 on matchfinder_test.go's corpus (18 chunks /
+// 585,216 bytes: captured WIM chunks plus synthetic noise, runs, x86-like
+// code, records and text), whole-corpus serial encode time, mean of 25 runs
+// each, otherwise-idle i9-12900K, every row on top of Fast's other knobs:
+//
+//	match finder            time    vs BST/16  size       worst chunk
+//	BST,   MaxChainLen 16   234.1ms   --       252218     --
+//	chain, MaxChainLen 16   157.8ms   1.48x    +1.784%    +13.89%
+//	chain, MaxChainLen 32   167.9ms   1.39x    +1.200%     +8.76%
+//	chain, MaxChainLen 48   165.9ms   1.41x    +0.834%     +4.37%
+//	chain, MaxChainLen 64   178.2ms   1.31x    +0.629%     +3.32%
+//	chain, MaxChainLen 96   183.9ms   1.27x    +0.379%     +4.05%
+//
+// (Those rows isolate the match finder: none of them sets GreedyFirstPass,
+// which Fast now also sets, so the tree row is 234.1ms rather than the
+// ~220ms Fast itself measures today. Preset against preset, as
+// BenchmarkFastPresets runs them, it is 219.3ms vs 166.3ms in one 36-run
+// set and 221.1ms vs 164.5ms in another -- 1.32x to 1.34x -- for the
+// +0.827% of output the ratio test reports.)
+//
+// The greedy first pass every rung now gets by default (see
+// Options.FullFirstPass) is worth less here than anywhere else -- 162.4ms
+// vs 164.8ms mean over 48 runs, i.e. nothing outside the noise -- because a
+// chain's parse is cheap enough that pass 1 is a smaller share of the
+// total. It is not opted out of, because it costs nothing either.
+//
+// A chain finds worse matches than a tree at equal depth; that is not in
+// dispute, and the first chain row is what it costs. What the sweep shows
+// is that a chain node is cheap enough (a prepend rather than a rewiring
+// descent, half the per-position memory, and an exact one-byte reject test
+// before any comparison -- see matchfinder.go's newChainMatcher) that three
+// times the depth still runs 1.41x faster than the tree, and at that depth
+// most of the ratio comes back.
+//
+// Depth 48 rather than 16 for a 5% speed difference is the same judgment
+// DisableBlockSplit gets above, and for the same reason: the worst-chunk
+// column. Depth 16 more than triples the tail (+13.89% on a single chunk,
+// on run-heavy data, where a tree's ordered search is at its most
+// valuable), and this package has repeatedly declined to buy a few percent
+// of speed with that kind of amplification. Depth 48's +4.37% worst case is
+// in the range the ladder's other rungs already span.
+//
+// This is a separate rung rather than a change to Fast because +0.827% of
+// output is a real cost, not a rounding error, on a ladder whose entire
+// Fast-to-Default span is 1.75%: a caller who wants Fast's ratio should
+// keep getting exactly Fast's ratio. It IS a rung, unlike the old "Fastest"
+// preset removed on 2026-08-18 (which was at most 5% faster than Fast for
+// 2.3x the size cost on whole files and 22x on heterogeneous ones): 1.33x
+// for +0.827% is a genuinely different (speed, size) point.
+//
+// A 4-byte bucket hash was tried here too, on the theory that the rung
+// named "fastest" should take every speed knob going. It does speed up the
+// TREE (216ms vs 228ms, 1.06x, for +0.842% size) but not the chain, which
+// is what this preset uses: every 4-byte chain configuration measured was
+// slower, or larger, or both, than the 3-byte chain/48 this preset ships
+// (chain/96 with a 4-byte hash: 173.3ms mean, +0.223% size; chain/128:
+// 182.0ms, +0.147%). A chain already rejects a false neighbor in one byte
+// compare (see matchfinder.go's newChainMatcher), so it has much less to
+// gain from cleaner buckets than a tree, whose whole budget goes into an
+// ordered descent that false neighbors misdirect -- while both pay the same
+// price, namely that a match whose only candidate is exactly 3 bytes long
+// becomes unfindable. It is not kept as an option; see matcher.go's hash
+// for the record.
+func Fastest() Options {
+	return Options{
+		DisableDP:        true,
+		HashChainMatcher: true,
+		MaxChainLen:      48,
+		RefinePatience:   1,
 	}
 }
 

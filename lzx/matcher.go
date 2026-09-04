@@ -329,145 +329,56 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 	for i := range head {
 		head[i] = -1
 	}
-	// sons holds per-position child links for a binary search tree rooted
-	// at head[hash(pos)], ordered lexicographically by each position's
-	// suffix -- see bstSearch/searchAndInsert below. This replaces an
-	// earlier version of this package that used a simple hash-chain
-	// (recency-ordered linked list) here: a BST gives meaningfully better
-	// candidates within the same bounded comparison budget (maxChainLen),
-	// since it can discard whole subtrees known to be lexicographically on
-	// the wrong side rather than walking a flat recency list, the same
-	// technique used by real encoders' "bt" match finders (e.g. the LZMA
-	// SDK's bt4). See gowim's own TODO.md for the real, measured
-	// improvement this made.
-	//
-	// Node p's two children are interleaved into one array as
-	// sons[2*p] (left) and sons[2*p+1] (right), matching the LZMA SDK's own
-	// bt4 layout: a bstInsert/searchAndInsert descent step reads one
-	// child of the current node and then writes the *other* slot (the new
-	// node's sibling pointer), so keeping both children in the same cache
-	// line halves the cache lines touched per step versus two separate
-	// left/right slices.
-	sons := make([]int32, 2*n)
 
+	// minLook is how many bytes at a position the bucket hash consumes, and
+	// therefore the shortest suffix this match finder is willing to index at
+	// all: a position with fewer than this many bytes left has no hash, and
+	// is never inserted or searched. It matches minMatch, the shortest
+	// fresh-offset match this parser will emit, so nothing findable is
+	// unindexed and nothing indexed is unusable.
+	//
+	// A 4-byte hash was implemented and measured against this one on
+	// 2026-09-03 (matchfinder_test.go's corpus, 18 chunks / 585,216 bytes,
+	// i9-12900K). Fewer distinct prefixes collide into one bucket, so the
+	// bounded per-position budget is spent on likelier candidates -- but a
+	// position whose only available match is exactly 3 bytes long then
+	// shares a bucket with nothing and becomes unfindable, and on this
+	// corpus that loss dominated: with the tree at depth 16 it was 1.06x
+	// faster (216ms vs 228ms) for +0.842% output, and with the hash chain it
+	// was not faster at all at any depth that matched the 3-byte version's
+	// output size. It is not kept as an option, for the same reason
+	// matchlen.go's AVX2 variant is not: an alternative that no preset wants
+	// should not sit in the public API for someone to find and enable.
+	const minLook = 3
+	// hash maps the minLook bytes at position i to a bucket: the classic
+	// Knuth multiplicative hash, keeping the high hashBits bits of the
+	// product (the well-mixed end).
 	hash := func(i int) uint32 {
 		v := uint32(data[i]) | uint32(data[i+1])<<8 | uint32(data[i+2])<<16
 		return (v * 2654435761) >> (32 - hashBits)
 	}
 
-	// bstSearch finds the best match for the suffix starting at pos among
-	// all previously-inserted positions, without inserting pos itself, so
-	// it is safe to call speculatively for a lazy-matching peek (see
-	// chooseMatch below). It walks the BST rooted at head[hash(pos)],
-	// following the same comparison logic searchAndInsert uses to place
-	// new nodes, bounded to maxChainLen comparisons.
+	// The three match-finder entry points the parse below uses, bound once
+	// here to whichever structure o selects (see newBSTMatcher /
+	// newChainMatcher below, and Options.HashChainMatcher):
 	//
-	// limit (the match-length cap for this pos) is hoisted out of the
-	// per-node loop rather than recomputed via a matchLenCapped-style
-	// helper on every node visit: every candidate c in the tree at the
-	// time of any bstSearch/searchAndInsert call satisfies c < pos
-	// (positions are only ever inserted in increasing order -- see
-	// searchAndInsert and insertRange below -- and always strictly before
-	// the position currently being searched), so n-c > n-pos always, and
-	// the "cap to buffer end" limit is always n-pos, never n-c. This makes
-	// limit loop-invariant. Since it's invariant, this (pure, read-only)
-	// search can also stop the instant bestLen reaches it: no later
-	// candidate can ever produce a longer match than the shared cap. This
-	// early-exit is NOT applied to searchAndInsert below, which must
-	// complete its full descent regardless of bestLen to correctly rewire
-	// the tree.
-	bstSearch := func(pos int) (bestLen, bestOff int) {
-		if pos+3 > n {
-			return 0, 0
-		}
-		limit := n - pos
-		if limit > maxMatchLen {
-			limit = maxMatchLen
-		}
-		cur := head[hash(pos)]
-		depth := 0
-		for cur >= 0 && depth < o.maxChainLen {
-			c := int(cur)
-			l := commonPrefixLen(data, c, pos, limit)
-			if l > bestLen {
-				bestLen = l
-				bestOff = pos - c
-				if bestLen == limit {
-					break
-				}
-			}
-			if l >= limit || data[c+l] < data[pos+l] {
-				cur = sons[2*c+1]
-			} else {
-				cur = sons[2*c]
-			}
-			depth++
-		}
-		return bestLen, bestOff
-	}
-
-	// searchAndInsert merges what used to be a bstSearch(pos) call
-	// immediately followed by a bstInsert(pos) call into one descent: both
-	// walk the identical path (same root, same loop bound, same per-node
-	// comparison predicate), so the two together only need to walk it
-	// once, computing the same best-length/offset that a separate
-	// bstSearch would have while also linking pos into the tree exactly
-	// as a separate insert-only descent would (per the standard
-	// "insert while descending" binary-tree match-finder algorithm: pos
-	// becomes the new root for its hash bucket, with the old tree split
-	// into pos's left/right subtrees by lexicographic comparison against
-	// pos's own suffix as we descend). Only valid at a call site where the
-	// two operations are genuinely back-to-back with no intervening tree
-	// mutation -- the main loop's own committed position -- never for the
-	// other, read-only bstSearch call sites (litContinuation, and any
-	// bestFreshCandidate/bstSearch call not immediately followed by
-	// inserting that same position), which must remain non-mutating so
-	// they're safe to call speculatively.
-	searchAndInsert := func(pos int) (bestLen, bestOff int) {
-		if pos+3 > n {
-			return 0, 0
-		}
-		limit := n - pos // see bstSearch's own doc for why this is safe to hoist
-		if limit > maxMatchLen {
-			limit = maxMatchLen
-		}
-		h := hash(pos)
-		cur := head[h]
-		ptrLo := &sons[2*pos]
-		ptrHi := &sons[2*pos+1]
-		depth := 0
-		for cur >= 0 && depth < o.maxChainLen {
-			c := int(cur)
-			l := commonPrefixLen(data, c, pos, limit)
-			if l > bestLen {
-				bestLen = l
-				bestOff = pos - c
-			}
-			if l >= limit || data[c+l] < data[pos+l] {
-				*ptrLo = int32(c)
-				ptrLo = &sons[2*c+1]
-				cur = sons[2*c+1]
-			} else {
-				*ptrHi = int32(c)
-				ptrHi = &sons[2*c]
-				cur = sons[2*c]
-			}
-			depth++
-		}
-		*ptrLo = -1
-		*ptrHi = -1
-		head[h] = int32(pos)
-		return bestLen, bestOff
-	}
-
-	// bstInsert links position pos into the BST rooted at head[hash(pos)],
-	// without computing/returning a best-match result -- used at call
-	// sites (the litLookahead cache hit path below) where a position's
-	// best fresh candidate was already computed speculatively by an
-	// earlier, non-inserting bstSearch call and only the insertion itself
-	// still needs to happen.
-	bstInsert := func(pos int) {
-		_, _ = searchAndInsert(pos)
+	//   - searchOnly(pos): find the best match for pos among already-inserted
+	//     positions WITHOUT inserting pos. Must not mutate anything, since
+	//     the bounded lookahead calls it speculatively at positions it may
+	//     never commit to.
+	//   - searchInsert(pos): the same search, fused with inserting pos --
+	//     both structures can do the two in a single pass over the same
+	//     bucket, and the main loop always wants both at its committed
+	//     position.
+	//   - insertOnly(pos): insert pos, discarding any match result (used for
+	//     the positions a committed match skips over, and on the
+	//     litLookahead cache-hit path where the search already happened).
+	var searchOnly, searchInsert func(pos int) (bestLen, bestOff int)
+	var insertOnly func(pos int)
+	if o.hashChain {
+		searchOnly, searchInsert, insertOnly = newChainMatcher(data, o, head, hash, minLook)
+	} else {
+		searchOnly, searchInsert, insertOnly = newBSTMatcher(data, o, head, hash, minLook)
 	}
 
 	// matchLenAt returns the common-prefix length between data[i:] and
@@ -475,7 +386,7 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 	// where callers always pass i < j (see repeatLenAt below: j is the
 	// current position, i = j-off with off >= 1). Since i < j always,
 	// n-i > n-j always, so the buffer-end cap is always n-j, never n-i --
-	// the mirror image of bstSearch's own dead-branch simplification
+	// the mirror image of the BST search's own dead-branch simplification
 	// above.
 	matchLenAt := func(i, j int) int {
 		limit := n - j
@@ -536,9 +447,9 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 
 	// freshCandidateFrom builds the fresh-match candidateMatch for position
 	// i from an already-computed (bestLen, bestOff) BST search result --
-	// factored out so both bestFreshCandidate (a plain bstSearch) and the
-	// main loop's merged searchAndInsert call (see item 2's doc on
-	// searchAndInsert above) can share the exact same candidate-building
+	// factored out so both bestFreshCandidate (a plain searchOnly) and the
+	// main loop's merged searchInsert call (see newBSTMatcher/
+	// newChainMatcher above) can share the exact same candidate-building
 	// logic.
 	freshCandidateFrom := func(i, bestLen, bestOff int) candidateMatch {
 		if bestLen < minMatch {
@@ -550,7 +461,7 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 	}
 
 	bestFreshCandidate := func(i int) candidateMatch {
-		bestLen, bestOff := bstSearch(i)
+		bestLen, bestOff := searchOnly(i)
 		return freshCandidateFrom(i, bestLen, bestOff)
 	}
 
@@ -583,8 +494,8 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 	// deliberately starting one past start, not at start itself: the only
 	// caller (the main loop below, as insertRange(i, i+m.length) after
 	// committing a match at i) always already inserted i itself earlier in
-	// the same iteration (via searchAndInsert(i) or, on a litLookahead
-	// cache hit, bstInsert(i)), so starting at start here would just be a
+	// the same iteration (via searchInsert(i) or, on a litLookahead
+	// cache hit, insertOnly(i)), so starting at start here would just be a
 	// second, redundant insert of a position already in the tree. This is
 	// the one and only double-insert this file was ever at risk of (every
 	// other position insertRange covers, start+1..end-1, has never been
@@ -592,7 +503,7 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 	// main loop's forward-only advance).
 	insertRange := func(start, end int) {
 		for p := start + 1; p < end; p++ {
-			bstInsert(p)
+			insertOnly(p)
 		}
 	}
 
@@ -639,7 +550,7 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 	// the one actually taken, the main loop's next iteration needs the
 	// exact same triple at the exact same position with the exact same
 	// queue (queue is untouched by a literal), and the BST has gained no
-	// new insertions in between (only bstInsert(i) itself, which already
+	// new insertions in between (only insertOnly(i) itself, which already
 	// happened before this continuation was computed) -- so it is safe to
 	// reuse rather than recompute. This does NOT extend to the rep/fresh/
 	// fresh2 continuations evaluated at i+match.length: those speculative
@@ -687,25 +598,25 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 		var rep, fresh, fresh2 candidateMatch
 		if litLookahead.valid && litLookahead.pos == i && litLookahead.queue == queue {
 			// fresh was already computed by a prior, non-inserting
-			// bstSearch call (via litContinuation); i itself still needs
+			// searchOnly call (via litContinuation); i itself still needs
 			// to be linked into the tree, but there is no longer a fresh
 			// BST search to merge that insert into, so just insert.
 			rep, fresh, fresh2 = litLookahead.rep, litLookahead.fresh, litLookahead.fresh2
-			bstInsert(i)
+			insertOnly(i)
 		} else {
 			rep = bestRepeatCandidate(i, queue)
-			// searchAndInsert merges the bstSearch(i) that would otherwise
-			// run here with the bstInsert(i) that must happen right after
-			// it anyway (see searchAndInsert's own doc for why this is
+			// searchInsert merges the searchOnly(i) that would otherwise
+			// run here with the insertOnly(i) that must happen right after
+			// it anyway (see newBSTMatcher's own doc for why this is
 			// safe): inserting i's own tree entry first would let it match
 			// against itself at offset 0, so the search half of the
 			// descent still has to see the tree as it was before i was
-			// added -- which is exactly what searchAndInsert's single
+			// added -- which is exactly what searchInsert's single
 			// descent does (it only links pos in as it returns, via the
 			// dangling ptrLo/ptrHi left after the loop). bestFreshCandidate2
 			// doesn't use the BST at all (see buildHash2PrevOcc), so
 			// ordering relative to it doesn't matter.
-			bestLen, bestOff := searchAndInsert(i)
+			bestLen, bestOff := searchInsert(i)
 			fresh = freshCandidateFrom(i, bestLen, bestOff)
 			fresh2 = bestFreshCandidate2(i)
 		}
@@ -720,15 +631,37 @@ func findMatchesWith(data []byte, model costModel, o encodeOptions, prevOcc2 []i
 			}
 		}
 
-		consider(lookaheadOption{total: litContinuation(i+1, queue)}) // literal now
-		if rep.found && rep.value > 0 {
-			consider(lookaheadOption{cand: rep, total: rep.value + continuationValue(i+rep.length, applyMatch(queue, rep.repeat, rep.offset))})
-		}
-		if fresh.found && fresh.value > 0 {
-			consider(lookaheadOption{cand: fresh, total: fresh.value + continuationValue(i+fresh.length, applyMatch(queue, fresh.repeat, fresh.offset))})
-		}
-		if fresh2.found && fresh2.value > 0 {
-			consider(lookaheadOption{cand: fresh2, total: fresh2.value + continuationValue(i+fresh2.length, applyMatch(queue, fresh2.repeat, fresh2.offset))})
+		// o.greedyParse drops every continuation term (including the
+		// literal option's, which is the only reason litContinuation exists)
+		// and leaves each option scored by its own immediate value alone --
+		// i.e. plain greedy "take the best-valued candidate here, else a
+		// literal". That collapses this position's cost from four match
+		// searches to one, since all three continuations are speculative
+		// searches at positions the parse may not even end up at. Nothing
+		// but compress()'s first pass sets it; see encodeOptions.greedyParse
+		// (options.go) and compress() in encode.go for why a pass whose only
+		// product is a Huffman table does not need the lookahead.
+		if o.greedyParse {
+			if rep.found && rep.value > 0 {
+				consider(lookaheadOption{cand: rep, total: rep.value})
+			}
+			if fresh.found && fresh.value > 0 {
+				consider(lookaheadOption{cand: fresh, total: fresh.value})
+			}
+			if fresh2.found && fresh2.value > 0 {
+				consider(lookaheadOption{cand: fresh2, total: fresh2.value})
+			}
+		} else {
+			consider(lookaheadOption{total: litContinuation(i+1, queue)}) // literal now
+			if rep.found && rep.value > 0 {
+				consider(lookaheadOption{cand: rep, total: rep.value + continuationValue(i+rep.length, applyMatch(queue, rep.repeat, rep.offset))})
+			}
+			if fresh.found && fresh.value > 0 {
+				consider(lookaheadOption{cand: fresh, total: fresh.value + continuationValue(i+fresh.length, applyMatch(queue, fresh.repeat, fresh.offset))})
+			}
+			if fresh2.found && fresh2.value > 0 {
+				consider(lookaheadOption{cand: fresh2, total: fresh2.value + continuationValue(i+fresh2.length, applyMatch(queue, fresh2.repeat, fresh2.offset))})
+			}
 		}
 
 		if !best.cand.found {
