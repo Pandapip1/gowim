@@ -1,6 +1,9 @@
 package wim
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // BlobDescriptorSize is the size in bytes of one blob-table entry on disk
 // (struct blob_descriptor_disk): a 24-byte resource header, a 2-byte part
@@ -72,6 +75,20 @@ func (d BlobDescriptor) appendTo(dst []byte) ([]byte, error) {
 // is out of scope).
 type BlobTable struct {
 	Entries []BlobDescriptor
+
+	// indexMu guards hashIndex/indexedN, which cache a Hash -> index-into-
+	// Entries lookup table for ByHash. Entries is an exported field that many
+	// callers mutate directly (always by appending -- see ByHash's doc
+	// comment and this package's/callers' tests), so there is no setter to
+	// hook; instead ensureIndexLocked lazily notices growth and extends the
+	// cache incrementally. A mutex (rather than e.g. sync.Once) is needed
+	// because ByHash is called concurrently on a single, already-fully-
+	// parsed BlobTable during export (see blob_pipeline.go's
+	// encodeBlobsPipeline, whose workers all call BlobSource.Blob, which
+	// calls ByHash, concurrently on the same source table).
+	indexMu   sync.Mutex
+	hashIndex map[Hash]int
+	indexedN  int // number of leading Entries already reflected in hashIndex
 }
 
 // ParseBlobTable decodes a blob table from its (already-decompressed) resource
@@ -111,7 +128,56 @@ func (t *BlobTable) EncodedLen() int { return len(t.Entries) * BlobDescriptorSiz
 // (BlobDescriptor{}, false) if no entry matches. If multiple entries share a
 // hash (which the format permits but wimlib avoids by deduplicating on
 // write), the first matching entry in table order is returned.
+//
+// This is an O(1) lookup backed by a lazily-built/incrementally-extended
+// hash index (see ensureIndexLocked); it used to be an O(n) linear scan,
+// which measurably dominated real-image export/read times (see
+// byHashLinearScan, retained only for the A/B benchmark in
+// blobtable_bench_test.go).
 func (t *BlobTable) ByHash(h Hash) (BlobDescriptor, bool) {
+	t.indexMu.Lock()
+	t.ensureIndexLocked()
+	idx, ok := t.hashIndex[h]
+	t.indexMu.Unlock()
+	if !ok {
+		return BlobDescriptor{}, false
+	}
+	return t.Entries[idx], true
+}
+
+// ensureIndexLocked brings t.hashIndex up to date with the current
+// t.Entries, assuming t.indexMu is already held.
+//
+// Every known mutator of Entries in this codebase (ParseBlobTable,
+// RebuildBlobTable, WriteTo, component.Install, and this package's own
+// tests) only ever appends -- it never reorders, truncates, or rewrites an
+// existing entry's Hash in place. So the common case is a pure length
+// increase, handled here by indexing just the new tail (each new entry only
+// added to the map if its hash isn't already present, which preserves
+// ByHash's "lowest index wins" contract whether the index was built in one
+// pass or many). If Entries ever *shrinks* (not something any caller does
+// today, but not contractually forbidden either), the cached index is
+// discarded and rebuilt from scratch to avoid keeping stale index values
+// past the end of the current slice.
+func (t *BlobTable) ensureIndexLocked() {
+	n := len(t.Entries)
+	if t.hashIndex == nil || t.indexedN > n {
+		t.hashIndex = make(map[Hash]int, n)
+		t.indexedN = 0
+	}
+	for i := t.indexedN; i < n; i++ {
+		h := t.Entries[i].Hash
+		if _, exists := t.hashIndex[h]; !exists {
+			t.hashIndex[h] = i
+		}
+	}
+	t.indexedN = n
+}
+
+// byHashLinearScan is the pre-index O(n) implementation of ByHash, kept only
+// so blobtable_bench_test.go can measure the improvement side-by-side; it is
+// not used by any non-test code.
+func (t *BlobTable) byHashLinearScan(h Hash) (BlobDescriptor, bool) {
 	for _, e := range t.Entries {
 		if e.Hash == h {
 			return e, true

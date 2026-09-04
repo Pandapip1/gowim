@@ -243,8 +243,6 @@ func prepareExport(src *Reader, srcBlobTable *BlobTable, srcXMLData *XMLData, im
 	metaResources := srcBlobTable.MetadataResources()
 
 	images := make([]*ImageMetadata, 0, len(imageIndices))
-	counts := make(map[Hash]int)
-	var order []Hash
 	for _, idx := range imageIndices {
 		if idx < 1 || idx > len(metaResources) {
 			return nil, nil, nil, fmt.Errorf("wim: ExportImage: image index %d out of range (source has %d image(s))", idx, len(metaResources))
@@ -254,8 +252,21 @@ func prepareExport(src *Reader, srcBlobTable *BlobTable, srcXMLData *XMLData, im
 			return nil, nil, nil, wrapErr(fmt.Sprintf("ExportImage: image %d metadata", idx), err)
 		}
 		images = append(images, im)
-		exportHashes(im.Root, counts, &order)
 	}
+
+	// Note: we deliberately do not call exportHashes here even though
+	// RebuildBlobTable (below) needs exactly that per-image hash/count data.
+	// This function used to compute it via its own exportHashes loop and
+	// then discard the result, immediately calling RebuildBlobTable, which
+	// walks every image's full DirEntry tree *again* to recompute the same
+	// counts/order from scratch. On a real multi-gigabyte WIM each such walk
+	// is the expensive one (calling BlobTable.ByHash once per file), so that
+	// was a full redundant tree walk per export call. RebuildBlobTable stays
+	// the single source of truth for this computation -- it's a public
+	// function external callers (e.g. driver.Uninstall/appx.Remove/
+	// component.Remove/registry.Hive.Save's higher-level caller) invoke
+	// directly per its own doc comment, so its signature/behavior is left
+	// untouched here; this function simply stops duplicating its work.
 
 	bt, err := RebuildBlobTable(images, srcBlobTable)
 	if err != nil {
