@@ -19,15 +19,12 @@ const (
 	numLiteralSyms    = 256
 )
 
-func decompress(in []byte, outNBytes int) ([]byte, error) {
+func decompressInto(out, in []byte) error {
 	if len(in)%2 != 0 || len(in) < 4 {
-		return nil, fmt.Errorf("lzms: invalid compressed data length %d (must be even and >= 4)", len(in))
-	}
-	if outNBytes < 0 {
-		return nil, fmt.Errorf("lzms: negative expected size")
+		return fmt.Errorf("lzms: invalid compressed data length %d (must be even and >= 4)", len(in))
 	}
 
-	out := make([]byte, outNBytes)
+	outNBytes := len(out)
 	outPos := 0
 
 	rd := newRangeDecoder(in)
@@ -125,11 +122,11 @@ func decompress(in []byte, outNBytes int) ([]byte, error) {
 
 			length, err := decodeLength()
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			if err := lzCopy(out, outPos, outNBytes, length, offset); err != nil {
-				return nil, err
+				return err
 			}
 			outPos += int(length)
 		} else {
@@ -171,23 +168,23 @@ func decompress(in []byte, outNBytes int) ([]byte, error) {
 
 			length, err := decodeLength()
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			span := uint32(1) << power
 			offset := rawOffset << power
 
 			if offset>>power != rawOffset {
-				return nil, fmt.Errorf("lzms: delta offset overflow")
+				return fmt.Errorf("lzms: delta offset overflow")
 			}
 			if offset+span < offset {
-				return nil, fmt.Errorf("lzms: delta offset+span overflow")
+				return fmt.Errorf("lzms: delta offset+span overflow")
 			}
 			if uint64(offset)+uint64(span) > uint64(outPos) {
-				return nil, fmt.Errorf("lzms: delta match buffer underrun")
+				return fmt.Errorf("lzms: delta match buffer underrun")
 			}
 			if uint64(length) > uint64(outNBytes-outPos) {
-				return nil, fmt.Errorf("lzms: delta match buffer overrun")
+				return fmt.Errorf("lzms: delta match buffer overrun")
 			}
 
 			matchPos := outPos - int(offset)
@@ -201,7 +198,7 @@ func decompress(in []byte, outNBytes int) ([]byte, error) {
 
 	x86Filter(out, true)
 
-	return out, nil
+	return nil
 }
 
 // lzCopy validates and performs a (possibly overlapping) LZ77-style copy

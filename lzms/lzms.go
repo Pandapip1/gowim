@@ -82,6 +82,8 @@
 // same input. See README.md for the real-data verification performed.
 package lzms
 
+import "fmt"
+
 // Compress compresses data using LZMS and returns the compressed bytes.
 // The returned buffer contains only the raw LZMS bitstream (both the
 // forward range-coded stream and the backward Huffman/verbatim-bit stream
@@ -118,5 +120,20 @@ func CompressWith(data []byte, opts Options) []byte {
 // metadata); LZMS's raw bitstream does not self-describe the decompressed
 // length.
 func Decompress(data []byte, expectedSize int) ([]byte, error) {
-	return decompress(data, expectedSize)
+	if expectedSize < 0 {
+		return nil, fmt.Errorf("lzms: negative expected size")
+	}
+	out := make([]byte, expectedSize)
+	if err := DecompressInto(out, data); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DecompressInto decompresses an LZMS-compressed buffer produced by
+// Compress (or by any other conformant single-block LZMS encoder) into dst,
+// whose length is the exact expected decompressed size, instead of
+// allocating a fresh buffer.
+func DecompressInto(dst, data []byte) error {
+	return decompressInto(dst, data)
 }

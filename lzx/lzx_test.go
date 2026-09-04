@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+// decompress is a test-only convenience wrapper around decompressInto,
+// preserving the pre-refactor (data, expectedSize) -> ([]byte, error) shape
+// used throughout this file's white-box tests.
+func decompress(data []byte, expectedSize int) ([]byte, error) {
+	out := make([]byte, expectedSize)
+	if err := decompressInto(out, data); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TestBuildLengthsSingleUsedSymbolIsComplete guards against a real bug found
 // and fixed during gowim/wim's write-side integration testing (2026-07-10):
 // when exactly one symbol in an alphabet had nonzero frequency, buildLengths

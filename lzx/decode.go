@@ -2,19 +2,21 @@ package lzx
 
 import "fmt"
 
-// decode implements the LZX WIM-flavor decompression algorithm, ported from
-// wimlib's src/lzx_decompress.c (lzx_decompress / lzx_decompress_block /
-// lzx_read_block_header / lzx_read_codeword_lens). See lzx.go for the
+// decompressInto implements the LZX WIM-flavor decompression algorithm,
+// ported from wimlib's src/lzx_decompress.c (lzx_decompress /
+// lzx_decompress_block / lzx_read_block_header / lzx_read_codeword_lens),
+// writing directly into the caller-supplied out (whose length is the exact
+// expected uncompressed size) instead of allocating. See lzx.go for the
 // overall scope and source citations.
-func decompress(data []byte, expectedSize int) ([]byte, error) {
+func decompressInto(out, data []byte) error {
+	expectedSize := len(out)
 	order, err := windowOrder(expectedSize)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	nMainSyms := numMainSyms(order)
 	nOffsetSlots := numOffsetSlots(order)
 
-	out := make([]byte, expectedSize)
 	pos := 0
 
 	r := newBitReader(data)
@@ -40,7 +42,7 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 			blockSize = int(r.readBits(16))
 		}
 		if blockSize < 1 || blockSize > expectedSize-pos {
-			return nil, fmt.Errorf("lzx: %w: invalid block size", ErrInvalidData)
+			return fmt.Errorf("lzx: %w: invalid block size", ErrInvalidData)
 		}
 		switch blockType {
 		case blockTypeVerbatim, blockTypeAligned:
@@ -52,13 +54,13 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 			}
 
 			if err := readCodewordLens(r, mainLens[:numChars]); err != nil {
-				return nil, err
+				return err
 			}
 			if err := readCodewordLens(r, mainLens[numChars:]); err != nil {
-				return nil, err
+				return err
 			}
 			if err := readCodewordLens(r, lenLens); err != nil {
-				return nil, err
+				return err
 			}
 
 			mainDec := newHuffDecoder(mainLens, maxMainCodewordLen)
@@ -74,7 +76,7 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 			for pos != blockEnd {
 				mainSym, ok := mainDec.decode(r)
 				if !ok {
-					return nil, fmt.Errorf("lzx: %w: bad main symbol", ErrInvalidData)
+					return fmt.Errorf("lzx: %w: bad main symbol", ErrInvalidData)
 				}
 				if int(mainSym) < numChars {
 					out[pos] = byte(mainSym)
@@ -88,13 +90,13 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 				length := int(mainSym) % numLenHeaders
 				offsetSlot := (int(mainSym) - numChars) / numLenHeaders
 				if offsetSlot >= nOffsetSlots {
-					return nil, fmt.Errorf("lzx: %w: offset slot out of range", ErrInvalidData)
+					return fmt.Errorf("lzx: %w: offset slot out of range", ErrInvalidData)
 				}
 
 				if length == numPrimaryLens {
 					lsym, ok := lenDec.decode(r)
 					if !ok {
-						return nil, fmt.Errorf("lzx: %w: bad length symbol", ErrInvalidData)
+						return fmt.Errorf("lzx: %w: bad length symbol", ErrInvalidData)
 					}
 					length += int(lsym)
 				}
@@ -116,7 +118,7 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 					if useAligned {
 						asym, ok := alignedDec.decode(r)
 						if !ok {
-							return nil, fmt.Errorf("lzx: %w: bad aligned symbol", ErrInvalidData)
+							return fmt.Errorf("lzx: %w: bad aligned symbol", ErrInvalidData)
 						}
 						offset = (offset << numAlignedOffsetBits) | uint32(asym)
 					}
@@ -127,7 +129,7 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 				recentOffsets[0] = offset
 
 				if err := lzCopy(out, pos, int(offset), length, blockEnd); err != nil {
-					return nil, err
+					return err
 				}
 				pos += length
 			}
@@ -142,10 +144,10 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 			recentOffsets[1] = r.readU32()
 			recentOffsets[2] = r.readU32()
 			if recentOffsets[0] == 0 || recentOffsets[1] == 0 || recentOffsets[2] == 0 {
-				return nil, fmt.Errorf("lzx: %w: zero recent offset in uncompressed block", ErrInvalidData)
+				return fmt.Errorf("lzx: %w: zero recent offset in uncompressed block", ErrInvalidData)
 			}
 			if !r.readBytes(out[pos : pos+blockSize]) {
-				return nil, fmt.Errorf("lzx: %w: truncated uncompressed block", ErrInvalidData)
+				return fmt.Errorf("lzx: %w: truncated uncompressed block", ErrInvalidData)
 			}
 			if blockSize&1 != 0 {
 				r.readByte()
@@ -154,7 +156,7 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 			sawE8Literal = true
 
 		default:
-			return nil, fmt.Errorf("lzx: %w: bad block type %d", ErrInvalidData, blockType)
+			return fmt.Errorf("lzx: %w: bad block type %d", ErrInvalidData, blockType)
 		}
 	}
 
@@ -162,7 +164,7 @@ func decompress(data []byte, expectedSize int) ([]byte, error) {
 		lzxPostprocess(out)
 	}
 
-	return out, nil
+	return nil
 }
 
 // readCodewordLens reads a precode from r, then uses it to decode

@@ -8,21 +8,28 @@ import (
 	"github.com/Pandapip1/gowim/xpress"
 )
 
-// decompressChunk decompresses one chunk's compressed bytes with the codec
-// selected by ctype (one of the HdrFlagCompress* constants), given the
-// chunk's known uncompressed size. All three codecs are pure, WIM-agnostic
-// single-buffer codecs (see their package docs); this is the only place in
-// this package that calls into them for decoding.
-func decompressChunk(ctype CompressionType, data []byte, uncompressedSize int) ([]byte, error) {
+// decompressChunkInto decompresses one chunk's compressed bytes with the
+// codec selected by ctype (one of the HdrFlagCompress* constants) directly
+// into dst, whose length is the chunk's known uncompressed size. All three
+// codecs are pure, WIM-agnostic single-buffer codecs (see their package
+// docs) that decode entirely in terms of offsets relative to the start of
+// their own output buffer (including each codec's internal post-processing
+// filter, which -- like the LZ matching itself -- operates purely on
+// position within that buffer); handing each one this chunk's own
+// sub-slice of the resource's output buffer as dst is therefore equivalent
+// to decoding into a freestanding chunk-sized buffer and copying it into
+// place. This is the only place in this package that calls into them for
+// decoding.
+func decompressChunkInto(dst []byte, ctype CompressionType, data []byte) error {
 	switch ctype {
 	case HdrFlagCompressXPRESS, HdrFlagCompressXPRESS2:
-		return xpress.Decompress(data, uncompressedSize)
+		return xpress.DecompressInto(dst, data)
 	case HdrFlagCompressLZX:
-		return lzx.Decompress(data, uncompressedSize)
+		return lzx.DecompressInto(dst, data)
 	case HdrFlagCompressLZMS:
-		return lzms.Decompress(data, uncompressedSize)
+		return lzms.DecompressInto(dst, data)
 	default:
-		return nil, fmt.Errorf("wim: decompress: unrecognized compression type %#x", ctype)
+		return fmt.Errorf("wim: decompress: unrecognized compression type %#x", ctype)
 	}
 }
 
@@ -82,7 +89,8 @@ func DecodeResourceData(payload []byte, ctype CompressionType, chunkSize uint32,
 		offsets = []uint64{0}
 	}
 
-	out := make([]byte, 0, uncompressedSize)
+	out := make([]byte, uncompressedSize)
+	pos := 0
 	for i := uint64(0); i < numChunks; i++ {
 		start := chunksStart + int(offsets[i])
 		var end int
@@ -96,17 +104,17 @@ func DecodeResourceData(payload []byte, ctype CompressionType, chunkSize uint32,
 		}
 		chunkData := payload[start:end]
 		usize := int(chunkUncompressedSize(i, numChunks, uncompressedSize, chunkSize))
+		dst := out[pos : pos+usize]
+		pos += usize
 
 		if len(chunkData) == usize {
 			// Stored raw: compression did not shrink this chunk.
-			out = append(out, chunkData...)
+			copy(dst, chunkData)
 			continue
 		}
-		dec, err := decompressChunk(ctype, chunkData, usize)
-		if err != nil {
+		if err := decompressChunkInto(dst, ctype, chunkData); err != nil {
 			return nil, fmt.Errorf("wim: decode resource: chunk %d: %w", i, err)
 		}
-		out = append(out, dec...)
 	}
 	return out, nil
 }

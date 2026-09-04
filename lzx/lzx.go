@@ -301,21 +301,36 @@ func CompressWith(data []byte, opts Options) []byte {
 // real WIM/wimlib encoder for a single chunk's compressed bytes), given the
 // exact expected uncompressed size. It returns ErrInvalidData (wrapped) if
 // the compressed data is malformed or inconsistent with expectedSize.
-func Decompress(data []byte, expectedSize int) (out []byte, err error) {
+func Decompress(data []byte, expectedSize int) ([]byte, error) {
 	if expectedSize < 0 {
 		return nil, errors.New("lzx: expectedSize must not be negative")
 	}
 	if expectedSize == 0 {
 		return []byte{}, nil
 	}
+	out := make([]byte, expectedSize)
+	if err := DecompressInto(out, data); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DecompressInto decompresses a single LZX chunk produced by Compress (or by
+// a real WIM/wimlib encoder for a single chunk's compressed bytes) into dst,
+// whose length is the exact expected uncompressed size, instead of
+// allocating a fresh buffer. It returns ErrInvalidData (wrapped) if the
+// compressed data is malformed or inconsistent with len(dst).
+func DecompressInto(dst, data []byte) (err error) {
+	if len(dst) == 0 {
+		return nil
+	}
 	// The hand-rolled bit/Huffman decoding below is careful to bounds-check
 	// on the paths taken by well-formed data, but defend in depth against
 	// any edge case that would otherwise panic on malformed input.
 	defer func() {
 		if r := recover(); r != nil {
-			out = nil
 			err = ErrInvalidData
 		}
 	}()
-	return decompress(data, expectedSize)
+	return decompressInto(dst, data)
 }

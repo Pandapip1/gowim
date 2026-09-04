@@ -13,26 +13,38 @@ func Decompress(data []byte, expectedSize int) ([]byte, error) {
 	if expectedSize < 0 {
 		return nil, fmt.Errorf("xpress: negative expected size %d", expectedSize)
 	}
+	out := make([]byte, expectedSize)
+	if err := DecompressInto(out, data); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DecompressInto decodes data into dst, whose length is the exact expected
+// decompressed size (see Decompress), instead of allocating a fresh buffer.
+func DecompressInto(dst, data []byte) error {
+	expectedSize := len(dst)
 	if expectedSize == 0 {
-		return []byte{}, nil
+		return nil
 	}
 	if len(data) < huffmanHeaderSize {
-		return nil, fmt.Errorf("xpress: compressed data too short: need at least %d bytes for the Huffman header, have %d", huffmanHeaderSize, len(data))
+		return fmt.Errorf("xpress: compressed data too short: need at least %d bytes for the Huffman header, have %d", huffmanHeaderSize, len(data))
 	}
 
 	lens := unpackHuffmanLengths(data[:huffmanHeaderSize])
 	dec := buildHuffmanDecoder(lens)
 
 	r := newBitReader(data[huffmanHeaderSize:])
-	out := make([]byte, 0, expectedSize)
+	pos := 0
 
-	for len(out) < expectedSize {
+	for pos < expectedSize {
 		sym, ok := dec.decode(r)
 		if !ok {
-			return nil, fmt.Errorf("xpress: invalid Huffman codeword at output offset %d", len(out))
+			return fmt.Errorf("xpress: invalid Huffman codeword at output offset %d", pos)
 		}
 		if sym < numChars {
-			out = append(out, byte(sym))
+			dst[pos] = byte(sym)
+			pos++
 			continue
 		}
 
@@ -51,21 +63,38 @@ func Decompress(data []byte, expectedSize int) ([]byte, error) {
 		}
 		length += minMatchLen
 
-		if offset <= 0 || offset > len(out) {
-			return nil, fmt.Errorf("xpress: match offset %d invalid at output offset %d", offset, len(out))
+		if offset <= 0 || offset > pos {
+			return fmt.Errorf("xpress: match offset %d invalid at output offset %d", offset, pos)
 		}
-		remaining := expectedSize - len(out)
+		remaining := expectedSize - pos
 		if length > remaining {
 			// A conforming encoder never emits a match that overruns
 			// expectedSize; if this happens the compressed data is
 			// inconsistent with expectedSize.
-			return nil, fmt.Errorf("xpress: match length %d overruns expected size %d at output offset %d", length, expectedSize, len(out))
+			return fmt.Errorf("xpress: match length %d overruns expected size %d at output offset %d", length, expectedSize, pos)
 		}
-		src := len(out) - offset
-		for k := 0; k < length; k++ {
-			out = append(out, out[src+k])
-		}
+		xpressCopy(dst, pos, offset, length)
+		pos += length
 	}
 
-	return out, nil
+	return nil
+}
+
+// xpressCopy performs an LZ77 match copy of length bytes from
+// dst[pos-offset:] to dst[pos:]. It applies the same disjoint-vs-overlapping
+// fast path as lzx's lzCopy (see lzx/decode.go): when offset >= length the
+// source and destination ranges are disjoint, so a bulk copy (vectorized by
+// the runtime) produces the same bytes as the byte-by-byte loop, just
+// faster; when offset < length the ranges overlap (an RLE-style
+// self-referential repeat) and each byte's source may itself have just been
+// written by this same copy, so it must proceed one byte at a time.
+func xpressCopy(dst []byte, pos, offset, length int) {
+	src := pos - offset
+	if offset >= length {
+		copy(dst[pos:pos+length], dst[src:src+length])
+		return
+	}
+	for k := 0; k < length; k++ {
+		dst[pos+k] = dst[src+k]
+	}
 }
