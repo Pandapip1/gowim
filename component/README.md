@@ -130,6 +130,22 @@ name longer than 25 characters is a hard error rather than a guess.
 - **No live confirmation.** Nothing here has been proven by installing a
   component into a running Windows. Every claim above is from offline
   measurement, disassembly, or documentation.
+  **Update (2026-09-14):** `install_openssh_test.go`'s
+  `TestInstall_RealOpenSSHCapability` closes part of this gap: it installs
+  the real, genuine `OpenSSH.Server` Capability payload (real `sshd.exe`,
+  `ssh-keygen.exe`, etc. and their real, PA30-decoded manifests, extracted
+  from a real, live-downloaded `OpenSSH-Server-Package-amd64.cab` via the
+  new sibling `cab` package -- see that test's doc comment for full
+  provenance) with `Serviceability: BuildOnce`, and checks the resulting
+  file placement byte-for-byte. This proves `Install`'s file-placement logic
+  against real Microsoft-shipped bytes, including a real 1.3 MB PE binary
+  and a real component manifest -- not just this package's smaller
+  `plain_common_controls.manifest` fixture. It does **not** prove the
+  component actually runs under a booted Windows (still unverified; that
+  would need a real boot test, e.g. via `gowim/iso` + a real VM), and it
+  deliberately does not call `InstallRegistry` (`BuildOnce` doesn't need
+  it) -- so the `COMPONENTS`/`SOFTWARE`-hive claims below remain unverified
+  against a running system either way.
 - `Install` and `Remove` are not exact inverses: `Remove` works from a
   parsed `Entry` and so removes the manifest, the WinSxS payload directory,
   and a package's `.mum`+`.cat`, but not the `WinSxS\Catalogs` copy nor

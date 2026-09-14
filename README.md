@@ -20,6 +20,9 @@ module's own README for its precise scope and non-goals.
 | [`driver/`](driver/README.md) | ties `inf`+`cat`+`pe`+`wim` together: load a driver package, verify its files against its catalog, and build the WIM-side tree/blob additions to install it | done |
 | [`regf/`](regf/README.md) | Windows Registry hive (regf) files: base block, hive bins, key/value/security cells | done |
 | [`service/`](service/README.md) | generic (INF-independent) Windows service registry-registration schema: model a service and merge it into a `regf.Key` tree | done |
+| [`wufetch/`](wufetch/README.md) | locate and download a Windows Capability's (Feature on Demand) real installable payload from Microsoft's servers, with no Windows Update Agent | done for `OpenSSH.Server`/`OpenSSH.Client`; extensible |
+| [`fido/`](fido/README.md) | locate official Microsoft Windows retail ISO download links (a Go port of [Fido](https://github.com/pbatard/Fido)'s request flow) | done |
+| [`cab/`](cab/README.md) | Microsoft Cabinet (`.cab`) files: CFHEADER/CFFOLDER/CFFILE/CFDATA container plus a CAB-flavor LZX decoder, for extracting a `wufetch`-downloaded Capability's payload | done (stored + LZX; no MSZIP/Quantum) |
 
 These support installing `.inf`/`.cat`/`.sys` driver packages into WIM images
 — `inf`, `cat`, and `pe` handle the three file formats that make up a driver
@@ -54,8 +57,8 @@ dependency set.
 This is a multi-module workspace. From the repo root:
 
 ```
-go build ./wim/... ./inf/... ./cat/... ./pe/... ./driver/... ./regf/... ./service/...
-go test  ./wim/... ./inf/... ./cat/... ./pe/... ./driver/... ./regf/... ./service/...
+go build ./wim/... ./inf/... ./cat/... ./pe/... ./driver/... ./regf/... ./service/... ./fido/...
+go test  ./wim/... ./inf/... ./cat/... ./pe/... ./driver/... ./regf/... ./service/... ./fido/...
 ```
 
 (Plain `./...` doesn't resolve from the workspace root since it isn't itself

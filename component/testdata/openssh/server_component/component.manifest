@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0" copyright="Copyright (c) Microsoft Corporation. All Rights Reserved.">
+  <assemblyIdentity name="OpenSSH-Server-Components-Onecore" version="10.0.26100.1" processorArchitecture="amd64" language="neutral" buildType="release" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS" />
+  <migration scope="Upgrade" settingsVersion="1">
+    <migXml xmlns="">
+      <rules context="System">
+        <include>
+          <objectSet>
+            <pattern type="Registry">HKLM\SYSTEM\CurrentControlSet\Services\sshd [Start]</pattern>
+          </objectSet>
+        </include>
+      </rules>
+    </migXml>
+    <supportedComponents>
+      <supportedComponent>
+        <assemblyIdentity name="_" version="1.0.0.0" />
+        <supportedComponentIdentity language="neutral" name="OpenSSH-Server-Components-Onecore" processorArchitecture="*" settingsVersionRange="1" xmlns="urn:schemas-microsoft-com:asm.v3" />
+      </supportedComponent>
+    </supportedComponents>
+  </migration>
+  <file name="sftp-server.exe" destinationPath="$(runtime.System32)\OpenSSH\" sourceName="sftp-server.exe" importPath="$(build.nttree)\openssh\" sourcePath=".\">
+    <securityDescriptor name="WRP_FILE_DEFAULT_SDDL" />
+    <asmv2:hash xmlns:asmv2="urn:schemas-microsoft-com:asm.v2" xmlns:dsig="http://www.w3.org/2000/09/xmldsig#">
+      <dsig:Transforms>
+        <dsig:Transform Algorithm="urn:schemas-microsoft-com:HashTransforms.Identity" />
+      </dsig:Transforms>
+      <dsig:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha256" />
+      <dsig:DigestValue>ixOKu3z3vU91bicQE3tPZFuCKKuXWUuLBgQJIRI4TNU=</dsig:DigestValue>
+    </asmv2:hash>
+  </file>
+  <file name="sshd.exe" destinationPath="$(runtime.System32)\OpenSSH\" sourceName="sshd.exe" importPath="$(build.nttree)\openssh\" sourcePath=".\">
+    <securityDescriptor name="WRP_FILE_DEFAULT_SDDL" />
+    <asmv2:hash xmlns:asmv2="urn:schemas-microsoft-com:asm.v2" xmlns:dsig="http://www.w3.org/2000/09/xmldsig#">
+      <dsig:Transforms>
+        <dsig:Transform Algorithm="urn:schemas-microsoft-com:HashTransforms.Identity" />
+      </dsig:Transforms>
+      <dsig:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha256" />
+      <dsig:DigestValue>EP3egjnKvxBVwEntTFMSim9I2FZMwG0m9qQGRQ4zNL4=</dsig:DigestValue>
+    </asmv2:hash>
+  </file>
+  <file name="ssh-shellhost.exe" destinationPath="$(runtime.System32)\OpenSSH\" sourceName="ssh-shellhost.exe" importPath="$(build.nttree)\openssh\" sourcePath=".\">
+    <securityDescriptor name="WRP_FILE_DEFAULT_SDDL" />
+    <asmv2:hash xmlns:asmv2="urn:schemas-microsoft-com:asm.v2" xmlns:dsig="http://www.w3.org/2000/09/xmldsig#">
+      <dsig:Transforms>
+        <dsig:Transform Algorithm="urn:schemas-microsoft-com:HashTransforms.Identity" />
+      </dsig:Transforms>
+      <dsig:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha256" />
+      <dsig:DigestValue>14sfYd5rIhN/l+CVe3HM66ejNnXThTzcQrBwrQ69ht4=</dsig:DigestValue>
+    </asmv2:hash>
+  </file>
+  <file name="sshd_config_default" destinationPath="$(runtime.System32)\OpenSSH\" sourceName="sshd_config_default" importPath="$(build.nttree)\openssh\" sourcePath=".\">
+    <securityDescriptor name="WRP_FILE_DEFAULT_SDDL" />
+    <asmv2:hash xmlns:asmv2="urn:schemas-microsoft-com:asm.v2" xmlns:dsig="http://www.w3.org/2000/09/xmldsig#">
+      <dsig:Transforms>
+        <dsig:Transform Algorithm="urn:schemas-microsoft-com:HashTransforms.Identity" />
+      </dsig:Transforms>
+      <dsig:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha256" />
+      <dsig:DigestValue>mfNzoG36cG8KipjWVcd2hQMFtLHqO/mjP6kmiXuxVkk=</dsig:DigestValue>
+    </asmv2:hash>
+  </file>
+  <file name="moduli" destinationPath="$(runtime.System32)\OpenSSH\" sourceName="moduli" importPath="$(build.nttree)\openssh\" sourcePath=".\">
+    <securityDescriptor name="WRP_FILE_DEFAULT_SDDL" />
+    <asmv2:hash xmlns:asmv2="urn:schemas-microsoft-com:asm.v2" xmlns:dsig="http://www.w3.org/2000/09/xmldsig#">
+      <dsig:Transforms>
+        <dsig:Transform Algorithm="urn:schemas-microsoft-com:HashTransforms.Identity" />
+      </dsig:Transforms>
+      <dsig:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha256" />
+      <dsig:DigestValue>zBKuvj+0GgkuU89B3QUCnluT8zbWe1+UGmEy5UQP3Mg=</dsig:DigestValue>
+    </asmv2:hash>
+  </file>
+  <memberships>
+    <categoryMembership>
+      <id name="Microsoft.Windows.Categories.Services" version="10.0.26100.1" publicKeyToken="31bf3856ad364e35" typeName="Service" />
+      <categoryInstance subcategory="SSHD">
+        <serviceData name="sshd" displayName="OpenSSH SSH Server" errorControl="normal" start="demand" type="win32OwnProcess" description="SSH protocol based service to provide secure encrypted communications between two untrusted hosts over an insecure network." imagePath="%SystemRoot%\System32\OpenSSH\sshd.exe" objectName="LocalSystem" requiredPrivileges="SeAssignPrimaryTokenPrivilege,SeTcbPrivilege,SeBackupPrivilege,SeRestorePrivilege,SeImpersonatePrivilege" />
+      </categoryInstance>
+    </categoryMembership>
+  </memberships>
+  <firewallRule action="allow" active="true" binary="%SystemRoot%\system32\OpenSSH\sshd.exe" desc="Inbound rule for OpenSSH SSH Server (sshd)" dir="in" group="OpenSSH Server" internalName="OpenSSH-Server-In-TCP" lport="22" name="OpenSSH SSH Server (sshd)" profile="Private" protocol="TCP" />
+  <registryKeys>
+    <registryKey keyName="HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\sshd">
+      <overridable name="ImagePath" scope="Microsoft" type="REG_EXPAND_SZ" />
+      <overridable name="start" scope="Microsoft" type="REG_DWORD" />
+    </registryKey>
+  </registryKeys>
+  <trustInfo>
+    <security>
+      <accessControl>
+        <securityDescriptorDefinitions>
+          <securityDescriptorDefinition name="WRP_FILE_DEFAULT_SDDL" sddl="O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:P(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;GRGX;;;BA)(A;;GRGX;;;SY)(A;;GRGX;;;BU)(A;;GRGX;;;S-1-15-2-1)(A;;GRGX;;;S-1-15-2-2)S:(AU;FASA;0x000D0116;;;WD)" operationHint="replace" description="Default SDDL for Windows Resource Protected file" />
+        </securityDescriptorDefinitions>
+      </accessControl>
+    </security>
+  </trustInfo>
+</assembly>
